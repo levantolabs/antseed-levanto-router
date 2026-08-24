@@ -1,107 +1,81 @@
 # Model Routing on AntSeed — Architecture and Open Decisions
 
-**Status:** Draft for discussion between AntSeed and Levanto
-**Date:** August 2026
-**Scope:** Integrating the Levanto router into AntSeed as (a) a **buyer-side routing plugin** built on the existing plugin system, which (b) calls a **routing peer** — a new peer role that Levanto would be the first of.
+**Status:** Draft. Sections A–C resolved 24 Aug 2026; sections D–F still open.
+**Scope:** Integrating the Levanto router into AntSeed as **two new plugins** — a client-side routing plugin that consumes a routing service, and a server-side plugin that offers one — communicating over a new **routing peer** capability that Levanto would be the first of.
 
 **Sources studied**
 
 | Repo / branch | Role |
 |---|---|
 | `antseed-levanto-router` @ `main` | AntSeed monorepo — the host |
-| `levantolabs/levanto-router-proxy` @ `master` | **Working reference implementation of the buyer-side router.** Live AntSeed prices, per-peer candidates, cache model, ranked failover, full audit log |
-| `levantolabs/sage_model_router` @ `rank-from-precomputed-vector` | **The production router library.** Dynamic pricing, ranked output, price-free training |
-| `levantolabs/sage_model_router` @ `main` | Older; superseded — do not use as the reference |
+| `levantolabs/levanto-router-proxy` @ `master` | Working reference implementation of the buyer-side router |
+| `levantolabs/sage_model_router` @ `rank-from-precomputed-vector` | The production router library |
 
 ---
 
 ## 0. How to read this document
 
-Sections 1–4 describe the target architecture and — importantly — **what is already built**. The router-proxy repo turned out to implement most of the hard parts already, so this document is much less "design a system" and much more "decide where existing pieces go".
+Sections 1–4 describe the architecture as now decided. Section 4 is a substantial rewrite: the answers to `D3`, `D4`, `D11`, `D21` and `D27` moved almost everything to the routing peer and left a deliberately thin client.
 
-Section 5 is the point of the document: **51 open decisions**, grouped by domain, each with options and trade-offs, labelled `D<n>`, marked **Blocking?** and with an **Owner**. Leans are marked as leans.
+Section 5 is the decision ledger. **5.0** is a status table for all 51 decisions. **5.1** covers resolved decisions whose consequences are worth writing down. **5.2** covers the five that were sent back for more work. **5.3** covers four issues the answers newly created — including one that conflicts with a stated product goal, and one you flagged yourself. **5.4** is sections D–F, still open.
 
-Sections 6–9 cover unit economics, risks, phasing, and the short list for AntSeed.
+Sections 6–9 cover economics, risks, phasing, and what we still need from AntSeed.
 
 ---
 
 ## 1. Summary
 
-### The proposal
+### The shape, as decided
 
-AntSeed gains a **buyer-side routing plugin** — built on the existing plugin system with the smallest possible change — that picks the model for each request. To do that it calls out to a **routing peer**, a new peer role offering model-ranking rather than inference. Levanto operates the first routing peer, powered by Sage, billed at $9/month/user through AntSeed's payment system. The plugin, the peer protocol, and the savings dashboard are router-neutral, so anyone can ship a competing routing peer.
+Two plugins and one new peer role:
 
-Why the split is right: the parts that must be buyer-side genuinely must be buyer-side. **Live per-peer prices, prompt-cache warmth, failover, and billing reconciliation all depend on what *this* buyer has sent to *which* seller and what it was actually billed.** A remote service cannot know that. The parts that should be remote — the Sage model, the trained heads, the model catalogue — are the parts that need to be updated centrally without shipping an app release.
+- **`routing-client` plugin** (TypeScript, runs in the buyer). Holds the CQT dial, the conversation's cache-warmth state, the failover walk, and the final say on local policy. Sends a small request to the routing peer per turn.
+- **`routing-server` plugin** (TypeScript shell around a Python sidecar, runs on the routing peer). Runs its own AntSeed node for global peer and price discovery, recalibrates λ globally every N minutes, calls Sage, ranks `(model, peer)` tuples, and keeps the ledger.
+- **`routing` capability** on the DHT, so routing peers are discoverable like any other peer and a third party can ship a competing one.
 
-### What is already built (the big correction)
+The division follows a clean rule: **anything global goes on the peer; anything about *this user's* conversation stays on the client.** Prices, λ, the model catalogue, and — as it turns out — cache *recall* are all global. The CQT setting and which prefixes this user has sent to which seller are not.
 
-I initially assessed the `main` branch of `sage_model_router` and concluded that dynamic pricing, cached-input math, ranked output, and multi-turn handling were all missing. **On the production branch plus the router-proxy, most of that is built.**
+### What is already built
 
-| Capability | Status | Where |
-|---|---|---|
-| **Live dynamic AntSeed prices** | **Built** | `PriceWatcher` polls every 60s; `PriceBook` injected via `set_prices()`; λ re-bisected in ~105 ms on every price change |
-| **Per-peer pricing (model–peer–price tuples)** | **Built** | `peer_offers()` + `build_alias_plan()` → `model@peer` alias keys with their own rates |
-| **Ranked list output** | **Built** | `rank_candidates_from_vector()` returns every `(model, seller)` scored and sorted |
-| **Precomputed Sage vector input** | **Built** | Caller owns the Sage call; router ranks from the vector |
-| **Price-independent training** | **Built** | Ridge predicts *completion tokens*; price multiplies at serve time (`train_pricefree.py`) |
-| **Dynamic hull recomputation** | **Built, default off** | `_live_hull()` re-prunes when prices move; `prune=False` by default |
-| **Failover / escalation** | **Built** | Ranked walk with `Sinbin` demotion (90 s fast-fail, 600 s hang), persisted |
-| **Multi-turn conversation** | **Built (proxy side)** | Full `messages` forwarded; `ctx_tokens` across all messages + tool schemas; prefix-hash conversation threading |
-| **Cached-input cost math** | **Built but NOT WIRED** | `cache_model.py` is complete and empirically calibrated — see below |
-| **Audit ledger** | **Built** | 14-table SQLite: `request`, `candidate`, `attempt`, `sage_call`, `price_change`, `sinbin`, … |
+Most of the hard parts exist. The `rank-from-precomputed-vector` branch plus the router-proxy already deliver live dynamic per-peer pricing (`PriceWatcher` polls every 60 s, λ re-bisected in ~105 ms on any price change), ranked `(model, peer)` output, precomputed-vector input, price-independent training, failover with sinbin demotion, multi-turn conversation handling, and a 14-table audit ledger.
 
-### The one thing genuinely missing: cached-input math in the ranking
+### What is not
 
-`cache_model.py` is a serious piece of work — per-(model, peer) prefix-hash warmth tracking, learned recall per age bracket `(30, 120, 600, 1200, 2400)` seconds, an additive per-seller token offset (measured: Fire Ant bills +1757/+1750/+1742 tokens flat, so a *ratio* would be wrong), and a 1024-token minimum cacheable floor found by bisection. It exposes exactly the right function:
+**The cached-input math is built but not wired.** `cache_model.py` is a serious, empirically-calibrated piece of work — prefix-hash warmth per `(model, peer)`, recall learned per age bracket, an *additive* per-seller token offset, a 1024-token cacheable floor found by bisection. It exposes exactly the right function:
 
 ```python
 def effective_in(self, prefixes, quote) -> float:
-    """Blended input price for one offer, given what we expect to be cached."""
     hit = self.hit_rate(prefixes, quote.model, quote.peer)
     return quote.price_in * (1 - hit) + quote.cached_in * hit
 ```
 
-**`effective_in` is never called anywhere.** The cache model runs *after* routing, for prediction logging and billing reconciliation only. The ranking call is:
+**`effective_in` is never called.** It runs after routing, for logging and billing reconciliation only. The ranking call passes one scalar `ctx_tokens`, and `PriceBook` carries no cached rate. So the router ranks as though every candidate were a cold cache, systematically under-valuing whichever seller already holds the conversation prefix — precisely backwards for agentic loops, where the prompt is mostly a growing shared prefix and cache reads are typically ~10× cheaper than fresh input. `D18` has the wiring plan.
 
-```python
-cands = router.rank_candidates_from_vector(sr.vector, cqt, input_tokens=ctx_tokens)
-```
+The good news from your `D11` answer: moving recall learning to the peer makes it **global across all users**, which is strictly better than the per-user learning the proxy does today and largely dissolves the cold-start problem I raised. See `5.1 / D18`.
 
-— a single scalar token count, and `PriceBook` carries only `(price_in, price_out)` with no cached rate. So the router ranks as though every candidate were a cold cache, which **systematically under-values whichever seller already holds the conversation prefix** — exactly the seller you want to stick to in a multi-turn chat or an agentic loop. `tools/score_cache_predictions.py` even notes that effective input price error "is what a ranking would consume", so the intent was there.
+### What still decides viability
 
-This matters more than it sounds. In an agentic coding loop the prompt is mostly a growing shared prefix, cache-read rates are typically ~10× cheaper than fresh input, and the router is currently blind to all of it. Wiring it is the highest-value, best-specified piece of work in the project — see `D18` for the concrete change list.
+Sections D–F are unanswered, and they contain the three things that decide whether this ships as described:
 
-### The three things that still decide viability
+1. **Evidence for the savings claim** (`D28`–`D31`). Levanto's own proxy README says the shipped-adjacent `artifact_live9` measures **routing skill ≈ 0** on its Tier-1 slice against +2.84 pp on the 8-dataset archive mix, and is "unproven until retrained on something broader". LODO mean AUC is **0.5243**. AntSeed's traffic is chat and coding agents. **"Save 40%" is not currently supported for AntSeed's workload mix.**
+2. **Subscriptions do not exist in AntSeed** (`D35`–`D39`). `AntseedSubPool` was removed; the CHANGELOG records it.
+3. **$9/month needs a user spending >$22.50/month** at 40% realised savings to break even (`D39`). We still do not know AntSeed's spend distribution.
 
-1. **Evidence for the savings claim** (`D28`–`D31`). Unchanged and, if anything, reinforced by Levanto's own README: the shipped `artifact_live9` measures **routing skill ≈ 0** on its Tier-1 slice, against +2.84 pp on the 8-dataset archive mix, and is described as out of distribution on anything else — which is why `artifact_live8_pf` ships instead. Leave-one-dataset-out mean AUC is **0.5243**. AntSeed's traffic is chat and coding agents. **"Save 40%" is not currently supported for AntSeed's workload mix.**
-
-2. **Privacy** (`D22`–`D26`). Routing sends conversation content to `sage.levanto.ai`, in a client called the **Virtual Private Router**. Mitigated somewhat by `prompt_trim` (head+tail to 4096 tokens, sent last-user-turn-only), but the exposure is real.
-
-3. **Subscriptions do not exist in AntSeed** (`D35`–`D38`). `AntseedSubPool` was removed; the CHANGELOG records it. Everything is per-request cumulative `SpendingAuth`.
-
-And one new one, which is a genuine architectural fork:
-
-4. **Streaming versus failover** (`D19`). The proxy sends `stream: false` and buffers, because you cannot walk to the next candidate after you have already streamed half an answer to the client. AntSeed's transport *does* support streaming (`handleRequestStream`, `HttpResponseChunk` frames). Losing streaming in the VPR chat UI would be a very visible regression.
+And one conflict the answers created: **`D27` puts the savings ledger on Levanto's server, which breaks the neutral-dashboard goal.** See `5.3 / N1` for a dual-write proposal that gets you the data without that cost.
 
 ---
 
 ## 2. Goals and non-goals
 
-### Goals
-
 | # | Goal | How we will know |
 |---|---|---|
-| G1 | A great model router for AntSeed users | Measured savings at matched quality on **AntSeed's real traffic**, not benchmarks |
-| G2 | Feels like a feature, not a product | One toggle and one dial inside VPR; no new accounts, keys, or installs |
-| G3 | Open | A third party ships a competing routing peer from public docs, and appears in the same picker |
-| G4 | Levanto builds the reusable commons | Plugin, peer protocol, ledger, dashboard live in AntSeed packages under AntSeed's licence |
-| G5 | Sustainable for Levanto | Subscription plus grant covers R&D, catalogue maintenance, commons engineering |
+| G1 | A great model router for AntSeed users | Measured savings at matched quality on **AntSeed's real traffic** |
+| G2 | Feels like a feature, not a product | One toggle and one dial in VPR; no new accounts or installs |
+| G3 | Open | A third party ships a competing routing peer from public docs |
+| G4 | Levanto builds the reusable commons | Client plugin, peer protocol, ledger, dashboard live in AntSeed packages |
+| G5 | Sustainable for Levanto | Subscription plus grant covers R&D, catalogue, commons |
 
-### Non-goals for v1
-
-- Networks other than AntSeed; modalities other than text
-- Ensembling, cascading, retry-on-low-confidence
-- Replacing peer selection wholesale — though note `D8`, because the router **does** rank per-peer today and that overlaps with `rankModelRoutes()`
+**Non-goals for v1:** other networks; non-text modalities; ensembling or cascading.
 
 ---
 
@@ -109,657 +83,492 @@ And one new one, which is a genuine architectural fork:
 
 ### 3.1 AntSeed — the relevant seams
 
-**Plugin system.** Types are `'provider' | 'router' | 'verifier' | 'prover'`. Critically, there is already a **duck-typed optional-extension pattern** on the existing `Router` interface, used in production:
+**Plugin system.** Types are `'provider' | 'router' | 'verifier' | 'prover'`. Per `D1` we add two more rather than extending the existing `Router`.
 
-```ts
-type BuyerPolicyRouter = Router & {
-  allowsPeerForPolicy?: (req: SerializedHttpRequest, peer: PeerInfo) => boolean
-  allowsPeerForPricing?: (req: SerializedHttpRequest, peer: PeerInfo) => boolean
-}
-```
+**What the existing `router-local` plugin actually contains** (this matters for `D8`, and the answer is reassuring):
 
-`peerAllowedByPolicy()` probes for those methods and falls back when absent. **This is the minimal-change path for a routing plugin** — see `D1`.
+| Piece | Where it lives | Reachable without the plugin? |
+|---|---|---|
+| `PeerMetricsTracker`, `computeFailureCooldownMs` | `packages/router-core/src/peer-metrics.ts` — **exported** | **Yes**, plain import |
+| `scoreCandidates`, `DEFAULT_WEIGHTS` | `packages/router-core/src/peer-scorer.ts` — **exported** | **Yes** |
+| `buildNetworkServiceOffers` | `packages/node/src/discovery/service-catalog.ts` | **Yes** |
+| `rankModelRoutes`, `chooseBestModelRoute` | `packages/node/src/routing/model-route-ranking.ts` | **Yes** |
+| `selectCandidatePeersForRouting`, `resolvePeerRoutePlan` | `apps/cli/src/proxy/routing.ts` | **No — app code, not a package** |
+| Buyer proxy's own peer-health state | `apps/cli/src/proxy/buyer-proxy.ts` | Internal to the proxy |
+| `LocalRouter.selectPeer()` | the plugin | **Dead in production** — the CLI never calls it |
+| `allowsPeerForPolicy` / `allowsPeerForPricing` | the plugin | Thin wrappers: reputation floor + max-price config |
+| `onResult` | the plugin | Forwards to its own `PeerMetricsTracker` |
 
-**Discovery.** Sellers announce subnet, wildcard, peer, and one capability topic per `PeerOffering`. Buyers filter on signed metadata. `ProviderCapability` is a closed union with no `'routing'` member.
+So the plugin holds a reputation gate, a price gate, and a *second, private* metrics tracker. Everything valuable is elsewhere and importable.
 
-**Wire protocol.** HTTP-over-P2P (`SerializedHttpRequest`, frames `0x20`/`0x21`, streaming `0x22`/`0x23`). Two paths bypass provider matching and payment: `GET /v1/models` and `POST /_antseed/attest/{verifierId}` — the precedent for a routing RPC.
+**Discovery.** Sellers announce subnet, wildcard, peer, and one capability topic per `PeerOffering`. `ProviderCapability` is a closed union with no `'routing'` member — additive change.
 
-**Model selection today.** The client sends `model`; the proxy canonicalises it and ranks *peers* via `rankModelRoutes()` against `ModelRoutingPreferences`. **No hook asks anything which model to use.**
+**Wire protocol.** HTTP-over-P2P (`SerializedHttpRequest`, frames `0x20`/`0x21`, streaming `0x22`/`0x23`). `POST /_antseed/attest/{verifierId}` is the precedent for a non-inference RPC.
 
-**Payments.** Cumulative channels; `computeCostUsdc` *does* handle `cachedInputUsdPerMillion`; buyer re-verifies against a 1.4× tolerance; 2% platform fee.
+**Payments.** Cumulative channels; `computeCostUsdc` handles `cachedInputUsdPerMillion`; buyer re-verifies against a 1.4× tolerance; 2% platform fee.
 
-**Metering.** `metering_events` lacks model name and cached split. `payment_channel_service_totals` has `service_id`, cumulative amount, and fresh/cached/output tokens — but cumulative only, no per-request rows, **no price snapshot**.
+**Savings UI — already shipped.** `computeMeasuredSavings` compares actual USDC against retail re-pricing, in VPR Home, VPR Activity, and `antseed buyer activity`. **It reads local data.**
 
-**Savings UI — already shipped.** `computeMeasuredSavings` compares actual USDC against retail re-pricing, in VPR Home, VPR Activity, and `antseed buyer activity`.
+### 3.2 The Levanto router-proxy
 
-**Price history.** None network-side.
+A standalone Python service that already implements the whole buyer-side loop: tokenize (tools counted, `tokens_version=2`) → trim to 4096 → Sage → rank against a live `PriceBook` → filter purchasable → sinbin demotion → walk the ranked list with `x-antseed-pin-peer` → bill at the seller actually used → observe cache warmth → log everything.
 
-### 3.2 The Levanto router-proxy — a working buyer-side router
+Engineering decisions worth keeping: provider and prices switch together ("never route on one market, bill through another"); bill at the seller actually used, not the cheapest; recall deliberately **not** seeded from history (scoring a hit against the whole prompt read as 46% recall where direct measurement showed 99%); warmth keyed on **prefix, not conversation id** (a conversation id derived from its own history changes every turn and predicted cold on 16 of 17 turns that were in fact warm).
 
-This is the important discovery. `levanto-router-proxy` is a standalone Python HTTP service that already does, end to end, what the routing plugin needs to do:
+Stated limitations: no streaming; Sage on every request (~$0.0006 floor); no unit tests outside dashboard tools.
 
-```
-OpenAI / Anthropic / Responses request
-  → tokenize (tools + tool_calls counted, tokens_version=2)
-  → prompt_trim head+tail to 4096 tok → Sage /decide/batch → 30-dim vector
-      (SageCache LRU 256 convs dedups agentic loops)
-  → rank_candidates_from_vector(vector, cqt, input_tokens=ctx_tokens)
-      against a live PriceBook refreshed every 60s
-  → filter purchasable, apply Sinbin demotion, log all candidates
-  → walk the ranked list: POST localhost:8377/v1/chat/completions
-      with x-antseed-pin-peer: <peerId>
-      on timeout/refusal → sinbin the pair, continue to next candidate
-  → bill at the seller actually used (rate_for(model, peer)), not the cheapest
-  → observe cache warmth, log request/candidates/attempts/response
-```
-
-Notable engineering decisions already made and worth keeping:
-
-- **Provider and prices switch together** — "never route on one market, bill through another"
-- **Bill at the seller actually used**, not the cheapest quote
-- **Recall is not seeded from history** — a historic row has no prefix, so scoring a hit against the whole prompt reads as a much worse cache than reality (measured: 46% vs a true 99%)
-- **Warmth keyed on prefix, not conversation id** — a conversation id derived from its own history changes every turn and predicted cold on 16 of 17 turns that were in fact warm
-- **Trim below the Sage cliff** — Sage answers all ten questions to ~26k tokens and none above ~28k, where `vectorize` silently fills neutral priors
-
-Known limitations stated in the repo: no streaming; Sage called on every request (~$0.0006 floor); no unit tests outside dashboard tools; and a discrepancy where the README says a per-request `cqt` is honoured but `proxy.py` deliberately ignores it so "a client's model string cannot quietly change what we spend".
-
-**Two dependencies that are not production-grade:** prices are read from `~/.antseed/buyer.state.json` — a private file whose format is not a supported API (`D14`) — and the artifact (`artifact_live8_pf.joblib`, 3 MB) is loaded **in-process on the client**, meaning today's architecture has no routing peer at all: only Sage is remote (`D4`).
-
-### 3.3 Gap analysis
-
-| Capability | AntSeed | Levanto stack | Net-new work |
-|---|---|---|---|
-| Routing plugin hook | ✗ | n/a | **AntSeed — small** (optional method, `D1`) |
-| `routing` capability + peer RPC | ✗ | ✗ | AntSeed protocol — small/medium |
-| Live per-peer prices into routing | ✓ source | ✓ **built** | Replace file-read with supported API (`D14`) |
-| Ranked (model, peer) output | n/a | ✓ **built** | — |
-| Failover / sinbin | partial | ✓ **built** | Reconcile with `rankModelRoutes()` (`D8`) |
-| Multi-turn conversation | n/a | ✓ **built** | — |
-| **Cached-input math in ranking** | ✓ in billing | **built, unwired** | **Levanto — small, high value (`D18`)** |
-| Per-request ledger + price snapshot | ✗ | ✓ **built** (SQLite) | Port to AntSeed storage |
-| Counterfactual baseline | ✗ | partial (`Board.at(ts)`) | Joint — medium |
-| Retail-baseline savings UI | ✓ **shipped** | n/a | Extend only |
-| Streaming with failover | ✓ transport | ✗ | **Joint — unsolved (`D19`)** |
-| Python router in a Node plugin | n/a | n/a | **Joint — architectural (`D3`)** |
-| Subscription billing | ✗ removed | n/a | AntSeed — large, or avoid |
-| Entitlements | ✗ | n/a | AntSeed — medium |
+Two dependencies that do not survive this design: prices read from `~/.antseed/buyer.state.json` (a private format — removed by `D11`), and the artifact loaded **in-process on the client** (removed by `D4`).
 
 ---
 
-## 4. Proposed architecture
+## 4. Architecture
 
 ### 4.1 Component map
 
 ```
-┌────────────────────────────────────────────────────────────────────────────┐
-│ BUYER  (VPR / CLI)                                                         │
-│                                                                            │
-│  buyer-proxy ──probes──► Router plugin                                     │
-│                            · allowsPeerForPolicy?()      ← exists today    │
-│                            · allowsPeerForPricing?()     ← exists today    │
-│                            · rankModels?()               ← NEW, optional   │
-│                                    │                                       │
-│  ┌─────────────────────────────────▼──────────────────────────────────┐   │
-│  │ @antseed/router-routing  (router-neutral, AntSeed-owned)           │   │
-│  │  · assembles candidates: purchasable (model, peer, live prices)    │   │
-│  │  · CacheModel: prefix warmth + learned recall per (model, peer)    │   │
-│  │  · calls the selected routing peer; timeout → fall back            │   │
-│  │  · walks the ranked list, sinbin on failure                        │   │
-│  │  · writes routing_decisions with the price snapshot                │   │
-│  └────────────────────────────────────────────────────────────────────┘   │
-│                    │                                    │                  │
-│                    │ /_antseed/route                    │ inference        │
-└────────────────────┼────────────────────────────────────┼──────────────────┘
-                     ▼                                    ▼
-        ┌──────────────────────────┐         ┌──────────────────────────┐
-        │ ROUTING PEER   ← NEW     │         │ PROVIDER PEER (existing) │
-        │ capability: "routing"    │         │ capability: "inference"  │
-        │ Sage + heads + hull + λ  │         └──────────────────────────┘
-        │ Levanto is the first     │
-        └──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│ BUYER (VPR / CLI)                                                       │
+│                                                                         │
+│   buyer-proxy ──hook──► routing-client plugin   (TS, type:'routing')    │
+│                                                                         │
+│     STATEFUL, per user:                                                 │
+│       · CQT dial (config, changeable any time)                          │
+│       · warmth table: (model, peer) → last prefix seen, tokens, age     │
+│       · conversation prefix chain (hashes stay local — N3)              │
+│       · local routing_decisions ledger (see N1)                         │
+│     PER REQUEST:                                                        │
+│       · assemble warmth integers + constraints + cqt                    │
+│       · call routing peer  (1s hard timeout, D20)                       │
+│       · re-filter against local policy — local has last word (D9)       │
+│       · walk ranked list; stream, fail over only pre-first-token (D19)  │
+│       · report outcome back to the peer (feedback channel — N2)         │
+└───────────────┬──────────────────────────────────────┬──────────────────┘
+                │ POST /_antseed/route                 │ inference
+                ▼                                      ▼
+┌──────────────────────────────────────┐   ┌──────────────────────────┐
+│ ROUTING PEER   (capability:'routing')│   │ PROVIDER PEER (existing) │
+│   routing-server plugin (TS shell)   │   │ capability: 'inference'  │
+│        └─► Python sidecar            │   └──────────────────────────┘
+│                                      │
+│   GLOBAL, stateless across clients:  │
+│     · own AntSeed node → all peers   │
+│       and prices                     │
+│     · λ by cqt, recalibrated every   │
+│       N minutes on RAW prices (N4)   │
+│     · cache recall + token offset,   │
+│       learned across ALL users       │
+│     · Sage call (trimmed last turn)  │
+│     · rank_candidates_from_vector    │
+│     · ledger / analytics / billing   │
+└──────────────────────────────────────┘
 ```
 
-**Why cache warmth must be buyer-side.** `CacheModel` learns from what *this buyer* was billed by *each seller*, keyed on prefix hashes of *this buyer's* conversations. It is per-user, per-seller, privacy-sensitive state that also happens to be the thing that makes multi-turn routing correct. It cannot move to a shared remote service without either leaking conversation structure across users or being wrong. This is an independent argument for the buyer-side-plugin shape.
+**The rule:** global state on the peer, per-conversation state on the client. This is what makes the peer stateless across clients while still doing the cache math.
 
-### 4.2 Request lifecycle
+### 4.2 Why the cache split lands where it does
+
+Cache-aware pricing needs two quantities, and they have opposite homes:
+
+| Quantity | Meaning | Home | Why |
+|---|---|---|---|
+| **Warmth** | Has seller S seen a prefix of *this* conversation, how many tokens, how long ago? | **Client** | Inherently per-user. Only this client knows what it sent |
+| **Recall** | Of prefix tokens a seller has seen, what share comes back billed as cached, at this age? | **Peer, global** | A property of the *seller*, not the user. Learning it across all users is strictly better |
+| **Token offset** | Tokens a seller adds to every request (its own system prompt) | **Peer, global** | Same reasoning — measured at +1757/+1750/+1742 flat for one seller |
+
+So the client sends integers, the peer supplies the learned rates, and `hit_rate = (warm / total) × recall(model, peer, age_bucket)` is computed on the peer. **No prefix hashes leave the device** (`5.2 / D25`).
+
+### 4.3 Request shape (strawman)
+
+The client does not know the candidate set — the peer does. So the client sends its **whole warmth table**, bounded by how many `(model, peer)` pairs it has ever used (tens), and the peer joins against its candidate set.
+
+```jsonc
+// POST /_antseed/route
+{
+  "v": 1,
+  "cqt": 5,                              // client config, sent per request (D17)
+  "sagePrompt": "…trimmed last user turn, head+tail 4096 tok…",   // D15, D21
+  "contextTokens": 18422,                // full billable prompt length
+  "warmth": [                            // integers only — no hashes (D25)
+    { "model": "kimi-k3", "peer": "0x…", "warmTokens": 16000, "ageSec": 240 }
+  ],
+  "constraints": {                       // peer pre-filters; client re-filters (D9)
+    "maxInputUsdPerMillion": 25,
+    "minTrustScore": 60,
+    "blockedPeerIds": ["0x…"]
+  }
+}
+
+// 200 OK
+{
+  "v": 1,
+  "ranked": [
+    { "model": "gpt-5.6-luna", "peer": "0x…", "score": 0.91,
+      "predictedQuality": 0.93, "predictedCostUsd": 0.0009,
+      "priceSnapshot": { "inUsdPerM": 0.2, "outUsdPerM": 1.1,
+                         "cachedInUsdPerM": 0.02, "effectiveInUsdPerM": 0.06 } }
+  ],
+  "baselineSuggestion": { "model": "gpt-5.6-sol", "peer": "0x…" },  // for savings (D49)
+  "receipt": { "routerId": "levanto-sage", "artifactVersion": "live8_pf",
+               "lambdaVersion": "2026-08-24T09:00Z", "decisionId": "…" }
+}
+```
+
+`priceSnapshot` in the response is what lets the client write a complete ledger row without holding a price table (`N1`).
+
+### 4.4 Request lifecycle
 
 ```
-1. App sends POST /v1/chat/completions {model: "auto", messages: [...]}
-2. Routing enabled? entitled? sentinel model?              ─no→ existing path
-3. Plugin assembles candidates from live peer metadata:
-     (model, peerId, inputUsdPerM, outputUsdPerM, cachedInputUsdPerM, trust, load)
-4. Plugin computes prefix hashes → per-candidate expected cache hit rate
-     → effective input price per candidate                        ← D18
-5. POST /_antseed/route {conversation-or-vector, candidates, cqt}
-     budget ~800ms hard timeout → on timeout, fall back            ← D20
-6. Peer returns ranked (model, peer) list + predicted quality/cost + receipt
-7. Plugin re-filters against local policy (max price, min trust, block list)
-8. Walk the list: dispatch, on failure sinbin the pair and continue
-9. Write routing_decisions with chosen model, counterfactual baseline,
-     and the price snapshot at decision time
-10. Dashboard aggregates into the two savings numbers
+ 1. App sends {model: "auto", messages: [...]}
+ 2. Routing enabled? entitled?                          ─no→ existing path
+ 3. Client: trim last user turn (head+tail 4096)
+ 4. Client: build warmth table from local prefix state
+ 5. POST /_antseed/route          [1s hard timeout]
+      timeout → stay on current model
+              → if none, default to a big/top model      (D20)
+ 6. Peer: pre-filter by constraints → Sage → rank (model, peer) → return
+ 7. Client: re-filter against local policy (last word)   (D9)
+ 8. Client: walk the list. Stream. Fail over only before the first token (D19)
+ 9. Client: write routing_decisions locally + report outcome to peer
+10. Dashboard reads local rows → two savings numbers
 ```
 
-### 4.3 The two savings numbers
+### 4.5 The two savings numbers
 
 ```
   Retail baseline (OpenRouter list price for baseline model X)
         │   ← "AntSeed savings"   (already shipped: computeMeasuredSavings)
         ▼
   AntSeed baseline (model X at the AntSeed price at time of inference)
-        │   ← "Router savings"    (NEW: what this project adds)
+        │   ← "Router savings"    (NEW)
         ▼
   Actual paid (routed model at the AntSeed price at time of inference)
 ```
 
-Both must be shown with the middle line visible, or the router appears responsible for savings that come from AntSeed's marketplace. Requires a per-request price snapshot (`D27`).
-
-### 4.4 The minimal plugin change (strawman for `D1`)
-
-Following the existing optional-extension pattern exactly — no new plugin type, no loader change, no registry change:
-
-```ts
-// packages/node/src/interfaces/buyer-router.ts — additive, all optional
-export interface ModelCandidate {
-  model: string
-  peerId: string
-  inputUsdPerMillion: number
-  outputUsdPerMillion: number
-  cachedInputUsdPerMillion?: number
-  trustScore?: number
-  currentLoad?: number
-}
-
-export interface RankedModel {
-  model: string
-  peerId: string
-  score: number
-  predictedQuality?: number
-  predictedCostUsd?: number
-}
-
-export type ModelRankingRouter = Router & {
-  rankModels?(
-    req: SerializedHttpRequest,
-    candidates: ModelCandidate[],
-    signal: AbortSignal,
-  ): Promise<RankedModel[] | null>   // null = no opinion, use existing path
-}
-```
-
-The buyer proxy probes for `rankModels` exactly as it probes for `allowsPeerForPolicy`, between `extractRequestedService()` and `selectCandidatePeersForRouting()`. Returning `null` or throwing degrades to today's behaviour. The one genuine change: this method is **async**, whereas `selectPeer` and the policy hooks are synchronous — that is the real cost of the minimal path, and it is confined to one call site.
+Both shown with the middle line visible, or the router appears responsible for savings that come from AntSeed's marketplace.
 
 ---
 
-## 5. Open decisions
+## 5. Decision ledger
 
-### A. Plugin, peer, and the split between them
+### 5.0 Status
 
----
-
-**D1 — How does the routing plugin attach to the plugin system?**
-
-The stated constraint is to change the plugin system as little as possible.
-
-| Option | Change surface | Notes |
-|---|---|---|
-| **A. Optional `rankModels?()` on the existing `Router` interface** | One optional method + one call site in `buyer-proxy.ts` | **Exactly the pattern `allowsPeerForPolicy` already uses.** No new plugin type, no loader/registry/config changes. Requires making one call site async |
-| B. New `AntseedRoutingPlugin` (`type: 'routing'`) | Plugin union, loader, CLI registry, config types, templates, docs | Conceptually cleaner; a user could run a routing plugin *and* a policy router plugin simultaneously |
-| C. Reuse `provider` type with a magic name | None | Pollutes the model catalogue; brittle |
-
-*Lean: **A**. It satisfies the constraint almost perfectly. The one thing to check is whether AntSeed wants routing policy and model ranking to be separable plugins — if yes, B. Blocking: yes. Owner: AntSeed.*
-
----
-
-**D2 — Does the routing peer get a `'routing'` capability, and how is it discovered?**
-
-Adding `'routing'` to `ProviderCapability` gives a DHT capability topic and `PeerOffering` discovery for free — a genuinely small, additive change. The alternative (hard-coded URL in plugin config) is smaller still but is not "a new type of peer" in any meaningful sense and kills G3.
-
-*Lean: add `'routing'` to the capability union; the offering carries supported models, artifact version, privacy modes, billing model, and data policy. Blocking: yes. Owner: AntSeed.*
-
----
-
-**D3 — The router library is Python; AntSeed plugins are TypeScript. How?**
-
-This is unavoidable and currently unaddressed.
-
-| Option | Pros | Cons |
-|---|---|---|
-| **A. All ML in the routing peer; the plugin is thin TypeScript** | Plugin is idiomatic Node; no Python on the client; catalogue updates are server-side | Every routed turn is a network round trip; peer sees more |
-| B. Python sidecar process managed by the plugin | Reuses the proxy almost verbatim | Ship Python + sklearn + a 3 MB artifact to every desktop client; version hell; Electron packaging pain |
-| C. Port ranking to TypeScript, keep training in Python | No runtime Python | Reimplement `HistGradientBoosting` inference and ridge in TS, or export to ONNX; artifact still ships to clients |
-| D. Keep the proxy as a separate local service the user installs | Zero AntSeed work | Fails G2 completely |
-
-*Lean: **A**, which also resolves `D4`. Blocking: yes — this is the decision that determines what the plugin actually contains. Owner: Joint.*
-
----
-
-**D4 — Where is the split point: what runs on the peer versus the plugin?**
-
-Today's proxy puts *everything except Sage* on the client. That is the opposite of the proposed architecture and it matters.
-
-| Split | Peer does | Plugin does | Consequence |
+| # | Decision | Status | Resolution |
 |---|---|---|---|
-| **A. Peer = Sage only** (today) | Feature vector | Artifact, heads, hull, λ, ranking | **3 MB artifact ships to every client**; catalogue updates need app releases; router IP is on disk |
-| **B. Peer = Sage + ranking** | Vector, heads, hull, λ, ranked list | Candidates, cache model, failover, ledger | Catalogue updates are server-side; IP stays server-side; peer sees conversation + candidate prices |
-| C. Peer = ranking only | Heads, hull, λ | Sage call + everything else | Two remote hops; no benefit |
-
-Note the interaction with `D18`: under split B the peer needs the per-candidate effective input price, which the plugin computes from local cache state — so the plugin sends `effectiveInputUsdPerMillion` per candidate rather than the raw rate. That is clean and keeps cache state local.
-
-*Lean: **B**. It is the only split where "routing peer" means anything, where the model catalogue can be updated without an app release, and where Levanto's IP is not sitting on every user's disk. Blocking: yes. Owner: Joint.*
+| D1 | Plugin attachment | **Resolved** | **B** — new plugin type, not an extension of `Router`; hooks in the client |
+| D2 | `routing` capability | **Resolved** | Yes. **Two** plugins: `routing-client` and `routing-server` |
+| D3 | Python vs TypeScript | **Resolved** | Client fully TS; server plugin runs the Python router in a **sidecar** |
+| D4 | Peer/plugin split point | **Resolved** | **B** — peer does Sage + ranking |
+| D5 | Schema ownership | **Resolved** | `packages/protocol`, versioned, with a conformance template |
+| D6 | One router or several | **Resolved** | One at a time, user-selectable, user-configurable |
+| D7 | Models or (model, peer) | **Resolved** | `(model, peer)` tuples |
+| D8 | Reconcile with `rankModelRoutes()` | **Expanded — see 5.2** | Mapping requested; answer is reassuring |
+| D9 | Local policy hard or advisory | **Resolved** | **Local has the last word** |
+| D10 | Protocol versioning | **Resolved** | Move fast, break things |
+| D11 | Where prices come from | **Resolved** | **A, but on the peer only.** Global discovery + global λ |
+| D12 | Refresh cadence / λ | **Open — see 5.2** | Tradeoffs requested |
+| D13 | Model name canonicalisation | **Resolved** | AntSeed's canonicaliser as single source of truth |
+| D14 | Unknown models | **Resolved** | Surface coverage honestly; alias aggressively |
+| D15 | Sage trimming | **Resolved** | Head+tail to 4096 tokens |
+| D16 | Sage vector caching | **Open — see 5.2** | Explanation requested |
+| D17 | Per-request CQT | **Resolved** | Client config, stateful; sent as a request param; peer stateless |
+| D18 | Wire cache into ranking | **Clarified — see 5.2** | Cold-start question was misread; re-explained |
+| D19 | Streaming vs failover | **Resolved** | Stream; fail over only before the first token |
+| D20 | Latency budget | **Resolved** | 1 s hard timeout → current model → else a big/top model |
+| D21 | What leaves the machine | **Resolved** | Sage sees trimmed last turn; peer also gets cache metadata |
+| D22 | Opt-in granularity | **Deferred** | Ignore for now |
+| D23 | Peer retention | **Open — see 5.2** | "Tell me what" — specified below |
+| D24 | Training on user prompts | **Resolved** | No — but see `N2`, this conflicts with `D28` |
+| D25 | Prefix hashes | **Open — see 5.2** | "Why do we need this" — answer: we don't send them |
+| D26 | Router self-dealing | **Deferred** | Ignore |
+| D27 | Price snapshot / ledger | **Resolved, but see N1** | On the Levanto peer — conflicts with G3/G4 |
+| N1 | Ledger location vs neutral dashboard | **NEW — open** | Dual-write proposed |
+| N2 | Outcome feedback channel | **NEW — open** | Required by global recall learning |
+| N3 | Candidate-set mismatch (peer's view vs client's) | **NEW — open** | Constraints in request |
+| N4 | λ vs cache calibration | **NEW — answered** | You flagged it. λ on raw prices; blending at scoring only |
+| D28–D34 | Quality, evaluation, savings claim | **Open** | Section D unanswered |
+| D35–D45 | Business and commercial | **Open** | Section E unanswered |
+| D46–D51 | Product surface and launch | **Open** | Section F unanswered |
 
 ---
 
-**D5 — Who owns the peer protocol schema, and under what licence?**
+### 5.1 Resolved — consequences worth recording
 
-For G3 to be credible the schema must live in `packages/protocol`, versioned like the rest of the spec, with a conformance suite and a `docs/protocol/templates/routing-peer/` template mirroring the existing provider/router templates. *Blocking: yes. Owner: AntSeed.*
+**D1 + D2 + D3 — Two plugins, and what that costs.**
+
+Adding a plugin type touches: the `AntseedPlugin` union, `plugin-loader.ts`, `PluginInstanceConfig.type`, the CLI trusted registry, config types, and the protocol templates. That is more than the optional-method path but it is all mechanical, and it buys real separation: a user can run the routing plugin *and* keep `router-local`'s policy gates.
+
+The `routing-server` plugin is a TypeScript shell that supervises a Python sidecar. Worth specifying early: process lifecycle and restart policy, the local IPC contract (HTTP on loopback is simplest), health checks, and how a sidecar crash surfaces — the peer should fail closed and stop advertising rather than return unranked garbage.
+
+**D4 + D11 — The peer runs its own AntSeed node.**
+
+This removes the `buyer.state.json` dependency entirely and is a significant simplification: one machine discovers peers and prices, calibrates λ globally, and every client stays thin. It also means the model catalogue updates as a server-side deploy rather than an app release.
+
+The cost is that the peer's candidate set is the *global* network, not this client's. Handled by sending constraints in the request (`N3`).
+
+**D9 — Local has the last word.**
+
+The client re-filters the ranked list against `maxInputUsdPerMillion`, `minTrustScore`, and block lists before dispatching. If that empties the list, fall back per `D20`. Violations are worth logging as a router quality signal even though `D26` defers self-dealing detection — it is nearly free and it is the same code path.
+
+**D17 + D20 — Client stateful, peer stateless.**
+
+CQT lives in client config and ships as a request param. Note the consequence for the router library: `OnlineBudgetController` nudges λ from realised spend every 100 requests using **in-process** state. On a stateless peer serving many clients that becomes a global controller over mixed traffic, letting one heavy user drag everyone's λ. **Disable it** and rely on the every-N-minutes recalibration (`D12`).
+
+`D20`'s "stay on the current model" is also the TTL-stickiness mechanism, now client-side — which is cleaner than the library's in-process `_sessions` dict and is the main COGS lever (`D16`, `D37`).
+
+**D18 — Wiring the cache model, and the cold-start question re-explained.**
+
+The concrete change list is unchanged:
+
+1. `PriceBook.PerToken` gains a third rate: `(price_in, price_out, price_cached_in)`. Currently `tuple[float, float]`.
+2. `Catalog.book()` stops discarding `cached_in` — it already has it on `Quote`.
+3. `rank_candidates_from_vector` accepts a per-candidate hit rate (or effective input price) instead of one scalar for all candidates.
+4. `_predicted_costs` / `cost_ridge.predicted_cost` use the blended rate.
+5. `CacheModel.effective_in()` — already written — gets called.
+6. λ calibration does **not** use the blended rate (`N4`).
+
+**On the cold-start question — I asked this badly, and it is not about peer reputation.** `CacheModel.recall()` returns `0.0` until a `(model, peer)` pair has at least 3 observed warm repeats. Returning zero means "predict no cache discount", so that candidate is priced at its full list input rate and looks more expensive than a seller whose cache we have already measured. The risk is a lock-in loop: never route to a new seller → never observe its cache → it stays penalised. That is entirely separate from reputation filtering, which asks whether a peer is *trustworthy*; this asks whether we have *measured* it yet.
+
+**Your `D11` answer largely solves this.** Once recall is learned on the peer across all users, a `(model, peer)` pair is cold only until *any* user has used it three times — not until *this* user has. For a popular seller that is immediate. The residual case is a genuinely new seller, where a small optimism prior (back off to the population mean recall for that model, or for that seller's provider family) is enough. Worth choosing explicitly rather than inheriting `0.0`.
+
+**D21 + D24 — What Sage sees versus what the peer sees.**
+
+Sage receives only the trimmed last user turn. The routing peer additionally receives warmth integers, context token count, CQT, and constraints — no conversation text beyond what goes to Sage. Model catalogues, hull membership, and price tables are not sensitive and can be public.
 
 ---
 
-**D6 — One routing peer, or query several?**
-
-Merging rankings from routers with different objectives is ill-defined, and each adds latency and cost. *Lean: one active peer, user-selectable, with a documented failover peer. Blocking: no. Owner: AntSeed.*
-
----
-
-**D7 — Does the peer rank models, or (model, peer) tuples?**
-
-The proxy already ranks `(model, peer)` via `model@peer` aliases, and per-peer price dispersion is likely a large share of the savings. But it puts the routing peer in a position to steer traffic to specific sellers.
-
-*Lean: keep `(model, peer)` ranking — it is built and it is where the money is — but the plugin re-validates every candidate against local policy, and realised-vs-predicted savings are monitored per peer as a steering detector (`D26`). Blocking: yes. Owner: Joint.*
+### 5.2 Sent back for more work
 
 ---
 
 **D8 — How does peer-aware routing reconcile with `rankModelRoutes()`?**
 
-Two ranking systems now overlap. Options: router proposes the model only and `rankModelRoutes()` picks the peer (loses price dispersion); router proposes `(model, peer)` and `rankModelRoutes()` is bypassed (loses AntSeed's cooldown/failure-streak signals); or router proposes `(model, peer)` and `rankModelRoutes()` filters and re-orders within the router's model choice.
+*You asked: can we bypass the current plugin, and which of its components do we actually need?*
 
-*Lean: the third. Also worth noting the proxy's `Sinbin` and AntSeed's peer cooldown/failure-streak logic are the same idea implemented twice — they should be unified, and AntSeed's is the one to keep. Blocking: yes. Owner: AntSeed.*
+**Short answer: bypassing `router-local` loses almost nothing.** The table in §3.1 has the detail. The specific things you were worried about:
 
----
-
-**D9 — Are local policy constraints hard filters or advisory?**
-
-*Lean: sent as context, re-enforced locally, violations logged as a router quality signal. Blocking: no. Owner: AntSeed.*
-
----
-
-**D10 — Protocol versioning and deprecation policy.**
-
-Routing peers are third-party services on independent release cycles. Version in request and response, additive-only within a major, documented support window. *Blocking: no, but cheap now and expensive later. Owner: AntSeed.*
-
----
-
-### B. Data, pricing and the cache model
-
----
-
-**D11 — Where does the plugin get live prices?**
-
-The proxy reads `~/.antseed/buyer.state.json` and parses `discoveredPeers[].providerPricing`. That is a private file format with no compatibility guarantee — it will break.
-
-| Option | Notes |
-|---|---|
-| **A. In-process: the plugin already runs inside the buyer and can call `node.discoverPeers()` / `buildNetworkServiceOffers()`** | Correct answer if `D1`-A is chosen; no file, no polling, always current |
-| B. Supported local HTTP endpoint on the buyer proxy | Needed only if the router stays an external process (`D3`-D) |
-| C. Keep reading `buyer.state.json` | Works today; breaks silently on any format change |
-
-*Lean: **A**. Blocking: yes. Owner: AntSeed.*
-
----
-
-**D12 — Price refresh cadence and λ recalibration.**
-
-The proxy polls every 60 s and re-bisects λ (~105 ms) whenever the catalog signature changes. In-process this becomes event-driven off peer metadata updates. Open: is λ recalibration on the plugin (needs the calibration cache locally) or the peer (needs the prices)? Under `D4`-B it belongs on the peer, which means the **plugin must send the candidate price table on every request** — a few KB, acceptable.
-
-Also open: `DYNAMIC_PRICING.md` notes there is **no price-movement hysteresis**. On a volatile marketplace this could produce visible model flapping mid-conversation. *Lean: add hysteresis, or lean on TTL stickiness to mask it. Blocking: no. Owner: Levanto.*
-
----
-
-**D13 — Model name canonicalisation across AntSeed, OpenRouter, and the panel.**
-
-Three naming systems already in play: panel names (`deepseek-v4-flash-0731`), AntSeed service names (`deepseek-v4-flash`), and OpenRouter slugs. Handled today by hardcoded dicts (`ANTSEED_SERVE_AS`, `ANTSEED_COLLECT_ALIAS`) plus `peer_aliases`. AntSeed has its own `canonicalModelKey` / `model-identity`. *Lean: adopt AntSeed's canonicaliser as the single source of truth; delete the hardcoded dicts. Blocking: no. Owner: Joint.*
-
----
-
-**D14 — What happens to models the router has never seen?**
-
-`purchasable: False` today, so an unknown model is simply unroutable — the user silently loses access to it under routing. Options: fall back to the user's default for unknown models; expose "N of M models on the network are routable"; use the alias mechanism to give unknown models a donor head. *Lean: surface the coverage number honestly in the UI; alias aggressively. Blocking: no. Owner: Joint.*
-
----
-
-**D15 — Sage prompt trimming: budget and strategy.**
-
-Currently head+tail to 4096 tokens, with a hard cliff at ~26–28k where Sage silently returns *empty* features and `vectorize` fills neutral priors — i.e. the router degrades to "no opinion" without any error. Open: is 4096 right? Should the trim be conversation-aware (keep the system prompt and the last turn rather than head+tail of one string)? Should hitting the cliff be a logged, surfaced failure rather than a silent prior-fill? *Lean: yes to all three; the silent prior-fill is a bug worth fixing before launch. Blocking: no. Owner: Levanto.*
-
----
-
-**D16 — Is the Sage vector cached, and keyed how?**
-
-`SageCache` is an LRU over 256 conversations keyed on `(conv, last_user, trim_budget)` — it dedups agentic retry loops but not much else. Since Sage is called on every non-deduped request at a ~$0.0006 floor, cache policy is a direct COGS lever (`D37`). *Lean: extend to a content-hash cache with a TTL; measure hit rate before tuning. Blocking: no. Owner: Levanto.*
-
----
-
-**D17 — Per-request `cqt` override: currently README says yes, code says no.**
-
-`proxy.py` deliberately ignores a per-request `cqt` so "a client's model string cannot quietly change what we spend". That is a defensible security posture that contradicts the docs. Decide and align. *Lean: keep the code's behaviour; fix the README; allow override only via an authenticated settings call. Blocking: no. Owner: Levanto.*
-
----
-
-**D18 — Wire the cache model into ranking. (Highest-value item.)**
-
-Everything needed exists; it is not connected. The concrete change list:
-
-1. `PriceBook.PerToken` becomes a 3-tuple `(price_in, price_out, price_cached_in)`, or a small dataclass. Currently `tuple[float, float]`.
-2. `Catalog.book()` stops discarding `cached_in` — it already has it on `Quote`.
-3. `rank_candidates_from_vector` accepts a per-candidate expected hit rate (or a precomputed effective input price), rather than one scalar `input_tokens` for all candidates.
-4. `_predicted_costs` / `cost_ridge.predicted_cost` use `effective_in` in place of `price_in`.
-5. Lambda calibration (`CalibrationCache.costs_at`) uses the same blended rate, or λ drifts against the new cost scale.
-6. `CacheModel.effective_in()` — already written — gets called.
-
-Open sub-decisions: does the *cold-start* case (no observations for a seller, `recall` returns 0) bias against new sellers? It errs toward over-stating cost, which is the safe direction for billing but means a fresh peer never wins the stickiness bonus it deserves. And should the hull/dominance computation use blended or raw input prices — blended makes the hull conversation-dependent, which is more correct and more expensive.
-
-*Lean: do it, before launch, with cold-start behaviour explicitly chosen rather than inherited. Blocking: no for a demo, yes for the savings claim on multi-turn traffic. Owner: Levanto.*
-
----
-
-**D19 — Streaming versus failover. (Unsolved.)**
-
-The proxy sends `stream: false` because you cannot fail over after streaming half an answer. AntSeed supports streaming end to end. Chat UX without streaming is a very visible regression.
-
-| Option | Trade-off |
-|---|---|
-| No streaming when routing is on | Simplest; users will notice and complain |
-| Stream, but only fail over before the first token | Keeps streaming and most of the failover value; connection errors mid-stream still surface to the user |
-| Stream into a buffer, release on first token, fail over only pre-token | Same as above, cleaner to implement against `handleRequestStream` |
-| Fail over mid-stream by restarting the response | Visible flicker/duplication; bad |
-
-*Lean: the pre-first-token cut-off. Most failures — refusals, 429s, connection failures, cold peers — occur before the first token. Blocking: yes, if routing is on by default in the VPR chat UI. Owner: Joint.*
-
----
-
-**D20 — Latency budget and fallback.**
-
-Sage adds ~400–510 ms on a routed turn. Options: hard timeout to the default model (predictable, occasionally loses savings); wait (unbounded tail); prefetch advice for turn N+1 during turn N's generation (hides it entirely for multi-turn, wrong if the next turn is unrelated). *Lean: hard timeout ~800 ms; revisit prefetch in v2. Blocking: yes. Owner: Joint.*
-
----
-
-### C. Privacy and trust
-
----
-
-**D21 — What leaves the machine?**
-
-Under `D4`-B the routing peer sees the trimmed last user turn (≤4096 tokens) plus the candidate price table. Under `D4`-A it sees only the trimmed turn. Either way, conversation content reaches `sage.levanto.ai` from a product called the Virtual Private Router.
-
-| Mode | Peer sees | Quality | Cost |
-|---|---|---|---|
-| **Trimmed last turn (today)** | ≤4096 tokens of the current user message | What the model was trained on | None — built |
-| Redacted | Same, PII/secrets stripped client-side | Slightly degraded; redaction is imperfect | Medium |
-| Features-only | Nothing — 30-dim vector computed on-device | No content exposure | **High — needs a local Sage, which is the core IP** |
-| TEE-attested | Full text inside an attested enclave | Best | High; AntSeed's prover/verifier machinery could carry the attestation |
-
-The uncomfortable observation stands: **features-only fits AntSeed's brand best and destroys Levanto's moat.** Better named now than discovered in month four.
-
-*Lean: v1 ships opt-in trimmed-last-turn with prominent honest disclosure; TEE attestation is the roadmap differentiator. Blocking: yes. Owner: Joint.*
-
----
-
-**D22 — Opt-in granularity.**
-
-Coding agents carry source the user may not be permitted to send to a third party. *Lean: global default, per-conversation off switch, path-based exclusions for coding contexts. Blocking: no. Owner: AntSeed.*
-
----
-
-**D23 — What may a routing peer retain, and how is that enforced?**
-
-*Lean: machine-readable data policy in the routing offering, shown in the picker before selection; contractual in v1, attested later. Blocking: yes for launch. Owner: AntSeed.*
-
----
-
-**D24 — Does Levanto train on AntSeed users' prompts?**
-
-Worth an explicit answer because the incentive to be vague is strong. *Lean: derived features and outcome labels only, never raw text, unless separately opted into. Blocking: yes. Owner: Joint.*
-
----
-
-**D25 — Cache prefix hashes and conversation identity.**
-
-`prefix_hashes` builds a cumulative SHA-256 chain over message content. These stay local under the proposed architecture — but if any telemetry ships them, they are a conversation fingerprint and a confirmation oracle for known content. *Lean: never leave the device; explicitly excluded from any telemetry. Blocking: no. Owner: Joint.*
-
----
-
-**D26 — Preventing router self-dealing.**
-
-A routing peer that also runs provider peers, or takes seller payments, can steer traffic profitably. Since the router ranks `(model, peer)` (`D7`), the surface is real. Mitigations: affiliation disclosure in the offering; buyer-side realised-vs-predicted monitoring (cheap, and doubles as a quality metric); shadow sampling (`D30`); contractual separation; attestation.
-
-*Lean: disclosure + realised-savings monitoring in v1, shadow sampling in v2. Blocking: yes for the openness story. Owner: AntSeed.*
-
----
-
-**D27 — Where does the price snapshot at decision time live?**
-
-The proxy logs `price_change` and reconstructs history via `Board.at(ts)`, but does **not** store the rates on the request row. Reconstruction breaks the moment the change log is trimmed or a poll is missed.
-
-*Lean: a `routing_decisions` table in AntSeed's SQLite storage that stores the chosen candidate, the baseline, and the actual rates used — denormalised on purpose, because this row is the evidence behind a number the user is being charged $9/month for. Blocking: yes. Owner: AntSeed.*
-
----
-
-### D. Quality, evaluation and the savings claim
-
----
-
-**D28 — What evidence is required before publishing a savings number?**
-
-The counter-evidence is Levanto's own: LODO mean AUC **0.5243** with 3 of 8 datasets below 0.5; the shipped artifact inverts on 3 of 4 held-out `arenahard` slices; on SWE-bench the archive-panel hull models rank last and second-to-last of eleven; and the proxy README states `artifact_live9` shows **routing skill ≈ 0** on its own Tier-1 slice against +2.84 pp on the 8-dataset mix, and is "unproven until retrained on something broader".
-
-AntSeed's traffic is chat and coding agents. *Lean: no public percentage until measured on AntSeed-representative traffic; closed beta first (`D45`). Blocking: yes for marketing. Owner: Joint.*
-
----
-
-**D29 — How is quality measured on real traffic with no ground truth?**
-
-Savings alone is trivially gamed by always picking the cheapest model. Options: regeneration and model-switch rate as implicit dissatisfaction (free, decent proxy); LLM-judge on a sample (moderate cost); shadow A/B (best causal estimate, costs the sampled savings). *Lean: regeneration rate always-on, plus a small shadow sample. Blocking: no for v1, yes before scaling. Owner: Joint.*
-
----
-
-**D30 — Shadow sampling rate.**
-
-At p = 2% the forfeited savings are negligible. *Lean: 2%, disclosed in the methodology page. Blocking: no. Owner: Levanto.*
-
----
-
-**D31 — Catalogue ownership and update SLA.**
-
-A full Tier-1 collect is 3,198 prompts, roughly **$0.80–$25 in OpenRouter spend** and **20 minutes to 3+ hours** wall time per model; retraining is CPU-seconds. The alias mechanism is free but only valid when quality transfers.
-
-Under `D4`-B, catalogue updates are a server-side deploy — a real advantage over today's client-side artifact. Open: how fast must a newly-popular model become routable, who pays for the collect, and is the supported set published? *Lean: publish the supported set in the offering; commit to a stated SLA. Blocking: no, but it is the main recurring cost the grant is meant to cover. Owner: Levanto.*
-
----
-
-**D32 — Which artifact ships, and is `prune` on or off?**
-
-`artifact_live8_pf` ships today; `artifact_live9` is explicitly warned against (five heads, no calibration cache, OOD). Separately, `prune` defaults to **off**, so the live hull is the frozen artifact list and dynamic dominance re-pruning — one of the headline features of the dynamic-pricing work — is not actually active by default. `PRUNING.md` reports 100% decision agreement between train-time and serve-time pruning, and that the unrestricted panel wins rank 1 on 39–49% of rows.
-
-*Lean: decide explicitly rather than inheriting the default; the ranked-list-with-failover design argues for `prune=False` so alternates survive. Blocking: no. Owner: Levanto.*
-
----
-
-**D33 — Test coverage before this is in the money path.**
-
-The router library has real tests (`test_price_book`, `test_peer_aliases`, `test_lambda_calibration`). The proxy states it has **no unit tests** outside dashboard tools and is "verified against live providers". Porting it into AntSeed's buyer path — where AntSeed has a substantial vitest suite — needs a test story. *Blocking: no, but non-negotiable before billing. Owner: Joint.*
-
----
-
-**D34 — The `decide()` cost bug.**
-
-`_select()` / `decide()` pass the raw `prompt` string where `_predicted_costs` expects `input_tokens`, while `rank_candidates_from_vector` passes the integer correctly. If `decide()` is on any path that matters, its costs are wrong for `cost_model == "ridge_m4"`. *Lean: fix or delete `decide()`; the ranked API is the one in use. Blocking: no. Owner: Levanto.*
-
----
-
-### E. Business and commercial
-
----
-
-**D35 — How is $9/month collected, given AntSeed has no subscriptions?**
-
-| Option | Pros | Cons |
+| Capability you named | Actually lives in | Available to a new plugin? |
 |---|---|---|
-| **A. Metered per-route call with a monthly cap (~$0.003/route, capped at $9)** | Works with today's contracts; no Solidity; light users pay less | "$9/month" becomes "up to $9/month"; cap enforcement is off-chain |
-| B. One $9 `SpendingAuth` at period start | Matches the marketing exactly | Buyer must be online to sign; proration is manual |
-| C. Reintroduce a subscription contract | Clean primitive, reusable network-wide | Solidity + audit + deployment; largest single work item |
-| D. Off-chain billing (card) | Trivial | Contradicts "use the AntSeed payment system"; adds a Levanto account, breaking G2 |
+| "List of peers able to serve a given model" | `buildNetworkServiceOffers()` in `packages/node/src/discovery/service-catalog.ts`, over `node.discoverPeers()` | **Yes** — plain import, nothing to do with `router-local` |
+| Cooldown / failure-streak | `PeerMetricsTracker` + `computeFailureCooldownMs`, **exported from `@antseed/router-core`** | **Yes** — import and instantiate |
+| Peer scoring weights | `scoreCandidates` + `DEFAULT_WEIGHTS`, exported from the same package | **Yes** |
+| Reputation floor / max-price gate | `LocalRouter.allowsPeerForPolicy` — the only real logic in the plugin | Trivial to reimplement, and `D9` says the client must own this anyway |
+| Protocol/service compatibility matching | `selectCandidatePeersForRouting`, `resolvePeerRoutePlan` in **`apps/cli/src/proxy/routing.ts`** | **No — app code, not a package** |
 
-*Lean: **A** for v1, **C** as the durable answer if AntSeed wants subscriptions generally — in which case Levanto is the design partner for a primitive AntSeed benefits from. Option A also happens to defuse `D39`. Blocking: yes. Owner: AntSeed.*
+That last row is the one concrete blocker: those two functions decide whether a peer can actually serve a request in the right API protocol, and they are not importable from a plugin today. **They should move into `@antseed/node` (or a small shared package) as part of this work.** That is a refactor with no behaviour change and it benefits any future router.
 
----
+One more finding worth knowing: **there are already two independent cooldown trackers.** `LocalRouter` owns a private `PeerMetricsTracker`, and the buyer proxy maintains its own peer-health state which it feeds into `rankModelRoutes` as `peerCooldownUntil` / `peerFailureStreak`. Adding the proxy's `Sinbin` would make three. Consolidating on one — the buyer proxy's, since it is on the live dispatch path — is worth doing while we are here.
 
-**D36 — Does the 2% platform fee apply?**
+**Options, now that the map is clear:**
 
-$0.18 on $9. Small, but it establishes whether routing peers are ordinary sellers. *Lean: yes, ordinary seller, ordinary fee. Blocking: no. Owner: AntSeed.*
+| Option | What you keep | What you lose |
+|---|---|---|
+| **A. Bypass `router-local`; new plugin imports `router-core` + `service-catalog` directly** | Peer discovery, cooldown, scoring, all of it | The reputation/max-price gate, which you must reimplement anyway per `D9`. Needs the `routing.ts` refactor |
+| B. Run both plugins; routing plugin picks `(model, peer)`, `router-local` still gates | No reimplementation of the gate | Two config surfaces for the same policy; user confusion; the double-cooldown problem gets worse |
+| C. Router proposes model only; `rankModelRoutes()` picks the peer | Zero new peer-selection code | Loses per-peer price dispersion — likely a large share of the savings, and contradicts `D7` |
 
----
-
-**D37 — Who pays for the Sage calls?**
-
-~$0.0006 floor per call, called on every non-deduped request. At 2,000 routed turns/month that is ~$1.20–2.00/user against $9 revenue; a heavy agentic user at 20,000 turns inverts the economics. Levers: `SageCache` policy (`D16`), TTL stickiness, and a short-prompt bypass. *Lean: included up to a fair-use cap, with TTL auto-escalation past the cap rather than extra charges. Blocking: yes for pricing. Owner: Levanto.*
-
----
-
-**D38 — Free month for the first 200 — mechanism?**
-
-`AntseedFreeUsage` (open/record/close, signature-authorised) exists and may carry this without new contract work. Also: is "first 200" enforced globally (needs a coordinator, and a race) or granted generously? *Lean: reuse `AntseedFreeUsage` if it fits; be generous rather than exact. Blocking: no. Owner: Joint.*
+*Lean: **A**, with the `apps/cli/src/proxy/routing.ts` → package refactor as an explicit line item, and cooldown consolidated onto the buyer proxy's tracker. Blocking: yes. Owner: AntSeed.*
 
 ---
 
-**D39 — Is $9/month right, and for whom?**
+**D12 — Refresh cadence and λ recalibration, given `D11`.**
 
-Breakeven for the user:
+Under `D11` both prices and λ live on the peer, so this collapses to two parameters and one real tradeoff.
 
-| Realised savings | Monthly inference spend to break even |
+**Cadence.** The peer's node sees peer metadata updates continuously (sellers re-announce roughly every 5 minutes). Recalibrating λ costs ~105 ms.
+
+| Cadence | Pros | Cons |
+|---|---|---|
+| Event-driven, on any price change | Always current | On a busy network this is near-continuous; λ becomes a moving target and identical requests seconds apart get different answers |
+| **Fixed interval, 5–15 min** | Predictable; λ is versioned and quotable in the receipt; cheap | Up to 15 min of staleness after a big price move |
+| Hourly or slower | Very stable | Misses real price movements; the whole point of dynamic pricing erodes |
+
+*Lean: **fixed 10-minute interval**, with the λ version stamped in the response receipt so a decision can be audited against the exact λ that produced it. Add an out-of-band trigger for large moves (say, any hull model's output price changing more than 20%).*
+
+**Hysteresis.** `DYNAMIC_PRICING.md` notes there is none. With a fixed interval the flapping risk drops a lot — λ only moves at boundaries. The remaining risk is a model crossing the hull boundary and the user seeing the model switch mid-conversation. `D20`'s "stay on the current model" stickiness already masks most of this. *Lean: fixed interval plus client-side stickiness is enough; revisit if flapping is observed.*
+
+**The real tradeoff you should weigh:** a single global λ means a user whose traffic is unlike the calibration set will not hit their nominal CQT budget. That is the price of not doing per-user calibration, and it is the right price to pay — but it means **CQT is a *relative* dial, not a spend target**, and the UI should not promise otherwise (`D46`).
+
+---
+
+**D16 — What exactly should we cache, and when?**
+
+*You said: we will never have exactly the same conversation, turns always change.*
+
+**You are right about conversations, but the cache key is not the conversation.** What goes to Sage is only `trim(last_user_turn, 4096)`. The rest of the conversation is invisible to Sage. So the key should be `hash(trimmed_last_user_turn)` and nothing else — the proxy's current `(conv, last_user, trim_budget)` key is strictly worse, because including `conv` prevents hits that would otherwise land.
+
+Where hits actually come from:
+
+| Source | Frequency | Why the last user turn is unchanged |
+|---|---|---|
+| **Agentic tool loops** | **High** in coding agents | The model calls a tool, the result is appended as a tool/assistant message, and the model is called again. The last *user* turn has not changed for many iterations |
+| **Regeneration / retry** | Moderate | User hits retry on the same message |
+| Failover within one request | n/a | Already computed once per request — not a cache concern |
+| Cross-user identical prompts | Low but nonzero | Boilerplate and common questions; only reachable if the peer caches globally, which `D23` permits |
+| Ordinary chat, new turn each time | **Zero** | Correct — and this is your point |
+
+So: on pure chat the hit rate is near zero; on agentic traffic it can be very high. Since agentic traffic is also where the token volume is, this is worth doing.
+
+**A precise distinction that matters:** in an agentic loop the last user turn is unchanged but the conversation *grows*, so `contextTokens` and warmth change every iteration. **Cache the Sage vector; never cache the ranking.** The vector is a function of the last user turn only; the ranking is a function of the vector *and* the current costs.
+
+*Lean: key on `hash(trimmed_last_user_turn)` alone; TTL of ~1 hour; cache on the peer so it is global; instrument the hit rate before tuning size. And note that the larger COGS lever is `D20`'s stickiness, which skips the call entirely.*
+
+---
+
+**D23 — What should the routing peer retain?**
+
+*You said: retain what you need, tell me what, should be a lot.*
+
+Proposed, per routed request:
+
+| Retain | Why | Sensitivity |
+|---|---|---|
+| Sage 30-dim vector + CQT | The routing input; needed to debug and improve ranking | Derived, not text |
+| Candidate set with price snapshot | Savings math, λ audit, price history | Public data |
+| Ranked output + which was chosen | Was the ranking good? | Low |
+| **Realised outcome**: model, peer, prompt/completion/cached tokens, actual cost, latency, success/failure | **The training signal for cost prediction, and the ledger** | Low |
+| Cache observations: `(model, peer, warm_tokens, cached_tokens, age)` | Global recall learning (`4.2`) | Low |
+| Failure events per `(model, peer)` | Reliability / sinbin | Low |
+| λ version, artifact version, decision id | Auditability | None |
+
+**Do not retain:** raw prompt text, and no prefix hashes (`D25` — they never arrive).
+
+**One conflict to resolve.** `D24` says no training on user prompts. But the Sage *vector* is derived from the prompt, and vector + realised outcome is exactly the training pair for the quality heads. If "no training on prompts" means "no raw text", the table above is fine and the router can improve on AntSeed's real traffic. If it means "no derived features either", then **the router can never learn from production traffic — which directly conflicts with `D28`**, where the whole open question is whether the model works on AntSeed's workload mix. Please confirm which you meant.
+
+---
+
+**D25 — Why do we need prefix hashes?**
+
+*Short answer: under this architecture, we don't need to send them anywhere.*
+
+Their purpose is to answer one question: *has seller S already seen a prefix of this conversation, and how many tokens of it?* The alternatives are to send the actual conversation text (worse) or to skip cache math entirely (loses the savings).
+
+But per `4.2`, the client can answer that question **itself** — it holds `_seen[(model, peer, prefix_hash)] = (timestamp, tokens)` and can compute `warm_match()` locally. It then sends the peer two integers per pair: `warmTokens` and `ageSec`. The peer supplies globally-learned `recall` and computes the hit rate.
+
+**So hashes stay on the device and the wire carries only integers.** That is simpler, cheaper, and removes the whole question.
+
+For completeness, the options if you ever did want to send them:
+
+| Option | Tradeoff |
 |---|---|
-| 60% | $15.00 |
-| 40% | $22.50 |
-| 25% | $36.00 |
-| 15% | $60.00 |
+| **Send nothing; client computes warmth (recommended)** | Zero exposure. Client must hold ~24 hashes per conversation — trivial |
+| Send raw hashes | Peer can dictionary-attack known strings. **System prompts are the first link in the chain and are often published or guessable**, so the peer could identify which product or agent the user is running |
+| Send hashes salted with a client-held secret | Peer can still match a user's own prefixes across turns — all cache math needs — but cannot dictionary-attack. Nearly free if you need server-side warmth for some reason |
 
-At the marketed 40%, **a user must spend more than ~$22.50/month on inference for $9 to pay for itself.** Below that it destroys value and those users churn loudly. We do not know AntSeed's spend distribution — **the most important missing number in the business case** (`Q3`).
-
-Alternatives: percentage-of-savings (aligned, harder to verify); tiered by spend; free below a threshold; or `D35`-A metered, which approximates "free for light users" automatically. *Blocking: yes. Owner: Joint.*
+*Lean: the first. It is also the only one that keeps the client's conversation structure entirely private, which is worth something given the VPR positioning.*
 
 ---
 
-**D40 — What does "Save 40%" mean precisely, and can we defend it?**
-
-The 42% figure is at cqt=5 against always-GPT-5 on hard multiple-choice benchmarks — a workload AntSeed users do not have. *Lean: no numeric claim until `D28` is satisfied; launch with "pay less for the same quality — see your own numbers", which is honest and lets the product prove itself. Blocking: yes for marketing. Owner: Joint.*
+### 5.3 Newly opened by these answers
 
 ---
 
-**D41 — Grant structure: $16k plus TBD tokens.**
+**N1 — The ledger is on Levanto's server, which breaks the neutral dashboard.** *(Open — needs your call)*
 
-- **Milestones.** "Paid once you're happy" is undefined — tie to pre-agreed criteria (active subscribers, measured savings on real traffic, commons merged and documented)
-- **Token amount, vesting, lockup.** Levanto wanting to hold tokens is good alignment; a lockup makes it credible
-- **Disclosure.** Levanto holding ANTS while operating the default routing peer must be disclosed publicly
-- **What the grant buys.** The commons in `D42` — explicitly *not* the Sage router
+`D27` puts the price snapshot and decision ledger in the Levanto routing peer. That gives Levanto the data it needs, but it costs three things:
 
-*Blocking: yes commercially. Owner: Joint.*
+1. **The savings dashboard stops being neutral.** It would have to call Levanto's API. `G4` says the dashboard is reusable commons; a dashboard that only works with one router is not.
+2. **Every future routing peer must build a ledger** to appear in that dashboard. That is a large barrier to `G3`.
+3. **It diverges from what AntSeed already does.** `computeMeasuredSavings` reads *local* per-service usage totals. A second, remote, differently-shaped savings source is confusing and will drift.
 
----
+Plus: a user's complete per-request billing history sitting on a third-party server is a harder privacy story than anything else in this design, in a product called the Virtual Private Router.
 
-**D42 — What is "the commons", and who owns it?**
+**Proposal: dual-write.** The client writes a `routing_decisions` row locally — it has everything at decision time, and `priceSnapshot` comes back in the response (`4.3`). The peer keeps its own copy for analytics, training, and billing. The local table is the commons and powers the neutral dashboard; the peer's copy is Levanto's business asset. Marginal cost is one small SQLite insert per routed request.
 
-| Component | Owner | Licence |
-|---|---|---|
-| Routing peer protocol + schema | AntSeed | Repo licence |
-| `rankModels?()` hook + buyer-proxy wiring | AntSeed | Repo licence |
-| `@antseed/router-routing` (candidates, cache model, failover, ledger) | AntSeed | Repo licence |
-| Savings computation + dashboard surfaces | AntSeed | Repo licence |
-| Routing-peer template + conformance tests | AntSeed | Repo licence |
-| **Sage API, trained artifacts, training pipeline** | **Levanto** | Proprietary |
-
-Note this now includes the **cache model**, which is a genuinely valuable, empirically-calibrated piece of engineering that every future router would want. Whether Levanto is willing to contribute it to the commons — as opposed to keeping it as a Levanto-plugin advantage — is a real question and materially affects what the grant is buying.
-
-*Blocking: yes. Owner: Joint. This table should be an appendix to the agreement.*
+*Owner: Joint. Blocking: yes for `G3`/`G4`.*
 
 ---
 
-**D43 — Exclusivity, default placement, duration.**
+**N2 — Global recall learning needs a feedback channel.** *(Open)*
 
-Is Levanto the default? For how long? What happens when a second router appears? Permanent default placement would undermine G3. *Lean: time-boxed default (6–12 months) as a launch-partner benefit, disclosed, with a published policy for how it changes. Blocking: yes. Owner: AntSeed.*
+Recall is learned from what the client was **actually billed** — `cached_tokens` versus the warm prefix it sent. Under `4.2` recall lives on the peer, so the client must report outcomes back after each request: `(model, peer, warmTokens, ageSec, promptTokens, cachedTokens, completionTokens, costUsd, latencyMs, ok)`.
 
----
+Open questions: is this a second RPC, or piggybacked on the next `/route` call (cheaper, but delays learning and loses the last turn of a conversation)? What happens when a client never reports — does it still benefit from others' learning (yes, and that is a free-rider problem worth noting)? And this is the same payload that feeds `D23`'s retention and the savings ledger, so it should be designed once.
 
-**D44 — Support, SLA, incident ownership.**
-
-A hosted service in a latency-sensitive path. On-call, uptime commitment, downtime credits, and what the user sees when it is down (`D20`: silent fallback). *Blocking: no for v1, yes before charging. Owner: Levanto.*
+*Lean: piggyback on the next `/route` request with a flush on session end. Owner: Joint.*
 
 ---
 
-**D45 — Refunds, cancellation, proration.**
+**N3 — The peer ranks over the global network; the client can only buy from a subset.** *(Open)*
 
-Interacts with `D35`: option B makes mid-month cancellation awkward on-chain; option A makes it trivial. *Blocking: no. Owner: Joint.*
+The peer's candidate set is every peer it discovers. The client may have blocked peers, a lower max price, a higher trust floor, or simply be unable to reach some peers. If the peer ranks the global set, `D9`'s local filter may strip the top candidates and the client walks down a list that was optimised for someone else.
 
----
+| Option | Tradeoff |
+|---|---|
+| **Client sends constraints; peer pre-filters** | Better ranking; still stateless (constraints are request params). Slightly larger request. Recommended, and reflected in `4.3` |
+| Peer ranks globally; client filters after | Simplest; wasteful when the client's policy is restrictive |
+| Client sends its full reachable candidate set | Best fidelity; largest request; re-introduces client-side price discovery, which `D11` removed |
 
-### F. Product surface and launch
+A second-order issue: **reachability**. The peer cannot know which peers this client can actually connect to. The client should feed reachability failures into the constraint list over time — which is the same signal as the cooldown tracker in `D8`.
 
----
-
-**D46 — Dial: 0–10 or three presets?**
-
-Defaults of 2/5/8 are a three-preset product wearing an eleven-position dial. *Lean: three presets with "Advanced" revealing 0–10, matching the existing VPR slider precedent. Blocking: no. Owner: Joint.*
-
-Related: `cqt` is calibrated against achievable out-of-fold spend on the training distribution, so cqt=5 will not land at the same relative spend on different traffic. Per-user recalibration from their own history ("target 50% of what you were spending") is a real feature with real complexity.
+*Lean: constraints in the request, plus locally-derived unreachable peers appended to `blockedPeerIds`. Owner: Joint.*
 
 ---
 
-**D47 — How does the user say "route this"?**
+**N4 — Does the cache model corrupt λ calibration?** *(You flagged this. Answer: no, if we keep them separate.)*
 
-*Lean: both a sentinel model id (`"auto"`) and a global preference. And: never silently override a deliberate non-sentinel model choice — surface "we'd have picked X, ~$0.004 cheaper" as a nudge instead. Blocking: yes. Owner: Joint.*
+Your words: *"Only problem is if cache impacts λ calibration, that would fuck everything because we don't want per user calibration."*
 
----
+**It does not have to, and the separation is clean.**
 
-**D48 — Which model is shown, and when?**
+λ is calibrated by bisecting until mean spend over the calibration row set hits a budget target per CQT, where cost is `prompt_tokens × price_in + completion_tokens × price_out`. If `price_in` were cache-blended, it would be per-user and per-conversation, and λ would become per-user. That is the failure you are worried about.
 
-*Lean: after the fact, in message metadata ("answered by GPT-5.6 Luna, saved $0.004"), plus a per-conversation escape hatch. The proxy already logs everything needed, including the full candidate list and escalation depth. Blocking: no. Owner: AntSeed.*
+The fix is that these are separable concerns. Scoring is `score = quality − λ · cost`. **λ is a scalar exchange rate between quality and dollars — a global property. Cache blending is a per-candidate cost adjustment — a local property.** Changing `cost` per candidate does not require changing λ; it just moves where the argmax lands, which is exactly the intended effect.
 
----
+**So: calibrate λ on raw list prices, globally, every 10 minutes. Apply cache blending only at per-request scoring time.**
 
-**D49 — What is baseline model X, and who picks it?**
+The one residual effect is a **known downward bias**: because real costs are lower than the calibration assumed, realised spend will run below the nominal CQT budget by roughly the population mean cache discount. Two ways to handle it:
 
-This single choice sets the headline number, so it is a marketing decision disguised as a technical one.
+- **Accept it.** Spending under budget is the safe direction, and `D12` already establishes that CQT is a relative dial rather than a spend target.
+- **Correct it globally.** Compute the population mean hit rate on the peer — which it has, from `N2`'s feedback — and apply one scalar correction alongside each λ recalibration. Still global, still one number for all users, refreshed on the same 10-minute cycle.
 
-| Option | Honesty | Attractiveness |
-|---|---|---|
-| User picks explicitly | High | Variable |
-| Their most-used model before opting in | Highest | Variable; undefined for new users |
-| The model the router would pick at cqt=0 | Defensible, per-request accurate | High |
-| Most expensive on the network | Low — nobody was going to use it | Highest |
+*Lean: ship with the bias, measure it, add the global correction if it exceeds a few percent. Either way, **no per-user calibration**. Owner: Levanto.*
 
-*Lean: user-selectable, defaulting to pre-opt-in most-used, falling back to the cqt=0 pick. Never "most expensive available". Blocking: yes. Owner: Joint.*
+Related, and worth doing at the same time: disable `OnlineBudgetController` (`5.1 / D17`), which would otherwise reintroduce exactly the per-client λ drift you want to avoid — except spread across mixed traffic, which is worse.
 
 ---
 
-**D50 — Negative savings, and whether the $9 is netted.**
+### 5.4 Sections D–F — still open
 
-`computeMeasuredSavings` clamps at zero today — defensible for marketplace-vs-retail, corrosive for a paid product. And "you saved $34" while charging $9 invites angry threads. *Lean: show real numbers including negatives in the detail view; show gross savings prominently with "net of subscription" adjacent. Blocking: no, but decide before launch. Owner: Joint.*
+You have not answered these, and they contain the decisions that determine whether the product ships as pitched. Recorded here unchanged.
+
+#### D. Quality, evaluation and the savings claim
+
+- **D28 — Evidence required before publishing a savings number.** LODO mean AUC **0.5243**, 3 of 8 datasets below 0.5; the shipped artifact inverts on 3 of 4 held-out `arenahard` slices; on SWE-bench the archive-panel hull models rank last and second-to-last of eleven; the proxy README puts `artifact_live9` routing skill at **≈ 0** on its own Tier-1 slice. AntSeed's traffic is chat and coding agents. *Lean: no public percentage until measured on AntSeed traffic. Blocking: yes for marketing.*
+- **D29 — Measuring quality with no ground truth.** Regeneration rate (free, decent proxy); LLM-judge on a sample; shadow A/B (best causal estimate, costs the sampled savings). *Lean: regeneration rate always-on plus a small shadow sample.*
+- **D30 — Shadow sampling rate.** *Lean: 2%, disclosed.*
+- **D31 — Catalogue ownership and update SLA.** A full Tier-1 collect is 3,198 prompts, ~$0.80–$25 and 20 min–3 h per model. Under `D4`-B, updates are a server-side deploy. Open: how fast must a new model become routable, who pays, is the supported set published?
+- **D32 — Which artifact ships, and is `prune` on or off?** `artifact_live8_pf` ships; `live9` is warned against. `prune` defaults to **off**, so dynamic dominance re-pruning is not actually active. *Lean: decide explicitly; ranked-list-with-failover argues for `prune=False`.*
+- **D33 — Test coverage before this is in the money path.** The library has real tests; the proxy has none outside dashboard tools. *Blocking before billing.*
+- **D34 — The `decide()` cost bug.** `decide()` passes the raw prompt string where `_predicted_costs` expects `input_tokens`. *Lean: fix or delete it; the ranked API is the one in use.*
+
+#### E. Business and commercial
+
+- **D35 — How is $9/month collected?** `AntseedSubPool` was removed. Options: **(A)** metered per-route with a monthly cap — works today, no Solidity, light users pay less; (B) one $9 `SpendingAuth` per period; (C) reintroduce a subscription contract; (D) off-chain billing, which breaks `G2`. *Lean: A for v1, C as the durable answer.*
+- **D36 — Does the 2% platform fee apply?** $0.18 on $9. *Lean: yes, ordinary seller.*
+- **D37 — Who pays for the Sage calls?** ~$0.0006 floor per call. At 2,000 routed turns/month, ~$1.20–2.00 against $9; at 20,000 the economics invert. Levers: `D16` caching, `D20` stickiness, short-prompt bypass. *Lean: fair-use cap with stickiness escalation past it.*
+- **D38 — Free month for the first 200.** `AntseedFreeUsage` may carry this without new contract work. *Lean: reuse it; be generous rather than exact on the count.*
+- **D39 — Is $9 right, and for whom?** Breakeven: 60% savings → $15.00/mo spend; **40% → $22.50**; 25% → $36.00; 15% → $60.00. **We still do not know AntSeed's spend distribution — the most important missing number in the business case.**
+- **D40 — What does "Save 40%" mean precisely?** The 42% figure is at cqt=5 against always-GPT-5 on hard multiple-choice benchmarks. *Lean: no numeric claim until `D28` is satisfied.*
+- **D41 — Grant structure ($16k + tokens).** Milestones undefined; token amount, vesting and lockup open; disclosure of Levanto holding ANTS while operating the default peer; and an explicit statement that the grant buys the commons in `D42`, not the Sage router.
+- **D42 — What is "the commons"?** Protocol and schema, the `routing-client` plugin, the local ledger and savings computation, dashboard surfaces, and the peer template — all AntSeed-owned. Sage API, artifacts and training pipeline stay Levanto's. **Open: does the cache model go in the commons?** It is valuable, general, and every future router would want it.
+- **D43 — Exclusivity and default placement.** *Lean: time-boxed (6–12 months), disclosed, with a published policy for how the default changes.*
+- **D44 — Support, SLA, incident ownership.** A hosted service in a latency-sensitive path. *Blocking before charging.*
+- **D45 — Refunds, cancellation, proration.** Interacts with `D35`: option A makes this trivial, B does not.
+
+#### F. Product surface and launch
+
+- **D46 — Dial: 0–10 or three presets?** Defaults of 2/5/8 are a three-preset product wearing an eleven-position dial. *Lean: three presets, "Advanced" reveals 0–10.* **Note `D12`: CQT is a relative dial, not a spend target — the UI must not promise otherwise.**
+- **D47 — How does the user say "route this"?** *Lean: sentinel model id plus a global preference; never silently override a deliberate model choice.*
+- **D48 — Which model is shown, and when?** *Lean: after the fact in message metadata, plus a per-conversation escape hatch.*
+- **D49 — What is baseline model X?** Sets the headline number, so it is a marketing decision disguised as a technical one. *Lean: user-selectable, defaulting to their pre-opt-in most-used model, falling back to the cqt=0 pick. Never "most expensive available".* The peer already returns `baselineSuggestion` (`4.3`).
+- **D50 — Negative savings, and whether the $9 is netted.** *Lean: show real numbers including negatives in detail view; gross prominently with "net of subscription" adjacent.*
+- **D51 — Closed beta, second router, placement, co-branding.** *Lean: 4–6 week instrumented beta; ship a trivial reference routing peer in the template to substantiate `G3`.*
 
 ---
 
-**D51 — Closed beta, second router, placement, co-branding.**
+## 6. Unit economics
 
-- **Beta first?** The cheapest way to resolve `D28` before committing to a number. *Lean: 4–6 weeks, 20–50 instrumented users.*
-- **Second routing peer at launch?** Even a trivial reference router ("cheapest above trust T") shipped in the repo would substantiate G3 and validate the interface. *Lean: ship it as part of the template.*
-- **Onboarding placement?** Worth more than any launch post, and has a real conversion cost for AntSeed.
-- **Co-branding?** "AntSeed Smart Routing" (best for G2) vs "Levanto Router on AntSeed" (best for the marketplace framing). Follows from `D43`.
-
-*Blocking: no. Owner: mixed.*
-
----
-
-## 6. Unit economics scratchpad
-
-Per user per month. **Revenue:** $9.00 less 2% ($0.18) → **$8.82 net**.
+Per user per month. **Revenue:** $9.00 less 2% → **$8.82 net**.
 
 | | Light (300 routed turns) | Typical (2,000) | Heavy agentic (20,000) |
 |---|---|---|---|
@@ -767,11 +576,9 @@ Per user per month. **Revenue:** $9.00 less 2% ($0.18) → **$8.82 net**.
 | Routing-peer infra (amortised) | ~$0.20 | ~$0.30 | ~$1.00 |
 | **Gross margin** | **~$8.3** | **~$6.5–7.3** | **−$4.2 to −$12.2** |
 
-`SageCache` and TTL stickiness are the levers that make the heavy case survivable — which is why `D16` and `D37` are economic decisions, not just optimisations.
+Note the heavy column is agentic traffic — which is also where `D16`'s Sage-vector cache has its highest hit rate, because the last user turn is unchanged across tool iterations. `D16` and `D20` are therefore economic controls, not just optimisations.
 
-**Fixed costs the grant offsets:** router R&D; catalogue maintenance ($0.80–$25/model collect plus retraining, ongoing as models churn); building the commons in `D42`.
-
-**User-side value:** positive only above ~$22.50/month of inference spend at 40% realised savings.
+**Fixed costs the grant offsets:** router R&D; catalogue maintenance ($0.80–$25/model collect plus retraining); the commons in `D42`; and now the routing-peer infrastructure itself, which `D11` makes Levanto's responsibility to operate.
 
 ---
 
@@ -779,47 +586,56 @@ Per user per month. **Revenue:** $9.00 less 2% ($0.18) → **$8.82 net**.
 
 | # | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|---|
-| R1 | Savings do not transfer from benchmarks to real chat/coding traffic | **High** | **Critical** | Closed beta before any public number; shadow sampling (`D28`, `D29`) |
-| R2 | Losing streaming is a visible UX regression | **High** | High | Pre-first-token failover cut-off (`D19`) |
-| R3 | Privacy framing collides with the VPR brand | Medium | High | Opt-in, trimmed turn, honest disclosure, TEE roadmap (`D21`) |
-| R4 | $9 exceeds savings for most users | Medium | High | Spend distribution first; metered-capped pricing (`D35`-A, `D39`) |
-| R5 | Python/TypeScript boundary forces a bad architecture | Medium | High | Put all ML on the peer (`D3`-A, `D4`-B) |
-| R6 | Routing blind to cache warmth → wrong picks on multi-turn | **High** | Medium | Wire the cache model (`D18`) |
-| R7 | Price volatility causes mid-conversation model flapping | Medium | Medium | Hysteresis or TTL stickiness (`D12`) |
-| R8 | Subscription contract becomes the critical path | Medium | High | Ship v1 metered (`D35`) |
-| R9 | Router self-dealing accusation | Medium | High | Disclosure, local policy override, realised-savings monitoring (`D26`) |
-| R10 | Catalogue goes stale | Medium | Medium | Server-side updates under `D4`-B; published SLA (`D31`) |
-| R11 | Heavy agentic users are margin-negative | Medium | Medium | Fair-use cap with TTL escalation (`D37`) |
-| R12 | Untested code in the money path | Medium | High | Test story before billing (`D33`) |
-| R13 | `buyer.state.json` format change breaks pricing silently | **High** | Medium | Use in-process APIs (`D11`) |
+| R1 | Savings do not transfer to real chat/coding traffic | **High** | **Critical** | Closed beta before any public number (`D28`) |
+| R2 | Routing blind to cache warmth → wrong picks on multi-turn | **High** | Medium | Wire the cache model (`D18`) |
+| R3 | Ledger on Levanto's server undermines the openness story | **High** | Medium | Dual-write (`N1`) |
+| R4 | Routing peer is a single point of failure for all users | **High** | Medium | `D20` fallback is the mitigation; `D44` needs an SLA |
+| R5 | $9 exceeds savings for most users | Medium | High | Spend distribution first; metered-capped pricing (`D35`-A, `D39`) |
+| R6 | Losing streaming is a visible UX regression | Medium | High | Pre-first-token failover cut-off (`D19`) |
+| R7 | Python sidecar lifecycle problems on the peer | Medium | Medium | Fail closed, stop advertising (`5.1 / D3`) |
+| R8 | Per-user λ drift via `OnlineBudgetController` | Medium | Medium | Disable it (`N4`) |
+| R9 | CQT dial does not hit the spend users expect | Medium | Medium | Frame as relative, not a target (`D12`, `D46`) |
+| R10 | `D24` read strictly → router can never learn from production | Medium | High | Confirm derived features are permitted (`D23`) |
+| R11 | Catalogue goes stale | Medium | Medium | Server-side updates under `D4`-B; published SLA (`D31`) |
+| R12 | Heavy agentic users are margin-negative | Medium | Medium | Fair-use cap with stickiness (`D37`) |
+| R13 | Untested code in the money path | Medium | High | Test story before billing (`D33`) |
 
 ---
 
-## 8. Suggested phasing
+## 8. Phasing
 
-**Phase 0 — Decide (2 weeks).** In priority order: `D1`/`D3`/`D4` (plugin shape and split point), `D21` (privacy), `D28`/`D40` (evidence and claim), `D35`/`D39` (billing and price), `D42` (commons boundary).
+**Phase 0 — Decide (1–2 weeks).** Sections D–F, in priority order: `D28`/`D40` (evidence and claim), `D35`/`D39` (billing and price), `D42` (commons boundary, including the cache model). Plus the four new items: `N1` (ledger location), `N2` (feedback channel), `N3` (constraints), and confirmation on `D23`/`D24`.
 
-**Phase 1 — Plumbing, unpriced (4–6 weeks).** Optional `rankModels?()` + buyer-proxy call site; `'routing'` capability; `/_antseed/route` schema and spec page; port the proxy's candidate assembly, cache model, failover and ledger into a TypeScript `@antseed/router-routing`; stand up the Levanto routing peer wrapping `rank_candidates_from_vector`; **wire the cache model into ranking (`D18`)**; trivial reference routing peer. Internal users only, no billing, no UI dial.
+**Phase 1 — Plumbing, unpriced (5–7 weeks).**
+- AntSeed: two plugin types + loader/registry/config; `'routing'` capability; `/_antseed/route` schema in `packages/protocol`; **refactor `apps/cli/src/proxy/routing.ts` into a package** (`D8`); consolidate the cooldown trackers.
+- Levanto: `routing-client` plugin in TS (warmth table, failover walk, local ledger, policy filter); `routing-server` plugin + Python sidecar; peer-side AntSeed node for global discovery; **wire the cache model into ranking (`D18`)**; move recall learning to the peer; disable `OnlineBudgetController`.
+- Joint: trivial reference routing peer in the template.
 
-**Phase 2 — Closed beta (4–6 weeks).** 20–50 instrumented users. Dial and opt-in in VPR. Two-number savings dashboard. Shadow sampling at 2%. Streaming decision implemented. **Deliverable: a defensible savings-and-quality number on real AntSeed traffic.** This is the gate.
+Internal users only, no billing, no UI dial.
 
-**Phase 3 — Launch.** Billing per `D35`. Free month for the first 200. Routing-peer picker with data-policy disclosure. Public methodology page.
+**Phase 2 — Closed beta (4–6 weeks).** 20–50 instrumented users. Dial and opt-in in VPR. Two-number savings dashboard off the local ledger. Streaming decision implemented. Shadow sampling. **Deliverable: a defensible savings-and-quality number on real AntSeed traffic.** This is the gate.
 
-**Phase 4 — Openness and hardening.** Template and conformance suite. Published default-selection policy. TEE attestation track. Network-wide historical price index, if broadly useful.
+**Phase 3 — Launch.** Billing per `D35`. Free month for the first 200. Routing-peer picker. Public methodology page.
+
+**Phase 4 — Hardening.** Conformance suite. Published default-selection policy. Revisit `D22`/`D26`, deferred here.
 
 ---
 
-## 9. The short list for AntSeed
+## 9. What we still need
 
-1. **Is the minimal plugin change acceptable — an optional async `rankModels?()` on the existing `Router` interface, following the `allowsPeerForPolicy` pattern?** (`D1`) If yes, the plugin-system change is genuinely tiny.
-2. **Is a third-party routing peer seeing (trimmed) conversation content acceptable within the VPR privacy positioning, and under what disclosure?** (`D21`)
-3. **What is the distribution of monthly inference spend per active AntSeed buyer?** (`D39`) Without it the $9 price is a guess with a hard floor at ~$22.50 of user spend.
-4. **Subscriptions: build a primitive, or bill metered-with-a-cap?** (`D35`)
-5. **Do the commons packages in `D42` live in this repo under this licence, and is that what the grant buys — including the cache model?** (`D42`)
+**From AntSeed — the answers in sections D–F**, and specifically:
 
-Plus the default-peer policy, Levanto's placement duration, and grant disclosure (`D43`, `D41`).
+1. **What is the distribution of monthly inference spend per active buyer?** (`D39`) Without it the $9 price is a guess with a hard floor at ~$22.50 of user spend.
+2. **Subscriptions: build a primitive, or bill metered-with-a-cap?** (`D35`)
+3. **Do the commons in `D42` live in this repo under this licence — and does that include the cache model?** (`D42`)
+4. **Default-peer policy, Levanto's placement duration, and grant disclosure.** (`D41`, `D43`)
 
-And what Levanto owes AntSeed before any number goes public: **evidence the savings hold on AntSeed's traffic mix, not on GPQA** (`D28`).
+**Decisions still needed from Levanto:**
+
+5. **`N1`** — is dual-write acceptable, so the savings dashboard stays neutral?
+6. **`D23`/`D24`** — does "no training on prompts" permit retaining derived vectors plus outcomes? If not, the router cannot improve on AntSeed traffic, which conflicts with `D28`.
+
+**And what Levanto owes AntSeed before any number goes public:** evidence the savings hold on AntSeed's traffic mix, not on GPQA (`D28`).
 
 ---
 
@@ -829,24 +645,22 @@ And what Levanto owes AntSeed before any number goes public: **evidence the savi
 
 | Concern | Path |
 |---|---|
-| Plugin interfaces | `packages/node/src/interfaces/plugin.ts` |
-| `Router` interface (extension point) | `packages/node/src/interfaces/buyer-router.ts` |
-| **Duck-typed optional-extension precedent** | `apps/cli/src/proxy/buyer-proxy.ts:206-212, 290-293` |
-| `LocalRouter` policy methods | `plugins/router-local/src/router.ts:136-153` |
+| Plugin interfaces / union | `packages/node/src/interfaces/plugin.ts` |
+| Plugin loader (new types go here) | `packages/node/src/config/plugin-loader.ts` |
+| `Router` interface | `packages/node/src/interfaces/buyer-router.ts` |
+| `LocalRouter` — the whole plugin | `plugins/router-local/src/router.ts` |
+| **`PeerMetricsTracker`, cooldown curve — exported** | `packages/router-core/src/peer-metrics.ts` |
+| **`scoreCandidates`, `DEFAULT_WEIGHTS` — exported** | `packages/router-core/src/peer-scorer.ts` |
+| `buildNetworkServiceOffers` | `packages/node/src/discovery/service-catalog.ts:162` |
+| `rankModelRoutes`, `chooseBestModelRoute` | `packages/node/src/routing/model-route-ranking.ts:191,202` |
+| **`selectCandidatePeersForRouting` — needs to move to a package** | `apps/cli/src/proxy/routing.ts:231,281` |
+| Buyer proxy peer-health state | `apps/cli/src/proxy/buyer-proxy.ts:1284-1620, 2441-2442` |
 | Capability enum, `PeerOffering` | `packages/protocol/src/capability.ts` |
-| Peer metadata / announcements | `packages/protocol/src/peer-metadata.ts` |
-| HTTP-over-P2P types | `packages/protocol/src/http.ts` |
-| Reserved-path precedent (attest, `/v1/models`) | `packages/node/src/seller-request-handler.ts:129-185` |
-| DHT topics and announce | `packages/node/src/discovery/dht-node.ts`, `announcer.ts` |
-| Model-route ranking | `packages/node/src/routing/model-route-ranking.ts` |
+| Reserved-path precedent (attest) | `packages/node/src/seller-request-handler.ts:139-185` |
 | Cost computation (cached-input aware) | `packages/buyer-core/src/pricing.ts:41-54` |
-| Payment contracts | `packages/contracts/payments/AntseedChannels.sol`, `AntseedDeposits.sol`, `AntseedFreeUsage.sol` |
-| Metering schema | `packages/node/src/storage/migrations/metering/001_create_tables.ts` |
-| Per-service totals (fresh/cached split) | `packages/node/src/storage/migrations/channels/003_create_service_totals.ts` |
-| **Savings vs retail (shipped)** | `apps/desktop/src/renderer/modules/catalog/measured-savings.ts` |
-| Retail reference prices | `apps/desktop/src/main/billing/openrouter-catalog.ts` |
+| **Savings vs retail (shipped, local)** | `apps/desktop/src/renderer/modules/catalog/measured-savings.ts` |
 | VPR preferences (dial precedent) | `apps/desktop/src/renderer/modules/routing/preferences.ts` |
-| Protocol spec / templates | `docs/protocol/spec/`, `docs/protocol/templates/` |
+| `AntseedFreeUsage` | `packages/contracts/payments/AntseedFreeUsage.sol` |
 | SubPool removal | `CHANGELOG.md:358-360` |
 
 ### levanto-router-proxy
@@ -854,14 +668,12 @@ And what Levanto owes AntSeed before any number goes public: **evidence the savi
 | Concern | Path |
 |---|---|
 | Request lifecycle, ranking call, failover walk | `proxy.py:275-437` |
-| AntSeed catalog + peer pinning + billing rate | `providers.py:139-205`, `rate_for` at `89-102` |
+| AntSeed catalog, peer pinning, billing rate | `providers.py:139-205`; `rate_for` at `89-102` |
 | Price polling / change detection | `prices.py` |
-| **Cache model (complete, unwired)** | `cache_model.py` — `effective_in` at `273-276` |
+| **Cache model (complete, unwired)** | `cache_model.py`; `effective_in` at `273-276`; `hit_rate` at `215-230`; `recall` at `232-250` |
 | Runtime, catalog swap, λ recalibration | `routing.py:293-380` |
-| Router library seam + required API | `router_link.py:21-31` |
+| Router library seam | `router_link.py:21-31` |
 | Audit schema (14 tables) | `store.py` |
-| Protocol adapters | `anthropic_api.py`, `responses_api.py` |
-| Cache prediction scoring | `tools/score_cache_predictions.py` |
 | Stated limitations | `README.md:215-227` |
 
 ### sage_model_router @ `rank-from-precomputed-vector`
@@ -869,12 +681,12 @@ And what Levanto owes AntSeed before any number goes public: **evidence the savi
 | Concern | Path |
 |---|---|
 | Dynamic pricing design + caveats | `DYNAMIC_PRICING.md` |
-| `PriceBook` (needs cached rate — `D18`) | `price_book.py:38-47`, `mean_cost_at` at `110-125` |
-| **`rank_candidates_from_vector`** | `router.py:588-638` |
+| `PriceBook` — needs the cached rate (`D18`) | `price_book.py:38-47` |
+| `rank_candidates_from_vector` | `router.py:588-638` |
 | `set_prices` / `_live_hull` / `_price_for` | `router.py:384-445` |
-| λ recalibration | `router.py:463-486`, `lambda_calibration.py:62-67` |
+| λ recalibration | `router.py:463-486`; `lambda_calibration.py:62-67` |
+| `OnlineBudgetController` — disable (`N4`) | `router.py:194-216` |
 | Per-peer aliases | `peer_aliases.py:152-159` |
 | Sage prompt trimming + the cliff | `prompt_trim.py` |
 | Price-free training | `train_pricefree.py:106-129` |
-| Pruning rationale | `PRUNING.md` |
-| Benchmarks and OOD caveats | `BENCHMARKS.md` (LODO at §8.1) |
+| Benchmarks and OOD caveats | `BENCHMARKS.md` §8.1 (LODO) |
