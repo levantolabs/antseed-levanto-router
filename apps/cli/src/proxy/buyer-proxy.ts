@@ -3101,6 +3101,10 @@ export class BuyerProxy {
               && isRouterSuccess(responseForClient.statusCode, requestForPeer.path, retryableStatusCodes),
             latencyMs,
             tokens: telemetry.usage.totalTokens,
+            freshInputTokens: telemetry.usage.freshInputTokens,
+            cachedInputTokens: telemetry.usage.cachedInputTokens,
+            outputTokens: telemetry.usage.outputTokens,
+            estimatedCostUsd: telemetry.estimatedCostUsd,
           })
         }
 
@@ -3190,6 +3194,10 @@ export class BuyerProxy {
               && isRouterSuccess(response.statusCode, requestForPeer.path, retryableStatusCodes),
             latencyMs,
             tokens: telemetry.usage.totalTokens,
+            freshInputTokens: telemetry.usage.freshInputTokens,
+            cachedInputTokens: telemetry.usage.cachedInputTokens,
+            outputTokens: telemetry.usage.outputTokens,
+            estimatedCostUsd: telemetry.estimatedCostUsd,
           })
         }
 

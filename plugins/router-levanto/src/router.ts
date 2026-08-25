@@ -5,11 +5,30 @@ import type {
   RouteCandidate,
   SerializedHttpRequest,
 } from '@antseed/node';
+import { ConversationState, pinnedToRouteCandidate, type PinnedDecision } from './conversation-state.js';
+import { RoutingLedger, type RoutingDecisionRow } from './ledger.js';
 
 export interface LevantoRouterConfig {
   /** Base URL of the routing peer's HTTP surface, e.g. http://127.0.0.1:8787 */
   routingPeerUrl: string;
+  /** The routing peer's own peerId -- who the daily SpendingAuth is signed against. */
+  sellerPeerId?: string;
+  /**
+   * Pay-first daily signing (decisions doc SS6.2): called at most once per
+   * calendar day, before the first routing call that day. Deliberately
+   * narrow -- this plugin never holds a BuyerPaymentManager or PaymentMux
+   * reference directly (software-arch doc SS2.6: handing a signing key to
+   * plugin code, including third-party ones per SSG3, would let it sign
+   * arbitrary messages). The host implements this by calling the real
+   * BuyerPaymentManager.signCumulativeAuth and sending the result over
+   * PaymentMux -- NOT WIRED UP in this pass; see the runlog.
+   */
+  signDailyIfNeeded?: (sellerPeerId: string) => Promise<void>;
   fetchImpl?: typeof fetch;
+}
+
+function calendarDayKey(now = new Date()): string {
+  return `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
 }
 
 // Wire schema, decisions doc SS4.4. Kept local to this plugin -- it's the
@@ -41,7 +60,7 @@ interface RouteResponseBody {
     predictedOutputTokens: number;
     price: { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number };
   }>;
-  baselineSuggestion: { model: string; peer: string; price: { inUsdPerM: number; outUsdPerM: number } };
+  baselineSuggestion: { model: string; peer: string; price: { inUsdPerM: number; outUsdPerM: number } } | null;
   receipt: { routerId: string; artifactVersion: string; lambdaVersion: string };
 }
 
@@ -72,13 +91,41 @@ function parseChatBody(req: SerializedHttpRequest): { model: string | undefined;
   return { model, lastUserText };
 }
 
-/** Very rough token estimate (chars/4) -- deepened in task #9's cached-token estimator. */
+/** Very rough token estimate (chars/4) -- a real tokenizer is a further refinement, not this pass's scope. */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/** Per decisions doc SS4.2: not parentSessionKey-preferred (reversed in the design's own Round7). */
+function conversationKey(conversation: ConversationIdentity): string {
+  return `${conversation.tool}:${conversation.sessionKey}`;
+}
+
 export class LevantoRouter {
+  private readonly conversations = new ConversationState();
+  private readonly ledger = new RoutingLedger();
+  private lastSignedDayKey: string | null = null;
+
   constructor(private readonly config: LevantoRouterConfig) {}
+
+  /** routing_decisions ledger (software-architecture doc SS2.5) -- for the savings dashboard (task #10). */
+  getLedgerRows(): readonly RoutingDecisionRow[] {
+    return this.ledger.all();
+  }
+
+  /**
+   * Ensures today's SpendingAuth is on file before routing, per SS6.2's
+   * "before making any routing calls that day" ordering. At most one call
+   * to signDailyIfNeeded per calendar day, however many times selectRoute
+   * fires that day.
+   */
+  private async ensureSignedToday(): Promise<void> {
+    if (!this.config.signDailyIfNeeded || !this.config.sellerPeerId) return;
+    const todayKey = calendarDayKey();
+    if (this.lastSignedDayKey === todayKey) return;
+    await this.config.signDailyIfNeeded(this.config.sellerPeerId);
+    this.lastSignedDayKey = todayKey;
+  }
 
   // Required Router members -- levanto-auto only participates via selectRoute;
   // a concretely-chosen model falls through to the host's existing pipeline
@@ -88,14 +135,40 @@ export class LevantoRouter {
     return peers[0] ?? null;
   }
 
-  onResult(): void {
-    // Deepened in task #9 (routing_decisions ledger).
+  /**
+   * SS4.3's cache "warmth" observation feed. Router.onResult's shared
+   * interface doesn't carry cachedInputTokens (packages/node/src/interfaces/buyer-router.ts,
+   * unchanged this pass -- extending it is a wider, riskier change than this
+   * pass takes on, since other routers implement the same interface). Real
+   * wiring of buyer-proxy calling this after each response is a remaining
+   * gap, logged in the runlog; this method is what that wiring would call.
+   */
+  recordObservedCache(conversation: ConversationIdentity, model: string, peerId: string, promptTokens: number, cachedInputTokens: number): void {
+    this.conversations.recordObservedCache(conversationKey(conversation), model, peerId, promptTokens, cachedInputTokens);
+  }
+
+  onResult(peer: PeerInfo, result: {
+    success: boolean;
+    latencyMs: number;
+    tokens: number;
+    freshInputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    estimatedCostUsd?: number | null;
+  }): void {
+    if (!result.success) return; // a failed/retried dispatch isn't a resolved decision
+    this.ledger.recordResult(peer.peerId, {
+      promptTokens: (result.freshInputTokens ?? 0) + (result.cachedInputTokens ?? 0),
+      cachedTokens: result.cachedInputTokens ?? 0,
+      completionTokens: result.outputTokens ?? 0,
+      usdcPaid: result.estimatedCostUsd ?? 0,
+    });
   }
 
   async selectRoute(
     req: SerializedHttpRequest,
     peers: PeerInfo[],
-    _conversation: ConversationIdentity | null,
+    conversation: ConversationIdentity | null,
     routingPreferences: ModelRoutingPreferences | null,
   ): Promise<RouteCandidate[] | null> {
     const { model, lastUserText } = parseChatBody(req);
@@ -104,15 +177,40 @@ export class LevantoRouter {
     // knowledge in host code" rule.
     if (model !== 'levanto-auto') return null;
 
-    // TODO(task #9): real new-user-message gate (decisions doc SS4.2) --
-    // currently calls the routing peer on every request, no pinning yet.
+    const convKey = conversation ? conversationKey(conversation) : null;
 
+    // New-user-message gate (decisions doc SS4.2): a tool-loop continuation
+    // reuses the last decision, no network call. Conversations we can't key
+    // (no ConversationIdentity) always route -- a safe default, not a full
+    // content-hash fallback (logged as a simplification in the runlog).
+    if (convKey && !this.conversations.isNewUserMessage(convKey, lastUserText)) {
+      const pinned = this.conversations.getPinned(convKey);
+      if (pinned) {
+        return [pinnedToRouteCandidate(pinned, substituteModel(req, pinned.serviceId))];
+      }
+    }
+
+    // Pay-first (decisions doc SS6.2): today's signature must be on file
+    // before this call, not after -- and only now, since a pinned reuse
+    // above never reaches the network at all.
+    await this.ensureSignedToday();
+
+    const contextTokens = estimateTokens(lastUserText);
+    const expectedCachedTokens = convKey
+      ? this.conversations.observedModelPeers(convKey).map(({ model: m, peerId }) => ({
+        model: m,
+        peer: peerId,
+        tokens: Math.round(this.conversations.expectedCachedTokens(convKey, m, peerId, contextTokens)),
+      })).filter((entry) => entry.tokens > 0)
+      : [];
+
+    const cqt = 5;
     const body: RouteRequestBody = {
       v: 1,
-      cqt: 5,
+      cqt,
       sagePrompt: trimForSagePrompt(lastUserText),
-      contextTokens: estimateTokens(lastUserText),
-      expectedCachedTokens: [],
+      contextTokens,
+      expectedCachedTokens,
       constraints: {
         maxInputUsdPerMillion: routingPreferences?.maxInputUsdPerMillion ?? undefined,
         minTrustScore: routingPreferences?.minTrustScore ?? undefined,
@@ -123,6 +221,7 @@ export class LevantoRouter {
 
     const doFetch = this.config.fetchImpl ?? fetch;
     let res: Response;
+    const routingCallStartedAt = Date.now();
     try {
       res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
         method: 'POST',
@@ -134,20 +233,25 @@ export class LevantoRouter {
       // vs. clean 402). For now: decline rather than hang.
       return null;
     }
+    const routingLatencyMs = Date.now() - routingCallStartedAt;
     if (!res.ok) return null; // includes the 402 "not subscribed" case
 
     const parsed = (await res.json()) as RouteResponseBody;
     const peerById = new Map(peers.map((p) => [p.peerId, p] as const));
 
-    const candidates: RouteCandidate[] = [];
+    // For SS2.5's ledger: predicted fields per (peer, model), read back once
+    // the winner is known below -- absent for a candidate synthesized by the
+    // allowedPeerIds fallback (no real Sage prediction for it).
+    const predictedByPeer = new Map(parsed.ranked.map((entry) => [entry.peer, entry] as const));
+
+    let ranked: PinnedDecision[] = [];
     for (const entry of parsed.ranked) {
       const peer = peerById.get(entry.peer as PeerInfo['peerId']);
       if (!peer) continue; // stale candidate, not in our current peer set
-      candidates.push({
+      ranked.push({
         peer,
         peerId: peer.peerId,
         serviceId: entry.model,
-        request: substituteModel(req, entry.model),
         reputation: 0,
         hasCachedInputPricing: entry.price.cachedInUsdPerM > 0,
         inputUsdPerMillion: entry.price.inUsdPerM,
@@ -155,7 +259,56 @@ export class LevantoRouter {
         minImageUsdPerImage: null,
       });
     }
-    return candidates.length > 0 ? candidates : null;
+
+    // allowedPeerIds is a client-side re-filter, not a ranking constraint the
+    // peer narrows by (decisions doc SS4.4) -- walk the ranked list as usual,
+    // skip anything outside the allowlist. If that empties the list, fall
+    // back to the allowed peers directly rather than giving up.
+    const allowedPeerIds = routingPreferences?.allowedPeerIds;
+    if (allowedPeerIds && allowedPeerIds.length > 0) {
+      const allowedSet = new Set(allowedPeerIds.map((p) => p.toLowerCase()));
+      const filtered = ranked.filter((c) => allowedSet.has(c.peerId.toLowerCase()));
+      if (filtered.length > 0) {
+        ranked = filtered;
+      } else if (parsed.baselineSuggestion) {
+        const fallbackModel = parsed.baselineSuggestion.model;
+        ranked = peers
+          .filter((peer) => allowedSet.has(peer.peerId.toLowerCase()))
+          .map((peer) => ({
+            peer,
+            peerId: peer.peerId,
+            serviceId: fallbackModel,
+            reputation: 0,
+            hasCachedInputPricing: false,
+            inputUsdPerMillion: parsed.baselineSuggestion!.price.inUsdPerM,
+            outputUsdPerMillion: parsed.baselineSuggestion!.price.outUsdPerM,
+            minImageUsdPerImage: null,
+          }));
+      } else {
+        ranked = [];
+      }
+    }
+
+    if (ranked.length === 0) return null;
+
+    const winner = ranked[0]!;
+    if (convKey) {
+      this.conversations.recordDecision(convKey, lastUserText, winner);
+    }
+
+    const predicted = predictedByPeer.get(winner.peerId);
+    this.ledger.recordPending(winner.peerId, {
+      model: winner.serviceId,
+      predictedCostUsd: predicted?.predictedCostUsd ?? null,
+      predictedInputTokens: predicted?.predictedInputTokens ?? null,
+      predictedCachedInputTokens: predicted?.predictedCachedInputTokens ?? null,
+      predictedOutputTokens: predicted?.predictedOutputTokens ?? null,
+      cqt,
+      routingLatencyMs,
+      atMs: Date.now(),
+    });
+
+    return ranked.map((c) => pinnedToRouteCandidate(c, substituteModel(req, c.serviceId)));
   }
 }
 

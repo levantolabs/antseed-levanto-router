@@ -41,6 +41,17 @@ export interface Router {
     success: boolean;
     latencyMs: number;
     tokens: number;
+    /**
+     * Optional, additive token/cost split -- computeResponseTelemetry
+     * already computes this at both onResult call sites (buyer-proxy.ts);
+     * forwarded here so a router can build a real per-decision ledger
+     * (software-architecture doc SS2.5) without re-deriving it. Absent from
+     * older callers; a router that doesn't need it can ignore it entirely.
+     */
+    freshInputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    estimatedCostUsd?: number | null;
   }): void;
 
   /**

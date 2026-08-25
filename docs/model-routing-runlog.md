@@ -19,6 +19,63 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-25] routing-client remaining pieces: what's real, what's scoped down
+
+**Type:** New decisions (ground truth silent) + honest scope notes, batched from one pass
+implementing the gate, cached-token estimator, allowedPeerIds re-filter, daily-signing call
+ordering, and the routing_decisions ledger in `plugins/router-levanto`.
+
+**Real and tested (27 tests, `plugins/router-levanto/src/{router,conversation-state}.test.ts`):**
+- New-user-message gate (decisions doc §4.2): keyed `${tool}:${sessionKey}` (not
+  parentSessionKey-preferred), pins and reuses the last decision with no network call on a
+  tool-loop continuation.
+- Cached-token estimator (§4.3): EMA'd observed ratio per (conversation, model, peer), 3-minute
+  flat decay, zero for an unseen candidate — matches the formula in the doc exactly.
+- `allowedPeerIds` client-side re-filter (§4.4), including the "walk exhausts the list, fall
+  back to the allowed peers directly" case, using `baselineSuggestion`'s model for the fallback
+  (the doc doesn't specify what model the fallback should use — this is the one reasonable
+  candidate the wire response actually offers).
+- Pay-first daily signing call ordering (§6.2): `signDailyIfNeeded` called at most once per
+  calendar day, before the first real routing call of that day, never for a pinned reuse.
+- `routing_decisions` ledger (software-architecture doc §2.5): row shape matches the doc's
+  `RoutingDecisionRow` type field-for-field (minus `baselinePrices`, see below). `Router.onResult`
+  extended additively (`freshInputTokens`/`cachedInputTokens`/`outputTokens`/`estimatedCostUsd`,
+  all optional) per §1's own description of this as safe ("nothing new to compute, just forward
+  what's already there") — wired into both `buyer-proxy.ts` call sites from
+  `computeResponseTelemetry`, confirmed against the existing 121-test buyer-proxy suite (all
+  still passing) and packages/node's typecheck.
+
+**Scoped down, logged rather than silently assumed complete:**
+- `signDailyIfNeeded` and `recordObservedCache` are narrow injection points the plugin calls —
+  the actual host-side implementations (calling the real `BuyerPaymentManager.signCumulativeAuth`
+  + sending over `PaymentMux`; calling `recordObservedCache` after each response) are **not
+  wired up**. Building that means touching the CLI's plugin-instantiation code and exposing a
+  buyer-side PaymentMux-sending capability to it — a real, separate integration task, not
+  something the plugin can do by importing `BuyerPaymentManager` directly (would violate the
+  "plugin never holds the signing key" boundary, software-arch doc §2.6).
+- The ledger is in-memory only — no persistence (SQLite/file) yet, and `getLedgerRows()` has no
+  caller (the VPR savings dashboard, task #10, doesn't exist yet).
+- `RoutingDecisionRow.baselinePrices` is omitted — needs the §8.4 fixed dropdown list threaded
+  in from VPR config, which doesn't exist yet either.
+- Correlating `onResult` back to the `selectRoute` decision that caused it is done by `peerId`
+  alone (no `requestId` or conversation key available on `Router.onResult`'s existing signature).
+  A second concurrent request to the same peer before the first resolves would mis-pair. Accepted
+  for this pass; real traffic here isn't meaningfully concurrent per peer, but this is a genuine
+  simplification, not a proven-safe design.
+- A pinned tool-loop continuation doesn't currently write its own ledger row, even though the
+  row shape's own `routingLatencyMs: number | null` comment ("null when the gate skipped the
+  call entirely") implies it should. Doing this properly needs predicted-field data carried on
+  `PinnedDecision` too, which the current implementation doesn't thread through.
+- Conversations with no `ConversationIdentity` (content-hash fallback, per earlier design
+  discussion) always route rather than being gated by a derived fallback key — safe (never
+  silently skips billing-relevant routing) but not the fuller fallback that was discussed.
+
+**Ground truth reference:** decisions doc §4.2/§4.3/§4.4/§6.2, software-architecture doc §1/§2.5 —
+implemented as specified where noted; the scoped-down items above are this pass's own honest
+limitations, not contradictions of anything the docs say.
+
+---
+
 <!-- Template for a new entry:
 
 ## [YYYY-MM-DD] Short title
