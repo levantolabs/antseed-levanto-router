@@ -40,7 +40,7 @@ The vast majority of activity is off-chain signing. On-chain calls are rare, sel
 | `reserve()` — opens the channel | **On-chain** | Routing peer | Once, at opt-in |
 | `topUp()` — settles pending spend + raises ceiling, atomically | **On-chain** | Routing peer | Once right after the bootstrap day, then ~monthly |
 | `close()` — final settlement | **On-chain** | Routing peer | Once, at cancellation (courtesy) |
-| `requestClose()` → `withdraw()` | **On-chain** | Buyer | Only if the peer goes unresponsive — 15-minute grace period, buyer's own escape hatch |
+| `requestClose()` → `withdraw()` | **On-chain** | Buyer | The buyer's own mechanism to exit and reclaim locked funds promptly — not just a peer-unresponsive fallback. Just stopping signing leaves the channel open indefinitely, since the seller has no urgency to close it (past earnings are already safe either way); `requestClose()` forces the issue, opening a 15-minute grace window before `withdraw()` sweeps whatever's still unsettled |
 | Deposit / withdraw custody balance | **On-chain** | Buyer | Whenever the buyer funds or reclaims their own AntSeed balance — separate from this channel entirely |
 
 Result: the one-time bootstrap is cheap — `reserve()` plus one `topUp()`, 2 transactions total, ever. But `topUp()` then recurs roughly **monthly** for as long as the subscription stays active — so the actual steady-state rate is **~12 transactions per subscriber per year** (§6.4's own table and §10's unit economics both state this directly), not a one-off cost. Year one is closer to 13–14 once `reserve()` is counted; an eventual `close()` adds one more, whenever that happens. Everything else — the daily `SpendingAuth` signing — is free and off-chain.
@@ -84,11 +84,14 @@ sequenceDiagram
 
 Why the $0.59 bootstrap, not $1.00: `reserve()` is capped at `FIRST_SIGN_CAP` ($1.00) for every AntSeed channel, no exceptions. `topUp()` only unlocks once 85% of the current deposit is settled. Reserve the max $1.00 and day 1's $0.59 signature only clears 59% — a second day is needed. Reserve exactly $0.59 instead and day 1's signature settles 100% of it, clearing the gate a full day sooner.
 
+**Buyer closes early.** If the buyer calls `requestClose()` instead of just going quiet, the contract's own grace period exists specifically so the seller can still claim what it's owed: `settle()`/`close()` remain callable for 15 minutes after the request, using the *latest* signed cumulative — not "all" the signatures ever given, since each new one supersedes the last, so there's only ever one number to submit. Only after that window does `withdraw()` become callable, sweeping whatever's still unsettled back to the buyer. This already works end-to-end with no new code (see below).
+
 ---
 
 ## What already exists (no new AntSeed protocol or contracts)
 
 - The channel primitives themselves — `ReserveAuth`, `SpendingAuth`, `reserve()`/`topUp()`/`settle()`/`close()`/`requestClose()`/`withdraw()`. All pre-existing, generic to any seller.
+- **Reacting to an early buyer close** — `SellerPaymentManager.handleCloseRequested()` (`seller-payment-manager.ts:1722-1751`) already does exactly the right thing: on a `CloseRequested` event, reads its own stored latest accepted cumulative for that channel and calls `close()` with it immediately, before the grace period expires; if it's holding nothing, it cleans up locally rather than attempting a false claim. `pollCloseRequested()` watches for the event and dispatches into this automatically. Fully generic — this problem predates the routing peer's design entirely, and `routing-server` inherits it for free by sitting on an ordinary AntSeed seller node underneath. Nothing to build here.
 - `PaymentMux` + `SellerPaymentManager.handleSpendingAuth()` — the transport and server-side bookkeeping for receiving signatures, decoupled from any HTTP request. Already generic, not provider-specific.
 - `BuyerPaymentManager`'s silent-signing infrastructure — zero popups or confirmation dialogs anywhere today, for either signature type. The proactive top-up trigger `_needsTopUp()` (firing at 65% of ceiling) is reused **unmodified**.
 - `hasSession(buyerPeerId)` / `getChannelByPeer(buyerPeerId)` on `SellerPaymentManager` — already exist, already generic; `StoredChannel.updatedAt` is already bumped on every committed signature. The subscription gate is built entirely from existing reads, no new storage.
