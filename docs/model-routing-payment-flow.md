@@ -88,6 +88,43 @@ Why the $0.59 bootstrap, not $1.00: `reserve()` is capped at `FIRST_SIGN_CAP` ($
 
 ---
 
+## Alternative considered: daily `topUp()` instead of monthly
+
+Same mechanism, different cadence — every day is a bootstrap day, forever, instead of one bootstrap followed by a monthly rhythm.
+
+```mermaid
+sequenceDiagram
+    participant Client as routing-client (buyer)
+    participant RP as Routing peer
+    participant Chain as AntseedChannels (on-chain)
+
+    Note over Client,RP: Opt-in
+    Client->>RP: ReserveAuth($0.59, deadline)
+    RP->>Chain: reserve() - locks $0.59 [1 tx]
+
+    loop every day
+        Client->>RP: SpendingAuth(cum = running total), before that day's use
+        Client->>RP: fresh ReserveAuth(next day's ceiling)
+        RP->>Chain: topUp() - settles yesterday, raises ceiling by one more day [1 tx]
+    end
+
+    Note over Client,RP: Cancellation
+    Client->>RP: stop signing
+    RP->>Chain: close(finalAmount = last settled cum) [1 tx, courtesy]
+```
+
+No separate bootstrap phase to reason about — every day, `topUp()` does what the current design's monthly renewal does, just one day's worth at a time. Simpler to describe; the trade-off is entirely in the numbers, extending the same table §6.4 already used to pick monthly:
+
+| Reserve period | Ceiling | Avg blocked | On-chain txs/user/yr | Gas budget per tx to stay under 1% of revenue |
+|---|---|---|---|---|
+| **1 day** | **$0.59** | **~$0.30** | **~365** | **~$0.006** |
+| ~2 days | $1.18 | $0.59 | ~182 | $0.012 |
+| 1 month (current design) | $17.96 | ~$9 | ~12 | $0.18 |
+
+At daily cadence, gas has to stay under roughly **half a cent per transaction** to hold the same 1%-of-revenue bar the monthly design uses — for a call §6.4 already describes as "heavy: two ECDSA recoveries, a USDC transfer, several storage writes." That's not a plausible number on any real L2 fee market; this is very likely why monthly won out as the leading candidate in the first place, not just an arbitrary choice. The one real thing daily buys back: the seller (routing peer) actually receives earned revenue every day instead of holding valid-but-uncollected signatures for up to a month — better cash flow, at roughly 30x the gas spend. Blocked buyer capital is also far lower ($0.30 avg vs. ~$9), but that was never the binding constraint in §6.4's own analysis.
+
+---
+
 ## What already exists (no new AntSeed protocol or contracts)
 
 - The channel primitives themselves — `ReserveAuth`, `SpendingAuth`, `reserve()`/`topUp()`/`settle()`/`close()`/`requestClose()`/`withdraw()`. All pre-existing, generic to any seller.
