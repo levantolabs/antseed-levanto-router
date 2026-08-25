@@ -11,7 +11,7 @@
 - **Declare `selectRoute` as a formal optional method on the `Router` interface** (`packages/node/src/interfaces/buyer-router.ts`), and export the `RouteCandidate` type (§2.1) from wherever both buyer-proxy and plugins can import it. Not just a wiring change — the type itself doesn't exist yet.
 - **Skip the local `rankModelRoutes` reputation re-sort (buyer-proxy.ts:2448/2451-2453) when candidates came from `selectRoute`.** See §2.4 — the routing peer's returned order already is the decision; re-sorting it locally by reputation would discard that.
 - **Extend `Router.onResult`'s result payload** with the token split and cost telemetry `computeResponseTelemetry` already computes at that exact call site (buyer-proxy.ts:3039, right before `onResult` fires) — `freshInputTokens`, `cachedInputTokens`, `outputTokens`, `estimatedCostUsd` — not just the current flat `tokens: number`. See §2.5; nothing new to compute, just forward what's already there.
-- **New `BuyerPaymentManager` method for the daily flat-fee signing tail** (decisions doc open item 7, §2.6) — sign + persist + update-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without `signPerRequestAuth`'s per-request cost computation.
+- **New `BuyerPaymentManager` method for the daily flat-fee signing tail** (decisions doc open item 3, §2.6) — sign + persist + update-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without `signPerRequestAuth`'s per-request cost computation.
 - **New `RoutingServer` plugin type + single-slot registration + reserved-path wiring in `seller-request-handler.ts`, with its own per-buyer rate limiter.** See §3.1.
 - **New `'routing'` capability value** (`packages/protocol/src/capability.ts`) so a routing peer's discovery announcement is distinguishable from an inference provider's — no services/pricing array entry, per decisions doc §5.2.
 - **New `attachDiscovery` optional method on `RoutingServer` + `node.setRoutingServer(...)`**, wired in `seller/start.ts` alongside the existing provider/prover registration loops. See §3.2 — mirrors `node.setRouter`'s existing wiring exactly, nothing reused from prior work (verified nothing like it exists on this branch).
@@ -63,7 +63,7 @@ type RouteCandidate = {
 
 `req` is the same raw, unmodified `SerializedHttpRequest` `selectPeer` already gets — the actual request the buyer's client sent, before any model substitution. `selectRoute` parses `req.body` itself to read the model field and build `sagePrompt`/`contextTokens` for the routing call.
 
-`routingPreferences` carries the peer allow/block list and price/trust ceilings — `maxInputUsdPerMillion`, `minTrustScore`, `allowedPeerIds`, `blockedPeerIds`. Already exists as `this._routingPreferences: ModelRoutingPreferences | null` on `BuyerProxy` (buyer-proxy.ts:769, populated from config at 826/1080, already in scope at line 2446 — right where `selectRoute` would be called), the same object VPR's existing "auto select seller" preferences already populate (§4.1). `maxInputUsdPerMillion`/`minTrustScore`/`blockedPeerIds` map directly onto §4.4's `constraints` object. **`allowedPeerIds` is genuinely unresolved** — §4.4's example `constraints` has no allowlist field, and restricting the whole network down to a specific peer set cuts against the point of letting Sage rank broadly across models and sellers; it's a much more natural fit for the old fixed-model pipeline than for cross-model routing. Whether `selectRoute` honors it, ignores it, or does something else entirely is open item 20 in the decisions doc.
+`routingPreferences` carries the peer allow/block list and price/trust ceilings — `maxInputUsdPerMillion`, `minTrustScore`, `allowedPeerIds`, `blockedPeerIds`. Already exists as `this._routingPreferences: ModelRoutingPreferences | null` on `BuyerProxy` (buyer-proxy.ts:769, populated from config at 826/1080, already in scope at line 2446 — right where `selectRoute` would be called), the same object VPR's existing "auto select seller" preferences already populate (§4.1). `maxInputUsdPerMillion`/`minTrustScore`/`blockedPeerIds` map directly onto §4.4's `constraints` object, now joined by `allowedPeerIds` too. **`allowedPeerIds` is a client-side re-filter, decided (decisions doc §4.4), not a ranking constraint the peer narrows by** — Sage keeps ranking broadly across the whole network regardless of the buyer's allowlist, since narrowing the ranking input itself would push back toward the old fixed-model pipeline's "pick a seller for one decided model" shape. See §2.4 for how the walk applies it.
 
 Called unconditionally by buyer-proxy whenever present. Behavior:
 
@@ -77,10 +77,10 @@ Called unconditionally by buyer-proxy whenever present. Behavior:
 
 Decides, per conversation, whether a new user message arrived since the last routing decision (decisions doc §4.2) — if not, reuse the pinned `(model, peer)` and skip the network call entirely.
 
-- **Keying:** same scheme buyer-proxy already uses for peer-affinity pinning — `${conversation.tool}:${conversation.parentSessionKey ?? conversation.sessionKey}`. Subagent traffic rolls up into its parent chat's decision for free, since `conversationIdentity` already resolves that.
+- **Keying:** each conversation gates independently, including each subagent session — `${conversation.tool}:${conversation.sessionKey}`. `parentSessionKey` is not used for gate-keying. Decided in decisions doc §4.2: a subagent session gets its own new-user-message gate and its own routing decision, not a rollup onto its parent chat's pinned `(model, peer)` — unless the subagent-creation call itself already names a concrete model, in which case §2.1's own sentinel check (step 1) already declines routing for it, no separate logic needed. Same rule as the top-level sentinel: an explicit model always wins, only its absence triggers routing.
 - **State per key:** the count of genuine user turns seen as of the last routing decision, plus the `(model, peer)` that decision produced.
 - **Detection is not a raw `role === 'user'` message count.** Anthropic's Messages API (Claude Code) sends tool-call *results* as `role: 'user'` messages carrying `tool_result` content blocks, not a fresh prompt — counting those would re-route on every tool round-trip inside a Claude Code session, reopening the Sage-cost blow-up §4.2 exists to prevent. Needs the same content-block-type filtering `conversation-identity.ts` already applies in `textFromContent` (only `type: 'text'` / `'input_text'` blocks count as a genuine turn).
-- **`conversation === null` fallback (tool sent no identity signal on the wire):** key on a hash of the message prefix through the last genuine user turn instead — the same technique `conversation-identity.ts` already uses in `syntheticSessionKeyFromBody`, just applied unconditionally rather than gated behind a known `originator`/system-proxy source. This single mechanism gives both the key and the change-detection signal at once: the hash is stable across a tool-loop continuation (no new genuine user text since the last genuine turn) and changes the moment a real new user message is appended, so no separate turn-counting is needed for this path. Collision risk (two unrelated conversations hashing to the same key) is low — it requires an identical full transcript up to that point, not just a matching last message — and low-stakes regardless, since `routing-client` only ever sees one buyer's own traffic; worst case is one of that buyer's own chats briefly reusing another's stale pin. This fallback can't do subagent rollup (item 13 in the decisions doc) — a subagent's task prompt is different content from its parent's transcript, so hashing gives no link between them; that requires the tool-provided `parentSessionKey`, which only exists when `conversationIdentity` is non-null.
+- **`conversation === null` fallback (tool sent no identity signal on the wire):** key on a hash of the message prefix through the last genuine user turn instead — the same technique `conversation-identity.ts` already uses in `syntheticSessionKeyFromBody`, just applied unconditionally rather than gated behind a known `originator`/system-proxy source. This single mechanism gives both the key and the change-detection signal at once: the hash is stable across a tool-loop continuation (no new genuine user text since the last genuine turn) and changes the moment a real new user message is appended, so no separate turn-counting is needed for this path. Collision risk (two unrelated conversations hashing to the same key) is low — it requires an identical full transcript up to that point, not just a matching last message — and low-stakes regardless, since `routing-client` only ever sees one buyer's own traffic; worst case is one of that buyer's own chats briefly reusing another's stale pin.
 
 ### 2.3 Cached-token estimator (decisions doc §4.3)
 
@@ -94,7 +94,7 @@ Computes `expectedCachedTokens` for the routing request. Scope is narrower than 
 For the (model, peer) currently in use:
     observedRatio  = cachedInputTokens / promptTokens        (from last turn, EMA'd)
     expectedCached = min(previousPromptTokens * observedRatio, currentPromptTokens)
-    decay if the last turn is older than the seller's observed cache lifetime
+    decay to 0 if the last turn is older than 3 minutes         (flat timeout, all providers)
 
 For any (model, peer) not used in this conversation:
     expectedCached = 0
@@ -102,7 +102,7 @@ For any (model, peer) not used in this conversation:
 
 `cachedInputTokens` is real, seller-reported ground truth already flowing to the buyer (`packages/buyer-core/src/buyer-payment-manager.ts:1225-1235`) — not inferred.
 
-**Decay threshold ("the seller's observed cache lifetime"):** provisionally a flat 90-second timeout for v1, applied uniformly regardless of provider or seller. Flagged as open item 14 in the decisions doc — not a per-provider constant or empirically-observed value yet, just a placeholder to build against.
+**Decay threshold ("the seller's observed cache lifetime"):** a flat 3-minute timeout, decided (decisions doc §4.3), applied uniformly regardless of provider or seller — not a per-provider constant or something learned; revisit once real per-provider/per-seller cache-lifetime data exists.
 
 **Prefix-invalidation guard:** hash the first few messages; reset the estimate if that hash changes (system prompt edited, history truncated, a branch) — entirely on-device, no network round-trip.
 
@@ -126,6 +126,8 @@ if (streamed) {
 `_dispatchToPeer` needs no signature change: it already takes `serviceId` per-candidate (`selected.serviceId`, buyer-proxy.ts:2515), not once for the whole list, and self-heals a missing `routePlanByPeerId` entry via `resolvePeerRoutePlan` (buyer-proxy.ts:2872-2873) — so a `routing-client`-sourced candidate list, potentially spanning multiple different models, feeds the existing loop unchanged.
 
 **One wiring change that is required:** the existing pipeline re-sorts candidates locally by reputation before walking (`rankModelRoutes`, buyer-proxy.ts:2448/2451-2453) — correct when every candidate serves the same model and reputation is the only signal left to break ties. That re-sort must be skipped for a `selectRoute`-sourced list: the routing peer's returned order already *is* the score/quality/cost decision (§4.4), and re-ranking it locally by reputation alone would discard that. Candidates from `selectRoute` walk in the order given; candidates from the old pipeline keep the existing local sort.
+
+**`allowedPeerIds` filtering happens during the walk, not before it** (decisions doc §4.4): skip any candidate outside the allowlist exactly as the walk already does for `blockedPeerIds`, in the peer's returned order. If the walk exhausts the whole ranked list without finding a candidate inside the allowlist, fall back to the allowed peers directly rather than giving up entirely. Both lists apply together — allow first, then exclude anything also blocked.
 
 ### 2.5 Local ledger (`routing_decisions`, decisions doc §4.1, §4.6, §8.4)
 
@@ -153,24 +155,24 @@ type RoutingDecisionRow = {
 }
 ```
 
-Assumes the §8.4 baseline dropdown is a **fixed, bounded option set** — flagged as open item 15 in the decisions doc, since the doc itself doesn't settle fixed-vs-dynamic. Building against "fixed" for now (bounds row size to a handful of entries); revisit the row shape if that assumption changes.
+The §8.4 baseline dropdown is decided as a **fixed, curated option set**, not one that grows dynamically from observed `baselineSuggestion` values — bounds row size to a handful of entries. Default selection: the most expensive, most capable flagship model available at the time (the top GPT or Claude model).
 
 ### 2.6 Daily signing (decisions doc §6)
 
 **Ownership split:** the plugin owns 100% of the decision — which day, how much, catch-up cap, whether to skip. `BuyerPaymentManager` owns only the cryptographic operation and the bookkeeping tied to it. This split exists because the plugin can't safely do the signing itself: `_signer` is a private field on `BuyerPaymentManager` (buyer-payment-manager.ts:151) holding the buyer's actual key, and handing it to plugin code — including a third-party routing peer's plugin, per decisions doc G3 — would let that plugin sign arbitrary messages, not just bounded daily `SpendingAuth`s for one channel.
 
-**New AntSeed-side surface (open item 7):** a narrow method, roughly `signCumulativeAuth(sellerPeerId, cumulativeAmount, metadata)`, that does the sign + persist + update-internal-map + check-topup tail `signPerRequestAuth` already does (buyer-payment-manager.ts:1350-1393) — minus the per-request cost computation that precedes it, since there's no per-request data to compute from. Updating the same private `_cumulativeAmount` map is not optional: `_needsTopUp()` reads it, and routing-client is reusing `topUpReserve()`/`_needsTopUp()` **unmodified** (§6.3) — sign independently of `BuyerPaymentManager` and that trigger silently stops firing.
+**New AntSeed-side surface (open item 3):** a narrow method, roughly `signCumulativeAuth(sellerPeerId, cumulativeAmount, metadata)`, that does the sign + persist + update-internal-map + check-topup tail `signPerRequestAuth` already does (buyer-payment-manager.ts:1350-1393) — minus the per-request cost computation that precedes it, since there's no per-request data to compute from. Updating the same private `_cumulativeAmount` map is not optional: `_needsTopUp()` reads it, and routing-client is reusing `topUpReserve()`/`_needsTopUp()` **unmodified** (§6.3) — sign independently of `BuyerPaymentManager` and that trigger silently stops firing.
 
 **Plugin-side logic**, all new, none of it touching AntSeed internals:
 
-- **Pay-first (§6.2):** sign today's cumulative *before* making any routing calls that day, not after using it — the routing peer requires today's signature on file before serving a request (§3.3). Never sign further ahead than today: `SpendingAuth` has no deadline, so a signature for a future day could be settled by the seller at any time even after the buyer stops routing. This trades the routing peer's free-rider risk (buyer uses a day, never pays) for a smaller buyer-side risk (buyer pays for today, cancels almost immediately) — both capped at one day, ~$0.59, a deliberate choice to put that bounded risk on the buyer rather than the seller.
-- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for the next ceiling and call `topUpReserve()` once — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method. Whether that next ceiling should be a full month's worth immediately, or grow more gradually, is open item 16 in the decisions doc — a monthly jump is the leading candidate, not locked.
+- **Pay-first, calendar-day (§6.2, §6.7):** sign today's cumulative once per calendar day while the toggle is on — *before* making any routing calls that day, not after using it, and independent of whether the user actually routes anything that day. Billing isn't usage-triggered: a day is charged for every day the toggle stays on, regardless of whether a routing call fired that day; turning the toggle off stops signing immediately. The routing peer requires today's signature on file before serving a request (§3.3). Never sign further ahead than today: `SpendingAuth` has no deadline, so a signature for a future day could be settled by the seller at any time even after the buyer stops routing. This trades the routing peer's free-rider risk (buyer uses a day, never pays) for a smaller buyer-side risk (buyer pays for today, cancels almost immediately) — both capped at one day, ~$0.59, a deliberate choice to put that bounded risk on the buyer rather than the seller.
+- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for the next ceiling and call `topUpReserve()` once — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method. Whether that next ceiling should be a full month's worth immediately, or grow more gradually, is open item 5 in the decisions doc — a monthly jump is the leading candidate, not locked.
 - Catch-up window: cap at ~30 days: older unsigned days are forgiven rather than accumulated indefinitely (§6.7).
 - Cancellation is just "stop calling the new method" — no explicit unwind needed (§6.2).
 
 ### 2.7 Daily digest (decisions doc §6.9)
 
-Stats/calibration only — not part of the routing call itself (that's §2.1/§3.1, wire shape fixed in decisions doc §4.4) and not required for correct routing to work. Same daily cadence as §2.6's `SpendingAuth` signature, **not the same wire message** — see §3.6 for why (`SpendingAuthMetadata` is the wrong shape, `PaymentMux` message types are a closed protocol enum). Sent as its own request over the reserved-path infrastructure §3.1 already builds, toggleable to payment-only per §6.9.
+Stats/calibration only — not part of the routing call itself (that's §2.1/§3.1, wire shape fixed in decisions doc §4.4) and not required for correct routing to work. Same daily cadence as §2.6's `SpendingAuth` signature, **not the same wire message** — see §3.6 for why (`SpendingAuthMetadata` is the wrong shape, `PaymentMux` message types are a closed protocol enum). Sent as its own request over the reserved-path infrastructure §3.1 already builds. Default on, with **no opt-out** — using the router at all means the digest is sent (decisions doc §6.9); there's no payment-only mode.
 
 Trimmed to fields with zero new plumbing — everything below is already produced somewhere in §2.5/§2.6/§4.4, just needs forwarding:
 
@@ -185,7 +187,7 @@ Trimmed to fields with zero new plumbing — everything below is already produce
 | `predictedCostUsd` | Sum of the new `predictedCostUsd` field (§2.5) across today's rows |
 | `modelMix` | Tally of `actualModel` across today's rows |
 
-Dropped from decisions doc §6.9's original field list — both need genuinely new plumbing that doesn't exist anywhere else in this design: `failovers`/`timeouts` (would need new counters on the §2.4 failover walk) and `regenerations`/`overrides` (would need a new signal from the VPR/CLI UI, §4, which nothing currently produces). **Flagged as open item 17** in the decisions doc — this trimmed field set isn't locked, just what's cheap enough to build first.
+Dropped from decisions doc §6.9's original field list — both need genuinely new plumbing that doesn't exist anywhere else in this design: `failovers`/`timeouts` (would need new counters on the §2.4 failover walk) and `regenerations`/`overrides` (would need a new signal from the VPR/CLI UI, §4, which nothing currently produces). **Flagged as open item 6** in the decisions doc — this trimmed field set isn't locked, just what's cheap enough to build first.
 
 ## 3. Routing-Server Plugin (Peer-Side)
 
@@ -266,17 +268,17 @@ Lives in `sage_model_router` (`levantolabs/sage_model_router` @ `rank-from-preco
 
 **λ recalibration**, confirmed: `set_prices()` (`router.py:384`) swaps in live prices and calls `recalibrate_lambda()`, which (`lambda_calibration.py:62`, `costs_at()`) computes predicted cost from raw `(price_in, price_out)` tuples directly — matching §4.5's "λ calibration uses raw prices, not the blended rate." The routing peer calls `set_prices()` on a 10-minute timer with live discovered network prices, matching §4.1's component map. `costs_at()` never reads the cached rate, so a cache-price-only change wouldn't move the calibration result even under a different trigger mechanism.
 
-### 3.5 Reputation floor (new — not in the decisions doc until now)
+### 3.5 Reputation floor (decisions doc §4.4)
 
-Confirmed nothing currently applies one: neither `sage_model_router` (`set_prices`/`costs_at`/`rank_candidates_from_vector` have no reputation awareness at all) nor `buildNetworkServiceOffers` (attaches `reputationScore` as metadata, never filters on it) — an untrusted or spam peer's advertised price can feed straight into λ calibration and appear as a ranked candidate today. Flagged as **open item 18** in the decisions doc.
+Confirmed nothing currently applies one: neither `sage_model_router` (`set_prices`/`costs_at`/`rank_candidates_from_vector` have no reputation awareness at all) nor `buildNetworkServiceOffers` (attaches `reputationScore` as metadata, never filters on it) — an untrusted or spam peer's advertised price could otherwise feed straight into λ calibration and appear as a ranked candidate.
 
-Proposed: one global floor, applied consistently in three places — since all three should agree on what "trusted enough to consider" means, not drift independently:
+**Global floor, decided as a mechanism** — confirmed as the same `computeOnChainReputationScore(p) ?? p.reputationScore` `LocalRouter.minReputation` already uses (`plugins/router-local/src/router.ts:18`), not something routing-specific — applied consistently in three places, since all three need to agree on what "trusted enough to consider" means:
 
 1. **`PriceBook` construction** (§3.2/§3.4) — only peers meeting the floor contribute a price to what `set_prices()` sees, so λ is never calibrated against an untrusted peer's rate.
 2. **Ranking eligibility** — the same floor gates which peers are even in the candidate set `rank_candidates_from_vector` ranks over (has to happen in the routing-server plugin's own peer-set construction, since that function itself has no reputation parameter).
 3. **Per-buyer tightening only, never loosening** — layered under the existing per-buyer `constraints.minTrustScore` (§4.4): a buyer requesting a *stricter* threshold than the global floor is honored on the returned ranked list; a *looser* request is ignored. The global floor is a hard minimum.
 
-Two things open item 18 leaves unresolved: the exact threshold (provisionally 0.70 on §4.4's 0–100 `minTrustScore` scale), and whether "reputation" here means the same `computeOnChainReputationScore(p) ?? p.reputationScore` `LocalRouter.minReputation` already uses (`plugins/router-local/src/router.ts:18`), or something routing-specific.
+Only the exact threshold is still open — decisions doc open item 7, provisionally `minTrustScore ≥ 0.70` on the 0–100 scale.
 
 ### 3.6 Digest receiving (decisions doc §6.9, §6.8)
 
@@ -287,7 +289,9 @@ Server-side counterpart to §2.7. Two things ruled out first:
 
 **Instead: reuse §3.1's reserved-path infrastructure.** Same daily cadence as the `SpendingAuth` signature, sent as its own HTTP-shaped request rather than bundled into it — the digest fields go through the exact same `RoutingServer` plugin and dispatch machinery already built for `/_antseed/route`, not a new protocol surface. Concretely: `route()` handles both request shapes (the §4.4 routing request and the §2.7 digest submission are distinguishable by their JSON body — no ambiguity, since a routing request always carries `sagePrompt` and a digest never does), or a `/_antseed/route/digest` suffix if a cleaner split is preferred over body-sniffing — either way, no new plugin type, no new `MessageType`, no new codec.
 
-**Retention** — §6.8's "one daily performance digest" is retained permanently: each day's digest accumulates rather than replacing the last, which is what makes the fleet-calibration value in §6.9 possible (a single overwritten snapshot couldn't answer "how does the cost model track live prices over time"). Long-term retention is anonymized — the exact mechanism is open item 19 in the decisions doc, since §6.9 already flags that raw per-subscriber accumulation over time turns `modelMix` into a usage profile even without content. No new identity/auth needed for the submission itself beyond what already exists — `buyerPeerId` is inherent to the authenticated P2P connection the same way it already is for every other request in this design (§3.1, §3.3) — but whatever anonymization item 19 settles on determines what actually gets written to storage.
+**Retention** — §6.8's "one daily performance digest" is retained permanently: each day's digest accumulates rather than replacing the last, which is what makes the fleet-calibration value in §6.9 possible (a single overwritten snapshot couldn't answer "how does the cost model track live prices over time").
+
+**Anonymized by keying, decided (decisions doc §6.9):** the digest is stored under `hash(buyerPeerId)`, never the raw peer id — lets Levanto connect one subscriber's digests across days (needed for the fleet-calibration and per-subscriber-trend value the digest exists for) without being able to tell which AntSeed peer that subscriber actually is. This is a real implementation step, not just a storage-policy note: the routing-server already has the raw `buyerPeerId` for free, inherent to the authenticated P2P connection the same way it is for every other request in this design (§3.1, §3.3) — but it must compute and store the hash instead of the raw id before persisting anything.
 
 ## 4. VPR / CLI Product Surface
 
@@ -327,7 +331,7 @@ At the data level, it still needs to satisfy whatever `VprSelectedModel`/`VprSel
 
 ### 4.4 CQT dial (decisions doc §8.1)
 
-Reuses an existing generic primitive directly — `VprSlider` (`VprKit.tsx:118-141`), a plain `{min, max, step, value, onChange, ariaLabel}` wrapper over `<input type="range">`, already used elsewhere in preferences UI. Five discrete positions: `min={0} max={4} step={1}`, `value` is the UI position index, mapped to a fixed point on the underlying 0–10 CQT range before it reaches the plugin's config — the exact five mapped values aren't specified anywhere yet (decisions doc only says "five fixed points" — flagged as open item 21), worth pinning down but not blocking on. Default position: the middle one, index 2.
+Reuses an existing generic primitive directly — `VprSlider` (`VprKit.tsx:118-141`), a plain `{min, max, step, value, onChange, ariaLabel}` wrapper over `<input type="range">`, already used elsewhere in preferences UI. Five discrete positions: `min={0} max={4} step={1}`, `value` is the UI position index, mapped to CQT values **1, 3, 5, 7, 9** on the underlying 0–10 range (decisions doc §8.1). Default position: the middle one, index 2 → CQT value 5, labeled "Balanced."
 
 Sits alongside the existing "Auto select seller"/"Prefer free peers" rows in `VprPreferencesView.tsx` (§4.1), visible once the subscription is active (§4.2's opt-in). Copy constraint from §8.1, not a technical one: the dial is relative, not a spend target — no "save X%" language tied to a specific position.
 
@@ -335,7 +339,7 @@ Sits alongside the existing "Auto select seller"/"Prefer free peers" rows in `Vp
 
 Both existing savings surfaces need the new middle tier — confirmed two independent consumers, not one: `VprHomeView.tsx:150` and `VprActivityView.tsx:116` each call `computeMeasuredSavings(snap.usage?.services, referencePrices)` separately. Both need §4.6's "Router savings" line added alongside the existing "AntSeed savings" figure, sourced from §2.5's ledger — not from `computeMeasuredSavings`'s aggregate, confirmed back in §2.5 as a genuinely different data source (per-decision price snapshots vs. aggregated actual spend).
 
-Both numbers shown together, not just a final combined figure (decisions doc §4.6's three-tier diagram) — otherwise the router looks responsible for savings that actually come from AntSeed's marketplace. Baseline dropdown (§8.4) picks model X from the fixed set (§2.5, open item 15) and recomputes the router-savings tier client-side from the ledger whenever it changes. Subscription fee (§8.5) is always its own separate line item, never netted against either savings figure.
+Both numbers shown together, not just a final combined figure (decisions doc §4.6's three-tier diagram) — otherwise the router looks responsible for savings that actually come from AntSeed's marketplace. Baseline dropdown (§8.4) picks model X from the fixed set (§2.5), defaulting to the top flagship GPT or Claude model available at the time, and recomputes the router-savings tier client-side from the ledger whenever it changes. Subscription fee (§8.5) is always its own separate line item, never netted against either savings figure.
 
 ### 4.6 Model disclosure (decisions doc §8.3)
 
@@ -424,7 +428,7 @@ sequenceDiagram
         RP->>RP: store, updatedAt = today
     end
 
-    Note over Client,RP: ~Day 30 - renewal (leading candidate, not locked - open item 16)
+    Note over Client,RP: ~Day 30 - renewal (leading candidate, not locked - open item 5)
     Client->>RP: fresh ReserveAuth (next ceiling)
     RP->>Chain: topUp() - settles + extends [1 tx]
 
