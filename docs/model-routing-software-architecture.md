@@ -145,6 +145,11 @@ type RoutingDecisionRow = {
   actualCompletionTokens: number
   actualUsdcPaid: number          // estimatedCostUsd from the extended onResult payload
   predictedCostUsd: number | null // the winning candidate's predictedCostUsd from the §4.4 ranked response — feeds §2.7's daily digest
+  predictedInputTokens: number | null       // new fields on the §4.4 ranked entry — feed §2.7's calibration/cache-accuracy fields
+  predictedCachedInputTokens: number | null
+  predictedOutputTokens: number | null
+  cqt: number                     // the dial value in effect for this decision — feeds §2.7's cqtDistribution
+  routingLatencyMs: number | null // time the /_antseed/route call took; null when the gate skipped the call entirely
   baselinePrices: {
     [model: string]: { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }
     // one entry per fixed dropdown option (§8.4) present in this decision's ranked list;
@@ -174,20 +179,24 @@ The §8.4 baseline dropdown is decided as a **fixed, curated option set**, not o
 
 Stats/calibration only — not part of the routing call itself (that's §2.1/§3.1, wire shape fixed in decisions doc §4.4) and not required for correct routing to work. Same daily cadence as §2.6's `SpendingAuth` signature, **not the same wire message** — see §3.6 for why (`SpendingAuthMetadata` is the wrong shape, `PaymentMux` message types are a closed protocol enum). Sent as its own request over the reserved-path infrastructure §3.1 already builds. Default on, with **no opt-out** — using the router at all means the digest is sent (decisions doc §6.9); there's no payment-only mode.
 
-Trimmed to fields with zero new plumbing — everything below is already produced somewhere in §2.5/§2.6/§4.4, just needs forwarding:
+Full field set, decided (decisions doc §6.9) — no longer trimmed. Some of it is free, forwarding state that already exists; some genuinely needs new plumbing:
 
 | Field | Source |
 |---|---|
-| `day` | §2.6's elapsed-day counter |
-| `cqt` | The CQT dial setting, read from config at signing time |
-| `artifactVersion`, `lambdaVersion` | The routing peer's own `receipt` block (§4.4) — cache today's most recent one |
-| `routedRequests` | Count of §2.5 ledger rows written today |
-| `actualCostUsd` | Sum of `actualUsdcPaid` across today's rows |
-| `baselineCostUsd` | Sum of `baselinePrices[X]`-derived cost across today's rows, X = the §8.4 dashboard's selected baseline |
-| `predictedCostUsd` | Sum of the new `predictedCostUsd` field (§2.5) across today's rows |
-| `modelMix` | Tally of `actualModel` across today's rows |
+| `period` | Same daily boundary §2.6's signing already tracks |
+| `routedRequests` | Count of §2.5 ledger rows written this period |
+| `predictedCostUsd` | Sum of `predictedCostUsd` (§2.5) across this period's rows — already there |
+| `observedCostUsd` | Sum of `actualUsdcPaid` (§2.5) across this period's rows — already there |
+| `predictedInputTokens`, `predictedCachedInputTokens`, `predictedOutputTokens` | Sum of the new §2.5 predicted-token fields — **new**, those fields don't exist on the ledger row until §4.4's schema extension lands |
+| `observedInputTokens`, `observedCachedInputTokens`, `observedOutputTokens` | Sum of `actualPromptTokens`/`actualCachedTokens`/`actualCompletionTokens` (§2.5) — already there |
+| `modelMix` | Tally of `actualModel` across this period's rows — already there |
+| `regenerations` | **New** — needs a signal from the VPR/CLI UI (§4) that nothing currently produces |
+| `overrides` | **New** — same, a UI signal for "user picked a concrete model instead of Auto" that doesn't exist yet |
+| `failovers`, `timeouts` | **New** — needs counters on the §2.4 failover walk, which currently just walks and dispatches without recording how often it had to move past the first candidate |
+| `avgRoutingLatencyMs` | **New** — average of the new §2.5 `routingLatencyMs` field, itself new instrumentation around the `/_antseed/route` call in §2.1 |
+| `cqtDistribution` | Tally of the new §2.5 `cqt` field across this period's rows — **new**, that field doesn't exist on the ledger row yet either |
 
-Dropped from decisions doc §6.9's original field list — both need genuinely new plumbing that doesn't exist anywhere else in this design: `failovers`/`timeouts` (would need new counters on the §2.4 failover walk) and `regenerations`/`overrides` (would need a new signal from the VPR/CLI UI, §4, which nothing currently produces). **Flagged as open item 5** in the decisions doc — this trimmed field set isn't locked, just what's cheap enough to build first.
+`artifactVersion`/`lambdaVersion` are deliberately absent — the routing peer stores its own λ/price calibration history directly (not user-related data, no anonymization concern) and correlates against `predictedCostUsd`/`observedCostUsd` by `period` instead of relying on the client to report which version served each request (decisions doc open item 5).
 
 ## 3. Routing-Server Plugin (Peer-Side)
 

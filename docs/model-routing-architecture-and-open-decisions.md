@@ -196,6 +196,7 @@ One caveat: a simple ratio over-estimates if the prefix is invalidated (system p
   "ranked": [
     { "model": "gpt-5.6-luna", "peer": "0x…", "score": 0.91,
       "predictedQuality": 0.93, "predictedCostUsd": 0.0009,
+      "predictedInputTokens": 18422, "predictedCachedInputTokens": 16000, "predictedOutputTokens": 450,
       "price": { "inUsdPerM": 0.2, "outUsdPerM": 1.1, "cachedInUsdPerM": 0.02 } }
   ],
   "baselineSuggestion": { "model": "gpt-5.6-sol", "peer": "0x…",
@@ -210,6 +211,8 @@ One caveat: a simple ratio over-estimates if the prefix is invalidated (system p
 **`allowedPeerIds` is a client-side re-filter, not a ranking restriction.** Sage keeps ranking broadly across the whole network — an allowlist would otherwise narrow the ranking input back toward the old fixed-model pipeline's "pick a seller for one decided model" shape, which cuts against cross-model routing. Instead the client walks the returned ranked list as usual and skips any candidate outside the allowlist, exactly as it already does for `blockedPeerIds`. If the walk exhausts the ranked list without finding a candidate inside the allowlist, the client falls back to the allowed peers directly rather than giving up. Both lists apply together: allow first, then exclude anything also blocked.
 
 The `price` blocks let the client write a complete savings-ledger row without ever holding a price table, and without the peer keeping anything.
+
+**`predictedInputTokens`/`predictedCachedInputTokens`/`predictedOutputTokens`** feed the daily digest's calibration fields (§6.9) — not derivable from `predictedCostUsd` and `price` alone, since that's one equation with three unknowns. Genuinely new fields on the ranked entry, not already present.
 
 **Global reputation floor.** The routing peer enforces a single global minimum reputation score, `minTrustScore ≥ 0.70` on the 0–100 scale (the same `computeOnChainReputationScore(p) ?? p.reputationScore` `LocalRouter` already uses for `minReputation`, `plugins/router-local/src/router.ts:18`), applied consistently in three places: which peers' prices build the live `PriceBook` fed into λ calibration, which peers are eligible ranked candidates at all, and as a floor under the buyer's own `constraints.minTrustScore`. A buyer can only tighten this floor — requesting a stricter threshold is honored server-side against the received config value — never loosen it; the global minimum always wins. This closes the gap where an untrusted or spam peer's advertised price could otherwise feed straight into λ calibration and appear as a ranked candidate.
 
@@ -394,16 +397,20 @@ The client already contacts the peer once a day to hand over a signed `SpendingA
 
 | Field | Purpose |
 |---|---|
-| `day`, `cqt`, `artifactVersion`, `lambdaVersion` | Attribute the numbers below to a configuration |
-| `routedRequests` | Denominator |
-| `actualCostUsd` | What the user actually spent on routed requests |
-| `baselineCostUsd` | Same requests priced at the baseline model X, at the prices of the moment |
-| `predictedCostUsd` | Calibration signal against `actualCostUsd` for the cost model |
+| `period` | Which aggregation window these numbers belong to — currently always one calendar day, tied to §6.2's billing cadence |
+| `routedRequests` | Denominator for everything else |
+| `predictedCostUsd` | The router's predicted cost, summed — from the ranked response's `predictedCostUsd` (§4.4), not Sage's quality model specifically |
+| `observedCostUsd` | What the user actually spent on routed requests — calibration signal against `predictedCostUsd` |
+| `predictedInputTokens`, `predictedCachedInputTokens`, `predictedOutputTokens` | What the router expected, split fresh/cached — new fields on §4.4's `ranked` entry, not previously present |
+| `observedInputTokens`, `observedCachedInputTokens`, `observedOutputTokens` | What actually happened — already on the local ledger (§4.6); diffed against predicted for cache-estimator accuracy, and lets Levanto compute cost at any reference model's price after the fact, not just one buyer's own dashboard baseline choice |
 | `modelMix` — `{canonicalModel: count}` | Which models get chosen; feeds catalogue coverage decisions |
-| `regenerations`, `overrides` | Cheap tripwire for saving money by degrading answers |
-| `failovers`, `timeouts` | Reliability of the ranked list and the peer |
+| `regenerations` | User hit regenerate — the tripwire for saving money by degrading answers, since no per-request cost signal exists to catch this under flat-fee pricing |
+| `overrides` | User manually picked a model instead of trusting Auto — revealed-preference signal that Auto got it wrong |
+| `failovers`, `timeouts` | Reliability of the ranked list and the peer in practice, not just in theory |
+| `avgRoutingLatencyMs` | Time the routing call itself took — a UX cost with no other visibility |
+| `cqtDistribution` — `{cqtValue: count}` | Which of the five dial positions served how many requests that period |
 
-Roughly ten scalars and a short map. No prompts, no per-request rows, no timestamps finer than the day, no conversation structure. Every field is already computed for the user's own dashboard, so the numbers Levanto sees are exactly the numbers the user sees.
+Not all of this is free. `predictedInputTokens`/`predictedCachedInputTokens`/`predictedOutputTokens` need the §4.4 schema extension above. `regenerations`/`overrides` need a new signal from the VPR/CLI UI that nothing currently produces. `failovers`/`timeouts` need new counters on the client's failover walk. `avgRoutingLatencyMs` needs new timing instrumentation around the routing call. `cqtDistribution` needs per-decision CQT tracking on the local ledger. Everything else — `period`, `routedRequests`, `predictedCostUsd`, `observedCostUsd`, the observed token fields, `modelMix` — is already produced somewhere for the user's own dashboard or the local ledger, so those numbers Levanto sees are exactly the numbers the user sees; the rest is genuinely new work, not just forwarding.
 
 With a few hundred subscribers, this turns the savings figure into a measured fleet number rather than a benchmark extrapolation, and lets the cost model be calibrated against live AntSeed prices and this fleet's actual prompt lengths — something benchmarking elsewhere cannot provide. It does **not** enable retraining: with no prompts or labels leaving the device, the quality heads cannot learn from production traffic, and the digest must not grow toward that job.
 
@@ -544,7 +551,7 @@ Everything else in this document is decided. What's left:
 
 3. Measure `topUp` gas on Base before fixing the monthly cadence (§6.4).
 4. Is a monthly reserve ceiling (§6.4) the right size to commit to immediately after the one-day bootstrap ramp, or should the first `topUp()` raise the ceiling by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost. Related to item 1 (the wiring for a per-seller top-up increment), but this is the sizing/cadence decision underneath that wiring question, not the mechanism itself.
-5. Is the daily performance digest's field set (§6.9) complete as specified, or trimmed? `failovers`/`timeouts` and `regenerations`/`overrides` both need genuinely new plumbing (failover-walk counters; a new VPR/CLI UI signal, §8) that nothing else in the design currently produces, unlike the other eight fields, which are all already derivable from state the routing-client plugin keeps for other reasons. Building against the trimmed eight-field set for now; the two dropped pairs can be added later without changing the mechanism, since the digest rides along on an existing call regardless of its payload size.
+5. How does versioning work for `routing-client`/`routing-server` in general, beyond the wire-protocol `"v": 1` field (§4.4), which only covers the request/response schema? Does `routing-server`'s own code version (distinct from Sage's `artifactVersion`) need tracking; does `routing-client`'s version matter given it's potentially third-party code (§G3) talking to a peer that might be a different version; how are `routing-server`/Sage deployments and rollouts sequenced without breaking in-flight requests? (The digest sub-question this originally raised is resolved: `artifactVersion`/`lambdaVersion` are dropped from the digest's field list — the routing peer stores its own λ/price calibration history directly, since it isn't user-related data, and correlates against `predictedCostUsd`/`observedCostUsd` by `period` instead.)
 
 **Before any savings number goes public:** state which baseline the percentage is measured against, and keep it visually separate from AntSeed's own savings-versus-retail figure (§9.5).
 
