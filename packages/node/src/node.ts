@@ -70,7 +70,7 @@ import type {
   ProviderStreamCallbacks,
 } from "./interfaces/seller-provider.js";
 import type { Router } from "./interfaces/buyer-router.js";
-import type { Prover } from "./interfaces/plugin.js";
+import type { Prover, RoutingServerHandler } from "./interfaces/plugin.js";
 import { NatTraversal } from "./p2p/nat-traversal.js";
 import { signUtf8 } from "./p2p/identity.js";
 import {
@@ -326,6 +326,7 @@ export class AntseedNode extends EventEmitter {
   private _connectionManager: ConnectionManager | null = null;
   private _providers: Provider[] = [];
   private _provers: Prover[] = [];
+  private _routingServerHandler: RoutingServerHandler | null = null;
   private _router: Router | null = null;
   private _started = false;
   private _announcer: PeerAnnouncer | null = null;
@@ -445,6 +446,15 @@ export class AntseedNode extends EventEmitter {
   /** Register an embedded verifier prover (serves reserved attestation requests). */
   registerProver(prover: Prover): void {
     this._provers.push(prover);
+  }
+
+  /** Register the seller-side handler for the reserved model-routing-decision path (single instance). */
+  registerRoutingServerHandler(handler: RoutingServerHandler): void {
+    this._routingServerHandler = handler;
+  }
+
+  get routingServerHandler(): RoutingServerHandler | null {
+    return this._routingServerHandler;
   }
 
   setRouter(router: Router): void {
@@ -1671,6 +1681,7 @@ export class AntseedNode extends EventEmitter {
       identity,
       providers: this._providers,
       provers: this._provers,
+      routingServerHandler: this._routingServerHandler,
       sellerPaymentManager: this._sellerPaymentManager,
       sellerFreeUsageManager: this._sellerFreeUsageManager,
       sessionTracker: this._sessionTracker,

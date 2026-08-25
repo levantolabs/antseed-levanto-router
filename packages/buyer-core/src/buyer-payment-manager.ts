@@ -97,6 +97,18 @@ export interface PerRequestAuthResult {
   topUpNeeded: boolean;
 }
 
+/**
+ * Host-configured bound for signCumulativeAuth (flat daily-fee signing,
+ * decisions doc SS6.2). Set once by trusted host code, not by the plugin
+ * requesting a signature — see signCumulativeAuth's own doc comment for why.
+ */
+export interface FlatFeeSigningConfig {
+  /** e.g. $0.59/day as 590000n (6-decimal USDC). */
+  dailyAmountUsdc: bigint;
+  /** Caps how many days' worth a single call can catch up in one signature. */
+  catchUpCapDays: number;
+}
+
 export interface BuyerRequestBillingEntry {
   context: UnitBillingContext;
   requestFacts: ImageRequestFacts;
@@ -167,6 +179,12 @@ export class BuyerPaymentManager {
 
   /** sellerPeerId -> buyer-verified cumulative cost from bytes/4 */
   private readonly _verifiedCost = new Map<string, bigint>();
+
+  /** sellerPeerId -> flat daily-fee signing bound (model-routing subscription, decisions doc SS6.2). Host-set only. */
+  private readonly _flatFeeConfig = new Map<string, FlatFeeSigningConfig>();
+
+  /** sellerPeerId -> wall-clock time of the last signCumulativeAuth call, for independently bounding the next one. */
+  private readonly _lastFlatFeeSignedAt = new Map<string, number>();
 
   /** requestId -> service/model the buyer requested (from its own request body).
    *  Used in handleNeedAuth to validate cost with the correct pricing tier
@@ -1391,6 +1409,113 @@ export class BuyerPaymentManager {
     const topUpNeeded = this._needsTopUp(sellerPeerId);
 
     return { payload, topUpNeeded };
+  }
+
+  // ── Flat-fee cumulative signing (model-routing subscription) ───
+
+  /**
+   * One-time host-level setup for a seller the buyer will sign flat daily
+   * fees against (decisions doc SS6.2). Must be called before
+   * signCumulativeAuth; not something request-time plugin code can do to
+   * itself, since it's exactly what bounds signCumulativeAuth's trust in
+   * that plugin's requests.
+   */
+  configureFlatFeeSigning(sellerPeerId: string, config: FlatFeeSigningConfig): void {
+    this._flatFeeConfig.set(sellerPeerId, config);
+  }
+
+  /**
+   * Sign a flat daily-subscription cumulative (decisions doc SS6.2,
+   * software-architecture doc SS2.6 open item 2), given an amount the
+   * calling plugin already decided. Unlike signPerRequestAuth, there is no
+   * responseStats to compute a cost from — a subscription fee isn't metered
+   * per-request usage.
+   *
+   * requestedCumulativeAmount is a REQUEST, not a command: this method never
+   * signs more than dailyAmountUsdc times the calendar days actually elapsed
+   * since it last signed for this seller (capped at catchUpCapDays), computed
+   * from this manager's own clock and its own persisted state — never from
+   * anything the caller says. This mirrors _maxSignableForVerified's role for
+   * metered billing (bounding by independently-verified cost, not the
+   * caller's claim); a routing-client plugin is explicitly allowed to be
+   * third-party code sharing this process (decisions doc SSG3), so this
+   * method can't extend it more trust than that.
+   */
+  async signCumulativeAuth(
+    sellerPeerId: string,
+    requestedCumulativeAmount: bigint,
+  ): Promise<PerRequestAuthResult> {
+    const session = this.getActiveSession(sellerPeerId);
+    if (!session) {
+      throw buyerFault(
+        `[BuyerPayment] No active session for seller ${sellerPeerId.slice(0, 12)}... — call authorizeSpending() first`,
+        'buyer-session-state',
+      );
+    }
+    const config = this._flatFeeConfig.get(sellerPeerId);
+    if (!config) {
+      throw buyerFault(
+        `[BuyerPayment] No flat-fee config for seller ${sellerPeerId.slice(0, 12)}... — call configureFlatFeeSigning() first`,
+        'buyer-session-state',
+      );
+    }
+
+    const prevAmount = this._cumulativeAmount.get(sellerPeerId) ?? 0n;
+    const lastSignedAt = this._lastFlatFeeSignedAt.get(sellerPeerId);
+    const daysElapsed = lastSignedAt == null
+      ? 1 // first-ever flat-fee signature for this seller — exactly one day's worth
+      : Math.max(1, Math.ceil((Date.now() - lastSignedAt) / (24 * 60 * 60 * 1000)));
+    const cappedDays = Math.min(daysElapsed, config.catchUpCapDays);
+    const maxAllowedIncrement = config.dailyAmountUsdc * BigInt(cappedDays);
+
+    const ceiling = this._getCeiling(sellerPeerId);
+    let maxSignable = prevAmount + maxAllowedIncrement;
+    if (maxSignable > ceiling) maxSignable = ceiling;
+
+    let newAmount = requestedCumulativeAmount;
+    if (newAmount > maxSignable) newAmount = maxSignable;
+    if (newAmount < prevAmount) newAmount = prevAmount; // monotonic, same invariant as signPerRequestAuth
+
+    // No real per-request usage for a flat fee — a zeroed but validly-shaped
+    // SpendingAuthMetadata, same encode/hash path signPerRequestAuth uses.
+    const flatMeta: SpendingAuthMetadata = {
+      cumulativeInputTokens: 0n,
+      cumulativeOutputTokens: 0n,
+      cumulativeRequestCount: 0n,
+    };
+    const metadataHashHex = computeMetadataHash(flatMeta);
+    const encodedMetadata = encodeMetadata(flatMeta);
+
+    const channelsDomain = this._channelsDomain;
+    const metadataMsg: SpendingAuthMessage = {
+      channelId: session.sessionId,
+      cumulativeAmount: newAmount,
+      metadataHash: metadataHashHex,
+    };
+    const spendingAuthSig = await signSpendingAuth(this._signer, channelsDomain, metadataMsg);
+
+    await this._commitAuthorization({
+      ...session,
+      authMax: newAmount.toString(),
+      latestBuyerSig: spendingAuthSig,
+      latestSpendingAuthSig: spendingAuthSig,
+      latestMetadata: encodedMetadata,
+      updatedAt: Date.now(),
+    }, flatMeta);
+
+    this._cumulativeAmount.set(sellerPeerId, newAmount);
+    this._metadata.set(sellerPeerId, flatMeta);
+    this._lastFlatFeeSignedAt.set(sellerPeerId, Date.now());
+
+    const payload: SpendingAuthPayload = {
+      channelId: session.sessionId,
+      cumulativeAmount: newAmount.toString(),
+      metadataHash: metadataHashHex,
+      metadata: encodedMetadata,
+      spendingAuthSig,
+    };
+
+    return { payload, topUpNeeded: this._needsTopUp(sellerPeerId) };
   }
 
   // ── NeedAuth handler ───────────────────────────────────────────

@@ -1953,4 +1953,123 @@ describe('BuyerPaymentManager', () => {
     expect(channel!.previousConsumption).toBe('350');
     expect(channel!.requestCount).toBe(2);
   });
+
+  describe('signCumulativeAuth (model-routing flat-fee subscription)', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    // Kept well under makeConfig's maxPerRequestUsdc (100_000n = $0.10) --
+    // authorizeSpending silently no-ops (empty channelId) above that, per
+    // the existing 'authorizeSpending rejects if minBudgetPerRequest
+    // exceeds maxPerRequestUsdc' test above.
+    const DAILY_AMOUNT = 10_000n; // $0.01-equivalent for test purposes
+
+    it('throws if configureFlatFeeSigning was never called', async () => {
+      const sellerPeerId = fakePeerId('flat-no-config');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      await expect(manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT)).rejects.toThrow(/configureFlatFeeSigning/);
+    });
+
+    it('throws if there is no active session', async () => {
+      const sellerPeerId = fakePeerId('flat-no-session');
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+      await expect(manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT)).rejects.toThrow(/No active session/);
+    });
+
+    it('signs exactly the requested amount on day one, when it matches one day', async () => {
+      const sellerPeerId = fakePeerId('flat-day-one');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+
+      const { payload, topUpNeeded } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+      expect(topUpNeeded).toBe(false);
+      const channel = store.getActiveChannelByPeer(sellerPeerId, CHANNEL_ROLE.BUYER);
+      expect(channel!.authMax).toBe(DAILY_AMOUNT.toString());
+      expect(channel!.latestSpendingAuthSig).toBe(payload.spendingAuthSig);
+    });
+
+    it('never signs more than one day is worth on the very first call, even if asked for far more', async () => {
+      const sellerPeerId = fakePeerId('flat-overask-day-one');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+
+      // A buggy/malicious plugin asks for far more than one day's worth on day one.
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 7n);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+    });
+
+    it('advances by exactly one more day on the next ordinary call', async () => {
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-day-two');
+        await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+        manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+
+        await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(DAY_MS);
+        const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 2n);
+
+        expect(payload.cumulativeAmount).toBe((DAILY_AMOUNT * 2n).toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('caps a long toggle-on gap at catchUpCapDays, per decisions doc SS6.7', async () => {
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-catchup-cap');
+        await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+        manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 5 });
+
+        await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(9 * DAY_MS); // a 9-day toggle-on gap, cap is 5
+        // Ask for the full 10 days' worth (1 + 9) -- should clamp to 1 + 5.
+        const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 10n);
+
+        expect(payload.cumulativeAmount).toBe((DAILY_AMOUNT * 6n).toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never signs below the previous cumulative, even if asked to', async () => {
+      const sellerPeerId = fakePeerId('flat-monotonic');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+      await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, 1n);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+    });
+
+    it('never signs past the reserve ceiling, even when the day-based bound would allow more', async () => {
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-ceiling');
+        const smallCeiling = 35_000n;
+        // _getCeiling falls back to config.maxReserveAmountUsdc until a real
+        // on-chain reserve/topUp confirms a channel-specific ceiling -- not
+        // exercised in this unit test, so override it at the config level
+        // to actually constrain this specific manager instance.
+        const ceilingManager = new BuyerPaymentManager(identity, makeConfig(tempDir, { maxReserveAmountUsdc: smallCeiling }), store);
+        ceilingManager.setSigner(identity.wallet);
+        await ceilingManager.authorizeSpending(sellerPeerId, mux, 10_000n, TEST_PRICING);
+        ceilingManager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: 30 });
+
+        await ceilingManager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(10 * DAY_MS);
+        // Day-based bound after 10 more days (well within the 30-day cap) would
+        // allow up to 11 x DAILY_AMOUNT = 110_000n -- the ceiling (35_000n) is
+        // the actual binding constraint here, not the day count.
+        const { payload } = await ceilingManager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 11n);
+
+        expect(payload.cumulativeAmount).toBe(smallCeiling.toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
