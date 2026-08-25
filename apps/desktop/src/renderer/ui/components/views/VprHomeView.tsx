@@ -18,6 +18,7 @@ import { pinnedSellerLabel, pinnedSellerLabels } from '../../../modules/catalog/
 import { findCatalogEntry } from '../../../modules/catalog/model-catalog';
 import { computeMeasuredSavings, formatSavedUsd } from '../../../modules/catalog/measured-savings';
 import { ensureOpenRouterPrices, getCachedOpenRouterPrices } from '../../../modules/catalog/openrouter-baseline';
+import { computeRouterSavings } from '../../../modules/routing/router-savings';
 import { displayModelLabel } from '../../../modules/catalog/model-identity';
 import { loadFavoriteModels } from '../../../modules/catalog/favorites';
 import {
@@ -26,7 +27,7 @@ import {
   selectRecommendedVprCatalog,
 } from '../../../modules/catalog/recommended';
 import { connectVprProfile } from '../../../modules/routing/proxy-sync';
-import { buyerConversationsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
+import { buyerConversationsResource, routingDecisionsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
 import { useCachedResource } from '../../../modules/app/cached-resource';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
@@ -149,6 +150,17 @@ export function VprHomeView({ onSelectView }: Props) {
   const measuredSavings = useMemo(
     () => computeMeasuredSavings(snap.usage?.services, referencePrices),
     [snap.usage?.services, referencePrices],
+  );
+  // Router savings (decisions doc SS4.5): a second, separate figure scoped to
+  // Auto-routed requests specifically -- shown alongside "AntSeed savings"
+  // above, never combined into it, per SS4.6's three-tier diagram ("both
+  // numbers shown together... otherwise the router looks responsible for
+  // savings that actually come from AntSeed's marketplace"). Absent entirely
+  // (not zero) for a buyer who has never used Levanto Auto.
+  const routingDecisions = useCachedResource(routingDecisionsResource, true).data;
+  const routerSavings = useMemo(
+    () => computeRouterSavings(routingDecisions ?? undefined, referencePrices),
+    [routingDecisions, referencePrices],
   );
   const projectedSavingsPct = useMemo(() => {
     const values = snap.catalog
@@ -561,6 +573,19 @@ export function VprHomeView({ onSelectView }: Props) {
                     )
                     : '-'}
                 />
+                {routerSavings && (
+                  <VprStatTile
+                    label="Router savings"
+                    value={(
+                      <span
+                        className={styles.savingValue}
+                        title={`Levanto Auto vs retail: paid $${routerSavings.actualUsd.toFixed(2)} for routed usage worth $${routerSavings.baselineUsd.toFixed(2)} at retail reference prices`}
+                      >
+                        {formatSavedUsd(routerSavings.baselineUsd - routerSavings.actualUsd)}
+                      </span>
+                    )}
+                  />
+                )}
               </VprStatRow>
             </div>
           </div>

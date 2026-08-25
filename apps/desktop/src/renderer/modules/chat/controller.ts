@@ -16,6 +16,7 @@ import {
   ensureOpenRouterPrices,
   getCachedOpenRouterPrices,
 } from '../catalog/openrouter-baseline.js';
+import { withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
 import type {
   DesktopBridge,
   PreparedChatAttachment,
@@ -151,6 +152,10 @@ export type ChatModuleApi = {
   handleServiceFocus: () => void;
   handleServiceBlur: () => void;
   clearPinnedPeer: () => void;
+  /** Exposed for actionSelectVprModel's Levanto Auto branch, which needs a
+      `handleServiceChange` value with no matching `chatServiceOptions` entry
+      (no fixed peer to encode) -- see modules/routing/levanto-auto.ts. */
+  encodeChatServiceSelection: (serviceId: string, provider: string | null, peerId?: string) => string;
   setChatPermissionMode: (mode: ChatPermissionMode) => void;
   decideToolApproval: (decision: ToolApprovalDecision, requestId?: string) => void;
   handleLogLineForThinkingPhase: (line: string) => void;
@@ -1404,10 +1409,10 @@ export function initChatModule({
       uiState.discoverRows,
       uiState.vprRoutingPreferences,
     );
-    uiState.vprModelCatalog = applyOpenRouterBaselines(
+    uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
       projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
       getCachedOpenRouterPrices(),
-    );
+    ));
 
     // The selected model may only have been offered by a seller the new rules
     // exclude — leaving it selected would strand every send with no route.
@@ -1506,17 +1511,17 @@ export function initChatModule({
       // that excludes every discovered seller must empty the catalog, while a
       // transient empty discovery snapshot must leave the last one standing.
       if (rows.length > 0 || uiState.vprModelCatalog.length === 0) {
-        uiState.vprModelCatalog = applyOpenRouterBaselines(
+        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
           projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
           getCachedOpenRouterPrices(),
-        );
+        ));
       }
       // Warm the OpenRouter reference-price cache in the background; once it
       // resolves, re-stamp baselines onto the current catalog so the Home
       // "Popular" list can show the struck-through retail price.
       void ensureOpenRouterPrices().then((map) => {
         if (!map) return;
-        uiState.vprModelCatalog = applyOpenRouterBaselines(uiState.vprModelCatalog, map);
+        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(uiState.vprModelCatalog, map));
         notifyUiStateChanged();
       });
       // Only auto-fill an empty selection. A user-chosen model that is briefly
@@ -3542,5 +3547,6 @@ export function initChatModule({
     handleServiceFocus,
     handleServiceBlur,
     clearPinnedPeer,
+    encodeChatServiceSelection,
   };
 }

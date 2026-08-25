@@ -26,6 +26,30 @@ export type RouteCandidate = {
 };
 
 /**
+ * One resolved routing decision, predicted vs. actual (model-routing
+ * software-architecture doc SS2.5) -- the shape a `selectRoute`-implementing
+ * router's local ledger is expected to produce, so a host UI (e.g. VPR's
+ * savings dashboard) can read it generically without depending on any one
+ * router package. Not a billing record: real settlement is governed by the
+ * signed SpendingAuth, not by anything this row displays.
+ */
+export type RoutingDecisionRow = {
+  atMs: number;
+  actualModel: string;
+  actualPeer: string;
+  actualPromptTokens: number;
+  actualCachedTokens: number;
+  actualCompletionTokens: number;
+  actualUsdcPaid: number;
+  predictedCostUsd: number | null;
+  predictedInputTokens: number | null;
+  predictedCachedInputTokens: number | null;
+  predictedOutputTokens: number | null;
+  cqt: number;
+  routingLatencyMs: number | null;
+};
+
+/**
  * Interface that buyer nodes implement for peer selection.
  *
  * The SDK discovers available sellers via DHT. Your router decides
@@ -70,6 +94,16 @@ export interface Router {
     conversation: ConversationIdentity | null,
     routingPreferences: ModelRoutingPreferences | null,
   ): Promise<RouteCandidate[] | null>;
+
+  /**
+   * Optional, additive: the router's local `routing_decisions` ledger
+   * (software-architecture doc SS2.5), if it keeps one -- read by the host
+   * (buyer-proxy's `/_antseed/routing-decisions` local admin endpoint) so a
+   * UI's savings dashboard (decisions doc SS4.5) can render it without any
+   * router-specific plumbing. A router that doesn't implement `selectRoute`
+   * has no reason to implement this either.
+   */
+  getRoutingDecisions?(): RoutingDecisionRow[];
 }
 
 // Duck-typed, not formally part of `Router`, but probed for by buyer-proxy

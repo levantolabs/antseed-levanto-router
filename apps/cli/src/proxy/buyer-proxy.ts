@@ -1867,6 +1867,19 @@ export class BuyerProxy {
       return
     }
 
+    if (path === '/_antseed/routing-decisions' && method === 'GET') {
+      // routing_decisions local ledger (model-routing software-architecture
+      // doc SS2.5) -- generic read of whatever the registered router's own
+      // getRoutingDecisions() reports, for VPR's savings dashboard (decisions
+      // doc SS4.5). Empty for a router that doesn't implement selectRoute
+      // (e.g. the default router-local), not an error.
+      const router = this._node.router
+      const rows = router?.getRoutingDecisions?.() ?? []
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, rows }))
+      return
+    }
+
     const meteringMatch = path.match(/^\/_antseed\/metering\/(.+)$/)
     if (meteringMatch && method === 'GET') {
       const sellerPeerId = decodeURIComponent(meteringMatch[1]!)

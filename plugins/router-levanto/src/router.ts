@@ -125,6 +125,18 @@ export class LevantoRouter {
   }
 
   /**
+   * `Router.getRoutingDecisions` (packages/node/src/interfaces/buyer-router.ts)
+   * -- the generic hook buyer-proxy's `/_antseed/routing-decisions` local
+   * admin endpoint calls to read this router's ledger, so VPR's savings
+   * dashboard doesn't need router-levanto-specific plumbing to reach it.
+   * Returns a copy: the interface's return type is mutable, this router's
+   * own storage isn't.
+   */
+  getRoutingDecisions(): RoutingDecisionRow[] {
+    return [...this.ledger.all()];
+  }
+
+  /**
    * Ensures today's SpendingAuth is on file before routing, per SS6.2's
    * "before making any routing calls that day" ordering. At most one call
    * to signDailyIfNeeded per calendar day, however many times selectRoute

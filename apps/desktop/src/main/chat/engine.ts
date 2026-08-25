@@ -408,6 +408,25 @@ export function registerPiChatHandlers({
     };
   });
 
+  ipcMain.handle('chat:ai-list-routing-decisions', async () => {
+    // routing_decisions local ledger (model-routing software-architecture
+    // doc SS2.5), for VPR's savings dashboard (decisions doc SS4.5). Proxies
+    // straight to buyer-proxy's own /_antseed/routing-decisions -- same
+    // localhost-fetch pattern as /_antseed/metering and /_antseed/route
+    // above, no new transport. Empty rows (not an error) whenever the
+    // registered router doesn't implement getRoutingDecisions (e.g. the
+    // default router-local) or the buyer runtime isn't up yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions`);
+      if (!response.ok) return { ok: true, data: [] };
+      const body = await response.json() as { ok?: boolean; rows?: unknown[] };
+      return { ok: true, data: Array.isArray(body.rows) ? body.rows : [] };
+    } catch {
+      return { ok: true, data: [] };
+    }
+  });
+
   ipcMain.handle('api:try-proxy-request', async (
     _event,
     params: { port: number; path: string; method: string; headers: Record<string, string>; body: string },

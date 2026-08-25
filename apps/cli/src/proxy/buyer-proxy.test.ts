@@ -2655,6 +2655,50 @@ test('buyer-usage endpoint reports lastActivityAt, null until a request is dispa
   assert.ok((parsed.lastActivityAt ?? 0) > 0)
 })
 
+test('routing-decisions endpoint returns the registered router\'s ledger (model-routing software-arch doc SS2.5)', async () => {
+  const rows = [{
+    atMs: 1, actualModel: 'gpt-5.6-luna', actualPeer: '0xAAA', actualPromptTokens: 100,
+    actualCachedTokens: 0, actualCompletionTokens: 40, actualUsdcPaid: 0.001,
+    predictedCostUsd: 0.001, predictedInputTokens: 100, predictedCachedInputTokens: 0,
+    predictedOutputTokens: 40, cqt: 5, routingLatencyMs: 50,
+  }]
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: { getRoutingDecisions: () => rows } } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  const parsed = JSON.parse(res.body) as { ok: boolean; rows: unknown[] }
+  assert.equal(parsed.ok, true)
+  assert.deepEqual(parsed.rows, rows)
+})
+
+test('routing-decisions endpoint returns an empty list, not an error, for a router without getRoutingDecisions', async () => {
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: { selectPeer: () => null, onResult: () => {} } } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(JSON.parse(res.body), { ok: true, rows: [] })
+})
+
+test('routing-decisions endpoint returns an empty list when there is no registered router at all', async () => {
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: null } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(JSON.parse(res.body), { ok: true, rows: [] })
+})
+
 test('requests with the routed-model alias fail clearly when no default route is set', async () => {
   const proxy = makeBuyerProxyWithPeers([makePeer('a', ['openai'])])
 

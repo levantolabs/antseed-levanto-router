@@ -19,6 +19,107 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] Follow-up: Auto model-picker entry and savings dashboard actually built
+
+**Type:** Completes the two pieces the previous entry below scoped down. Revisiting after
+tracing the exact blocking code more deeply (rather than stopping at "this looks like it
+needs new peer-resolution/IPC machinery") found both were smaller, more surgical fixes than
+the earlier entry assumed — logged here rather than editing that entry's history.
+
+**Auto model-picker entry (SS4.3), actually wired end-to-end:**
+- `apps/desktop/src/renderer/modules/routing/levanto-auto.ts` (new): the `(levanto,
+  levanto-auto)` sentinel pair, a full `VprModelCatalogEntry` for it (all pricing fields
+  null -- a flat subscription has no per-token price), and `withLevantoAutoCatalogEntry`,
+  prepended idempotently at all 3 of `controller.ts`'s `uiState.vprModelCatalog` assignment
+  sites.
+- **The real fix wasn't in `resolveVprChatOption` at all.** Re-tracing `actionSelectVprModel`
+  (`app.ts:264`) found `handleServiceChange` (`controller.ts:2712`) already treats an empty/
+  absent `explicitPeerId` as "no pin" — `nextRouteMode` falls to `'auto'` and
+  `activeConversation.peerId` stays `undefined` — this is exactly the "no fixed peer, buyer-
+  proxy's `selectRoute` picks both" behavior Auto needs, already built for a different reason
+  (peer-less dropdown picks). `actionSelectVprModel` now special-cases `isLevantoAutoEntry(entry)`
+  before it ever reaches `resolveVprChatOption`'s peer-scoring lookup (which would always
+  return null for a sentinel no real seller advertises) and calls `handleServiceChange`
+  directly with `encodeChatServiceSelection(entry.serviceId, entry.provider)` and no peerId.
+  Newly exposed `encodeChatServiceSelection` on `ChatModuleApi` for this one caller.
+  Traced the full downstream path by reading the real code (not assumed): `createVprRouteSelection(entry, null)`
+  → `mode: 'auto'` → `createConversationForSelection`/`getSelectedChatServiceSelection` both
+  correctly resolve to `{id: 'levanto-auto', provider: 'levanto'}` with no peerId →
+  `bridge.chatAiCreateConversation('levanto-auto', 'levanto', undefined, 'auto')` — confirmed
+  by reading `resolveVprChatOption`'s and `getSelectedChatServiceSelection`'s actual fallback
+  branches, not inferred.
+- `VprModelDropdown.tsx`: Auto pulled out of the ranking/favoriting computation (`selectFavoriteVprCatalog`/
+  `selectRecommendedVprCatalog` operate on real per-seller catalog entries; Auto isn't one)
+  and rendered by its own bespoke row (`renderLevantoAutoEntry`) in its own slot above
+  Favorites/Recommended, reusing the dropdown's existing CSS classes rather than new markup.
+- Real unit tests for the pure catalog-entry logic (`levanto-auto.test.ts`); the selection/
+  dispatch wiring itself is verified by tracing, not by an Electron click-through (still not
+  available in this environment) — flagged, not silently claimed as visually confirmed.
+
+**Savings dashboard (SS4.5), the missing IPC turned out to already half-exist:**
+- Tracing how the desktop main process reaches the buyer daemon at all (for the *existing*
+  discover-rows/metering data) found it's plain localhost HTTP to buyer-proxy's own
+  `/_antseed/...` reserved-path surface (`resolveProxyPort` + `fetch`), the exact same
+  mechanism `/_antseed/route`/`/_antseed/attest` use on the seller side — not a bespoke IPC
+  protocol needing to be invented. Added `/_antseed/routing-decisions` (GET) to
+  `buyer-proxy.ts` alongside the existing `/_antseed/buyer-usage`/`/_antseed/metering`
+  handlers, reading `this._node.router?.getRoutingDecisions?.() ?? []`.
+- New optional `Router.getRoutingDecisions?(): RoutingDecisionRow[]` on the public `Router`
+  interface (`packages/node/src/interfaces/buyer-router.ts`) — `RoutingDecisionRow` itself
+  moved here from being defined twice (it was previously duplicated inside
+  `router-levanto/src/ledger.ts`, now that file imports it from `@antseed/node`). Optional and
+  additive: a router that doesn't implement `selectRoute` has no reason to implement this
+  either, and nothing about existing routers changes.
+- `LevantoRouter.getRoutingDecisions()` returns a copy of `this.ledger.all()`.
+- Desktop main process: `chat:ai-list-routing-decisions` IPC handler (`engine.ts`, same
+  fetch-then-JSON pattern as the neighboring handlers) + `chatAiListRoutingDecisions` preload
+  bridge method + `DesktopBridge` type entry.
+- Renderer: `routingDecisionsResource` (new shared `createCachedResource`, same pattern as
+  `buyerConversationsResource`/`systemProxyResource`, so both Home and Activity views share
+  one poll rather than fetching twice, matching how `computeMeasuredSavings`'s doc-cited call
+  sites already work).
+- `computeRouterSavings` (`modules/routing/router-savings.ts`) — real, tested pure module.
+  **Deliberate deviation from SS4.6's literal middle tier, not silently approximated**: the
+  doc's middle tier compares each decision against one *fixed* reference model's AntSeed
+  price *at the time of that decision* (`RoutingDecisionRow.baselinePrices`, SS2.5) — that
+  field is still omitted from the ledger (needs the SS8.4 fixed baseline dropdown, which has
+  no VPR config surface to pick or persist a selection from, and wasn't built this pass
+  either). Rather than hardcode a guessed "current flagship" model name into the calculation
+  itself, `computeRouterSavings` reuses `computeMeasuredSavings`'s exact retail-vs-actual math
+  (already real, already tested) but scoped to the `routing_decisions` ledger instead of
+  aggregate buyer usage — each routed row's *own* actual model against *today's* retail price
+  for that model, not a fixed baseline at the time of inference. A real, honestly-labeled
+  approximation of the middle tier, not the literal SS8.4-dependent version.
+- UI: a "Router savings" `VprStatTile` added to both `VprHomeView.tsx` and
+  `VprActivityView.tsx`, alongside (never replacing or netting against) the existing "Saving"/
+  "Saved" tile — matching SS4.6's "both numbers shown together" requirement. Renders only when
+  `computeRouterSavings` returns non-null (i.e., only for a buyer who has actually used
+  Levanto Auto) rather than showing a zero/dash for everyone else.
+
+**A real, unrelated environment bug found and fixed along the way, not a code bug:** every
+"test hang" investigated this session (`buyer-proxy.test.ts` appearing to hang for 35+
+minutes, then `router-savings.test.ts`/the full desktop suite appearing to hang after
+finishing all tests) traced back to `NODE_OPTIONS` globally injecting VSCode's JS-debug
+bootloader (`--require .../js-debug/bootloader.js`) into every spawned `vitest` worker
+process, which throws `ERR_INSPECTOR_NOT_ACTIVE` repeatedly and corrupts the worker pool's
+IPC, hanging collection/teardown non-deterministically. Not a defect in any code touched this
+session — confirmed by rerunning identical commands with `NODE_OPTIONS=` cleared, which fixed
+every instance instantly (`apps/cli`'s test suite also uses `node --test` against built
+`dist/`, not raw `vitest`, for unrelated reasons — a second, real invocation mistake caught
+and fixed the same way, logged for whoever debugs this repo's tests next).
+
+**Verification:** `packages/node` (rebuilt) → `plugins/router-levanto` (rebuilt) →
+`apps/cli` (rebuilt, `node --test dist/proxy/*.test.js`: 256/256) → `apps/desktop` renderer
++ main typecheck clean, `vitest run src/renderer/`: 350/350 → `levanto-routing-server`:
+20/20. Every suite green with `NODE_OPTIONS=` cleared.
+
+**Ground truth reference:** decisions doc §4.3/§4.5/§4.6/§8.4, software-architecture doc
+§2.1/§2.5/§4.1/§4.3 — the Auto entry and savings-dashboard *plumbing* now match the docs;
+the router-savings *calculation* is a logged approximation of §4.6's middle tier pending
+§8.4's still-unbuilt baseline dropdown.
+
+---
+
 ## [2026-08-25] VPR/CLI UI (SS4): CQT dial and model disclosure shipped; Auto model-picker entry and savings dashboard scoped down with concrete blockers found
 
 **Type:** Mixed — two pieces implemented and tested end-to-end at the logic level (no
