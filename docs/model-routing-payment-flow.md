@@ -43,7 +43,7 @@ The vast majority of activity is off-chain signing. On-chain calls are rare, sel
 | `requestClose()` → `withdraw()` | **On-chain** | Buyer | Only if the peer goes unresponsive — 15-minute grace period, buyer's own escape hatch |
 | Deposit / withdraw custody balance | **On-chain** | Buyer | Whenever the buyer funds or reclaims their own AntSeed balance — separate from this channel entirely |
 
-Result: roughly **3 on-chain transactions per subscriber per year of steady use** — `reserve()` once, `topUp()` monthly (~12/yr), eventual `close()`. Everything else is free, off-chain signing.
+Result: the one-time bootstrap is cheap — `reserve()` plus one `topUp()`, 2 transactions total, ever. But `topUp()` then recurs roughly **monthly** for as long as the subscription stays active — so the actual steady-state rate is **~12 transactions per subscriber per year** (§6.4's own table and §10's unit economics both state this directly), not a one-off cost. Year one is closer to 13–14 once `reserve()` is counted; an eventual `close()` adds one more, whenever that happens. Everything else — the daily `SpendingAuth` signing — is free and off-chain.
 
 ---
 
