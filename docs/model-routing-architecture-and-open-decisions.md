@@ -1,6 +1,6 @@
 # Model Routing on AntSeed — Architecture and Open Decisions
 
-**Status:** Architecture, plugin integration, and the payment mechanism are decided. Two items remain genuinely open: the price point (`D39`) and catalogue coverage before release (`D31`). A handful of implementation details need confirmation from AntSeed (§10).
+**Status:** Architecture, plugin integration, the payment mechanism, and the product surface are decided. What's left is a short list of implementation-level confirmations from AntSeed, plus measuring `topUp` gas on Base before locking the reserve cadence (§13).
 
 **Scope:** Integrate the Levanto router into AntSeed as a **client-side routing plugin that replaces `router-local`**, talking to a **routing peer** — a new peer role, of which Levanto's is the first implementation.
 
@@ -24,9 +24,9 @@
 
 **What's still open.**
 
-1. **The price point** (`D39`). At $0.59/day (~$17.96/month), the breakeven at 40% realised savings is ~$45/month of inference spend — a power-user product unless billing is per *active* day rather than calendar day. Needs AntSeed's spend distribution to resolve.
-2. **Catalogue coverage** (`D31`). The model hull must span what AntSeed users actually ask for before release; not the ongoing update cadence, which can wait.
-3. **Tests on the money path** (`D33`), required before the signing code goes live.
+1. **The price point.** $0.59/day (~$17.96/month), billed by calendar day for every day the router is switched on (§6.7). At the marketed 40% realised savings, breakeven is ~$45/month of inference spend — a power-user product. Needs AntSeed's spend distribution to confirm the addressable market exists (§13).
+2. **Catalogue coverage.** The model hull must span the majority of what actually generates traffic on AntSeed before release (§7); the ongoing update cadence can wait.
+3. **Tests on the money path**, required before the signing code goes live (§7).
 
 ---
 
@@ -142,6 +142,8 @@ Implementation is a counter, not a cache: track the index or hash of the last us
 
 One refinement worth measuring before building: also re-route when context tokens have grown past some multiple (e.g. 4×) since the last decision, since a long agentic loop can grow the prompt 10× while the routing decision stays fixed.
 
+**Subagents.** A subagent session gets its own new-user-message gate and its own routing decision — it is not simply pinned to the parent chat's `(model, peer)` — unless the subagent-creation call itself already specifies a model, in which case that explicit choice is honored and no routing call is made for that subagent at all. This mirrors the sentinel rule in §8.2: an explicit model always wins; only the absence of one triggers routing.
+
 ### 4.3 Cached-token estimation
 
 The client estimates expected cached tokens per candidate and sends the estimate to the peer; the peer never learns cache behaviour itself. This follows directly from the peer being stateless: a forgetful peer cannot learn per-seller cache patterns, so the estimate must come from the side that actually observes billing.
@@ -159,11 +161,13 @@ Without global recall learning, the client uses the simplest honest estimator �
 For the (model, peer) currently in use:
     observedRatio  = cachedInputTokens / promptTokens        (from last turn, EMA'd)
     expectedCached = min(previousPromptTokens * observedRatio, currentPromptTokens)
-    decay if the last turn is older than the seller's observed cache lifetime
+    decay to 0 if the last turn is older than 3 minutes         (flat timeout, all providers)
 
 For any (model, peer) not used in this conversation:
     expectedCached = 0
 ```
+
+The 3-minute figure is a flat timeout applied uniformly regardless of provider or seller — not a per-provider constant, and not something learned. Revisit once real per-provider/per-seller cache-lifetime data exists.
 
 The zero case for unused candidates is correct, not a limitation: a candidate that has never seen this conversation holds none of its prefix and will bill fresh-input rates for the whole thing. Pricing it that way produces a natural, correct stickiness toward the incumbent seller that falls out of the cost model rather than being bolted on.
 
@@ -184,7 +188,7 @@ One caveat: a simple ratio over-estimates if the prefix is invalidated (system p
     { "model": "kimi-k3", "peer": "0x…", "tokens": 16000 }
   ],
   "constraints": { "maxInputUsdPerMillion": 25, "minTrustScore": 60,
-                   "blockedPeerIds": ["0x…"] }
+                   "allowedPeerIds": ["0x…"], "blockedPeerIds": ["0x…"] }
 }
 
 // 200 OK — everything the client needs to do its own savings math
@@ -204,7 +208,11 @@ One caveat: a simple ratio over-estimates if the prefix is invalidated (system p
 
 `constraints` lets the peer pre-filter its ranking to what this particular buyer can actually purchase — max price, minimum trust, blocked peers, reachability — while staying stateless, since constraints arrive fresh with every call. Because `ranked` is a flat list ordered by score rather than grouped by model, the client's failover walk absorbs anything the constraints miss (a peer that goes unreachable between request and call, a cooldown that fires in the interim): the next entry may be a different seller of the same model or a different model entirely, whichever the objective ranks higher, so a stale constraint degrades the choice rather than breaking it. Peers found unreachable get appended to `blockedPeerIds` over time, reusing the same signal `PeerMetricsTracker` already produces.
 
+**`allowedPeerIds` is a client-side re-filter, not a ranking restriction.** Sage keeps ranking broadly across the whole network — an allowlist would otherwise narrow the ranking input back toward the old fixed-model pipeline's "pick a seller for one decided model" shape, which cuts against cross-model routing. Instead the client walks the returned ranked list as usual and skips any candidate outside the allowlist, exactly as it already does for `blockedPeerIds`. If the walk exhausts the ranked list without finding a candidate inside the allowlist, the client falls back to the allowed peers directly rather than giving up. Both lists apply together: allow first, then exclude anything also blocked.
+
 The `price` blocks let the client write a complete savings-ledger row without ever holding a price table, and without the peer keeping anything.
+
+**Global reputation floor.** The routing peer enforces a single global minimum reputation score, provisionally `minTrustScore ≥ 0.70` on the 0–100 scale (the same `computeOnChainReputationScore(p) ?? p.reputationScore` `LocalRouter` already uses for `minReputation`, `plugins/router-local/src/router.ts:18`), applied consistently in three places: which peers' prices build the live `PriceBook` fed into λ calibration, which peers are eligible ranked candidates at all, and as a floor under the buyer's own `constraints.minTrustScore`. A buyer can only tighten this floor — requesting a stricter threshold is honored server-side against the received config value — never loosen it; the global minimum always wins. This closes the gap where an untrusted or spam peer's advertised price could otherwise feed straight into λ calibration and appear as a ranked candidate.
 
 ### 4.5 The cached-input pricing gap
 
@@ -254,7 +262,7 @@ Two capabilities are not reusable as-is, and need small, behaviour-preserving ex
 | Protocol / service compatibility matching | `selectCandidatePeersForRouting`, `resolvePeerRoutePlan` in `apps/cli/src/proxy/routing.ts` — app code, not a package | Move to `@antseed/node` (or a small shared package). No behaviour change |
 | Reputation floor + max-price gate | `LocalRouter._effectiveReputation`, `_resolvePeerOfferPrice`, `_resolveBuyerMaxPrice`, `_offerExceedsMaxPrice` — private methods in `plugins/router-local/src/router.ts` | Extract to `@antseed/router-core` as pure functions; `router-local` calls them too |
 
-Both are small, both benefit any future routing peer, and neither changes existing behaviour. These are the only places where reuse is blocked today.
+Both are small, both benefit any future routing peer, and neither changes existing behaviour. These are the only places where reuse is blocked today. **Confirmed acceptable to AntSeed, conditional on each extraction being fully documented and landing in its own commit, separate from any `routing-client`/`routing-server` code.**
 
 ### 5.2 Plugin type: replace, don't coexist
 
@@ -307,7 +315,7 @@ The only way to raise a ceiling is `topUp()`, which requires 85% of the current 
 
 **This ramp has no UX cost**, because AntSeed's existing payment infrastructure already automates it. `packages/buyer-core/src/buyer-payment-manager.ts` signs both `SpendingAuth` and `ReserveAuth` with a locally-held key — there is no popup or confirmation dialog anywhere in the desktop or CLI code for either signature type. It already runs a proactive top-up trigger, `_needsTopUp()`, firing at 65% of the ceiling specifically so the on-chain `topUp()` call lands after the contract's 85% gate clears. Every AntSeed buyer already goes through a version of this ramp on their first channel with any new seller; it has simply never been visible.
 
-`routing-client` reuses `topUpReserve()` unmodified. The one implementation detail: `topUpReserve()` computes `newCeiling = prevCeiling + maxReserveAmountUsdc`, where `maxReserveAmountUsdc` is a buyer-wide config defaulting to $1.00. Left unchanged, the routing channel would keep growing $1.00 at a time forever rather than settling into a monthly cadence — reopening the gas problem the monthly design is meant to avoid. The routing channel needs its own larger top-up increment (~$18), either via a per-seller override or a manager instance scoped to the routing plugin. This is a small wiring question, not a UX one, and is confirmed with AntSeed in §10.
+`routing-client` reuses `topUpReserve()` unmodified. The one implementation detail: `topUpReserve()` computes `newCeiling = prevCeiling + maxReserveAmountUsdc`, where `maxReserveAmountUsdc` is a buyer-wide config defaulting to $1.00. Left unchanged, the routing channel would keep growing $1.00 at a time forever rather than settling into a monthly cadence — reopening the gas problem the monthly design is meant to avoid. The routing channel needs its own larger top-up increment (~$18), either via a per-seller override or a manager instance scoped to the routing plugin. This is a small wiring question, not a UX one, and is confirmed with AntSeed in §13.
 
 A side effect worth noting: the reserve amount also bounds Levanto's exposure to unused channels — `lockForChannel` reverts unless the buyer already holds at least that amount of unreserved deposit. Reserving $0.59 rather than maxing at the $1.00 cap lowers this bar somewhat (a spam channel needs $0.59 funded rather than $1.00) — a minor trade against reaching the 85% gate a day sooner.
 
@@ -327,7 +335,7 @@ The last column avoids guessing Base's actual fee: it's the gas a `topUp` may co
 
 **Leading candidate, not locked: a monthly ceiling (open item 16).** Twelve transactions per user per year keeps gas comfortably under 1% of revenue without needing batching. Peak blocked capital of $17.96 (average ~$9, since blocked funds are `deposit − settled` and drain daily) is modest against the $45+/month spend the target user has (§9.4), and a 15-minute unilateral exit caps the downside — `requestClose()` is buyer-callable anytime, `TIMEOUT_GRACE_PERIOD` is 15 minutes, then `withdraw()` recovers the headroom. Weekly quadruples gas to save ~$7 of average blocked capital, a bad trade; quarterly saves roughly a dollar a year in exchange for locking $54 and losing a natural monthly renewal beat. This is a pure gas/blocked-capital trade-off, though — it doesn't weigh committing a full month's ceiling on a brand-new subscriber's very first successful day.
 
-The reserve period and the billing period don't have to match: the ceiling is a ceiling, not a commitment. A user who runs the router 10 days a month takes three times longer to reach the 85% mark and tops up three times less often — so active-day billing (§9.4) composes with a monthly ceiling for free, and light users get cheaper gas as a side effect.
+The reserve period and the billing period don't have to match: the ceiling is a ceiling, not a commitment. Billing is calendar-day while the toggle is on (§6.7), so a user who leaves the router switched off for stretches of the month simply signs fewer days and reaches the 85% top-up mark more slowly — light usage gets cheaper gas as a side effect, with no separate mechanism needed.
 
 ### 6.5 Lifecycle
 
@@ -365,7 +373,7 @@ Neither signature type requires a visible prompt — both are signed with a loca
 
 | Sub-decision | Options | Decision |
 |---|---|---|
-| Calendar day or active day billing | Calendar = predictable revenue, users pay for idle days. Active = fairer, self-limiting, lumpier revenue | **Open — tied to `D39` (§9.4).** The monthly ceiling supports either without change |
+| Calendar day or active day billing | Calendar = predictable revenue, users pay for idle days. Active = fairer, self-limiting, lumpier revenue | **Calendar day, for every day the router toggle is switched on.** Not usage-based — a day is billed regardless of whether a routing call actually fired that day, but only while the toggle is on; turning it off stops signing immediately (§6.2) |
 | Signing consent | Silent within a cap, vs. a visible prompt | Silent daily; visible monthly renewal (§6.6) |
 | Catch-up window | Unlimited, or capped | Cap at ~30 days; older unsigned days forgiven (the ceiling limits this anyway) |
 | Deposit exhausted | Routing stops; how surfaced | Non-modal notice, fall back to timeout behaviour |
@@ -400,13 +408,15 @@ Roughly ten scalars and a short map. No prompts, no per-request rows, no timesta
 
 With a few hundred subscribers, this turns the savings figure into a measured fleet number rather than a benchmark extrapolation, and lets the cost model be calibrated against live AntSeed prices and this fleet's actual prompt lengths — something benchmarking elsewhere cannot provide. It does **not** enable retraining: with no prompts or labels leaving the device, the quality heads cannot learn from production traffic, and the digest must not grow toward that job.
 
-Because this is per-subscriber daily data accumulating over time, `modelMix` in particular functions as a usage profile even without content. Default on, with one visible toggle to send payment-only, and the UI states plainly what the daily call carries.
+Because this is per-subscriber daily data accumulating over time, `modelMix` in particular functions as a usage profile even without content. **Default on, with no opt-out: using the router means the daily digest is sent.** There is no payment-only mode. The UI states plainly what the daily call carries.
+
+**Anonymization.** The digest is keyed by `hash(buyerPeerId)`, not the raw peer id. This lets Levanto connect a subscriber's digests across days — needed for the fleet-calibration and per-subscriber-trend value the digest exists for — without being able to tell which AntSeed peer that subscriber is. Retained permanently under the hash; the raw `buyerPeerId` never appears in the stored digest.
 
 ---
 
 ## 7. Router library and catalogue
 
-**Catalogue coverage is a release blocker; the update cadence is not.** A router that silently declines to route models AntSeed users actually ask for reads as broken. Before release, the model hull must span AntSeed's actual traffic; the coverage surface already exists to show what's missing. Ongoing update ownership and SLA can be decided later.
+**Catalogue coverage is a release blocker; the update cadence is not.** A router that silently declines to route models AntSeed users actually ask for reads as broken. Before release, the model hull must span the majority of what makes up traffic on AntSeed; the coverage surface already exists to show what's missing. Ongoing update ownership and SLA can be decided later.
 
 **`prune` defaults to `False`.** Ranked-list-with-failover wants the full candidate set — dynamic dominance pruning would remove exactly the entries the client falls back to when its local policy rejects the leader.
 
@@ -418,13 +428,13 @@ Because this is per-subscriber daily data accumulating over time, `modelMix` in 
 
 ## 8. Product surface
 
-**8.1 — CQT dial.** One slider, five positions, default the middle one. The underlying CQT range still runs 0–10 internally; the five UI positions map onto five fixed points on it. CQT is a relative dial, not a spend target — the UI must not promise "save X%" tied to a specific position.
+**8.1 — CQT dial.** One slider, five positions, mapped to CQT values **1, 3, 5, 7, 9** on the underlying 0–10 range, default the middle position (5, "Balanced"). CQT is a relative dial, not a spend target — the UI must not promise "save X%" tied to a specific position.
 
 **8.2 — Per-message routing signal.** A sentinel value in the existing model-selection field (e.g. `"model": "auto"`) means "let the router decide"; a deliberate model choice in the dropdown is always honored, and only the sentinel routes. No separate routing flag — the rest of the client code sees an ordinary model id. Same pattern as OpenRouter's `"openrouter/auto"`. Remaining implementation detail: confirm the exact sentinel string against AntSeed's model-selection UI.
 
 **8.3 — Model disclosure.** The model actually used is printed as metadata at the end of the turn — not before sending, not a blocking label. Enough for trust and for support without turning every message into a routing dashboard.
 
-**8.4 — Savings baseline (model X).** A dropdown on the savings page lets the user choose the reference model that routed costs are compared against. The peer's `baselineSuggestion` (§4.4) can seed the dropdown's options and default. Savings recompute client-side from the ledger whenever X changes. **Open sub-decision:** which model is the default the first time a user opens the savings page — candidates are the pre-opt-in most-used model, the peer's suggestion, or a fixed flagship.
+**8.4 — Savings baseline (model X).** A dropdown on the savings page lets the user choose the reference model that routed costs are compared against. **The option set is a fixed, curated list of models**, not one that grows dynamically from observed `baselineSuggestion` values — this bounds how much per-model price data the `routing_decisions` ledger needs to retain per row. **Default: the most expensive, most capable flagship model available at the time — the top GPT or Claude model.** Savings recompute client-side from the ledger whenever X changes.
 
 **8.5 — Savings display.** Gross only. The $17.96/month subscription fee is never netted against the savings figure; it's a separate, visible line item.
 
@@ -447,21 +457,17 @@ Because this is per-subscriber daily data accumulating over time, `modelMix` in 
 | 25% | $71.84 |
 | 15% | $119.73 |
 
-At the marketed 40%, the user must already be spending ~$45/month on inference — this is a power-user product, in tension with `G2`'s "feels like a feature" framing at this price. Two things cut in favor of it: users who spend $45+/month are overwhelmingly agentic, and agentic traffic is exactly what the new-message gate (§4.2) serves most cheaply, so price and cost structure are aligned; and **active-day billing changes the picture entirely** — a light user who runs the router 5 days a month pays $2.95 and breaks even at ~$7.40 of spend. Whether billing is calendar-day or active-day (§6.7) is therefore the single decision that determines whether this is a power-user-only product or something a casual user can also switch on. Needs AntSeed's spend distribution to settle (§10).
+At the marketed 40%, the user must already be spending ~$45/month on inference — this is a power-user product, in tension with G2's "feels like a feature" framing at this price. Billing is calendar-day, for every day the toggle is on (§6.7) — the one lever that would soften this (charging only for days actually used) is not in the design. What cuts in favor of the price as-is: users who spend $45+/month are overwhelmingly agentic, and agentic traffic is exactly what the new-message gate (§4.2) serves most cheaply, so price and cost structure are aligned. Whether the addressable market at this breakeven is large enough is still open, and needs AntSeed's spend distribution to settle (§13).
 
 **9.5 — The savings claim's baseline.** With router-quality evaluation handled outside this document, the remaining question is which baseline the marketed percentage is measured against — now the savings-page dropdown (§8.4) — and keeping it visually distinct from the savings AntSeed already claims against OpenRouter retail, so the two are never silently summed in the user's mind (§4.6).
 
-**9.6 — Grant structure.** Revenue per subscriber roughly doubled from the original $9/month figure, worth reflecting in what the $16k grant plus token allocation is buying. Milestones and disclosure of Levanto holding ANTS while operating the default routing peer remain undefined.
+**9.6 — The commons.** The `routing-client` plugin, the protocol/schema, the local ledger and savings computation, dashboard surfaces, the peer template, and the two extracted modules from §5.1 live in the AntSeed monorepo, open, under its licence — any future routing peer can be built against them. The cached-token estimator (§4.3) is client-side and general, so it belongs there too. **`routing-server` — the actual Levanto Sage-router implementation of a routing peer (Python sidecar, Sage calls, artifacts, training data) — lives in a separate Levanto-owned repo**, not in this monorepo. It is one implementation of the open `routing-server` role, not part of the commons; a third party would write their own `routing-server` against the same protocol rather than fork Levanto's.
 
-**9.7 — The commons.** Protocol and schema, the `routing-client` plugin, the local ledger and savings computation, dashboard surfaces, the peer template, and the two extracted modules from §5.1 are open. Sage, artifacts, and training data stay Levanto's. The cached-token estimator (§4.3) is client-side and general, so it belongs in the commons — every future routing peer benefits from it.
+**9.7 — Support and SLA.** A hosted service in a latency-sensitive path, charging $18/month, needs a defined SLA before billing begins.
 
-**9.8 — Exclusivity and default placement.** Time-boxed (6–12 months), disclosed, with a published policy for how the default routing peer changes over time.
+**9.8 — Refunds and proration.** Resolved by the daily signing mechanism itself: stop signing, nothing further is owed (§6.2).
 
-**9.9 — Support and SLA.** A hosted service in a latency-sensitive path, charging $18/month, needs a defined SLA before billing begins.
-
-**9.10 — Refunds and proration.** Resolved by the daily signing mechanism itself: stop signing, nothing further is owed (§6.2).
-
-**9.11 — Free month for the first 200 users.** Skip signing for the first 30 days, or use `AntseedFreeUsage`. Being generous rather than exact about the count costs roughly $18/user.
+**9.9 — Free month for the first 200 users.** Skip signing for the first 30 days, or use `AntseedFreeUsage`. Being generous rather than exact about the count costs roughly $18/user.
 
 ---
 
@@ -480,7 +486,7 @@ At the marketed 40%, the user must already be spending ~$45/month on inference �
 
 Under a per-turn cost model, a heavy agentic user at 20,000 routed turns/month would have been −$4 to −$12/month. The message-level gate turns the previously worst-margin segment into the second-best one; the margin problem is solved, and the harder remaining question is user value at this price (§9.4).
 
-**Fixed costs the grant offsets:** router R&D, catalogue maintenance, the commons (§9.7), and operating the routing peer.
+**Fixed costs the grant offsets:** router R&D, catalogue maintenance, the commons (§9.6), and operating the routing peer.
 
 ---
 
@@ -491,26 +497,27 @@ Under a per-turn cost model, a heavy agentic user at 20,000 routed turns/month w
 | R1 | Cost model mis-calibrated against live AntSeed prices and prompt lengths | Medium | High | `predictedCostUsd` vs `actualCostUsd` in the daily digest (§6.9) |
 | R2 | Catalogue does not cover the models users ask for | Medium | High | Coverage as a release gate (§7) |
 | R3 | Digest scope creeps toward prompt-derived fields | Medium | High | Fixed schema, versioned, in `packages/protocol` |
-| R4 | $17.96/month exceeds savings for most users | High | High | Active-day billing; spend distribution needed first (§9.4) |
+| R4 | $17.96/month exceeds savings for most users | High | High | Calendar-day billing is decided (§6.7); spend distribution needed to size the addressable market (§9.4) |
 | R5 | Routing blind to cache warmth → wrong picks | High | Medium | Wire the estimator (§4.5) |
 | R6 | Buyer signs today, cancels almost immediately — pays for a day barely used | Medium | Low | Capped at one day, ~$0.59, by construction (§6.2); a deliberate trade, not a bug — the alternative moves the same bounded risk onto the seller as a free-rider exposure instead |
-| R7 | Routing peer is a single point of failure | High | Medium | Timeout fallback; SLA (§9.9) |
+| R7 | Routing peer is a single point of failure | High | Medium | Timeout fallback; SLA (§9.7) |
 | R8 | Losing streaming is a visible regression | Medium | High | Stream; fail over only pre-first-token |
 | R9 | Python sidecar lifecycle problems | Medium | Medium | Fail closed, stop advertising |
 | R10 | Per-user λ drift via `OnlineBudgetController` | Medium | Medium | Disable it (§4.5) |
 | R11 | Cached-token estimate drifts on prefix invalidation | Medium | Low | Local prefix guard (§4.3) |
 | R12 | Channel-open gas as a spam vector | Low | Low | Bounded by `FIRST_SIGN_CAP` + funded-deposit requirement (§6.3) |
 | R13 | Gas per subscriber outruns revenue at scale | Medium | Medium | Monthly `topUp` cadence; measure on Base first (§6.4) |
-| R14 | Daily digest becomes a usage profile over time | Medium | Medium | Ten scalars, day granularity, visible toggle (§6.9) |
+| R14 | Daily digest becomes a usage profile over time | Medium | Medium | Ten scalars, day granularity, digest keyed by `hash(buyerPeerId)` rather than raw peer id (§6.9) |
 | R15 | Untested code in the money path | Medium | High | Test story before billing (§7) |
 | R16 | `topUp` fires late → cumulative hits the ceiling, meter stalls silently | Medium | High | Schedule at ~95% consumed; alert on a stalled cumulative (§6.5) |
 | R17 | Monthly `ReserveAuth` renewal read as a surprise charge | Medium | Medium | Frame as a renewal notice; show days used and next ceiling (§6.6) |
+| R18 | Untrusted or spam peer prices feed into λ calibration or appear as a ranked candidate | Medium | Medium | Global reputation floor, buyer can only tighten it (§4.4) |
 
 ---
 
 ## 12. Phasing
 
-**Phase 0 — Decide (1 week).** Calendar-vs-active-day billing (`D39`); measure `topUp` gas cost on Base.
+**Phase 0 — Decide (1 week).** Measure `topUp` gas cost on Base (§13); confirm the routing channel's top-up increment wiring with AntSeed (§13).
 
 **Phase 1 — Plumbing, unpriced (4–6 weeks).**
 - *AntSeed:* extract `selectCandidatePeersForRouting` / `resolvePeerRoutePlan` into a package; extract the reputation and max-price gates from `LocalRouter` into `@antseed/router-core`; add `'routing'` capability; `/_antseed/route` schema in `packages/protocol`; optional routing methods on `Router`.
@@ -527,32 +534,20 @@ Under a per-turn cost model, a heavy agentic user at 20,000 routed turns/month w
 
 ## 13. Open items
 
+Everything else in this document is decided. What's left:
+
 **From AntSeed:**
 
-1. Accept optional routing methods on the `Router` interface (§5.2) — the only plugin-system change needed, taking the `'router'` slot and replacing `router-local`.
-2. What is the distribution of monthly inference spend per active buyer? (§9.4) At $0.59/day the breakeven is ~$45/month at 40% savings — this decides whether the addressable market exists.
-3. Are the two extraction refactors in §5.1 acceptable?
-4. Can `maxReserveAmountUsdc` be overridden per seller within one `BuyerPaymentManager`, or does the routing plugin need its own instance? (§6.3) The ramp needs no product decision, but the cleanest wiring for a ~$18 top-up increment (instead of the $1.00 buyer-wide default) needs confirming.
-5. Does the commons (§9.7) live in this repo under this licence, including the cached-token estimator?
-6. Default-peer policy, Levanto's placement duration, grant disclosure (§9.6, §9.8).
-7. `BuyerPaymentManager` needs a new, narrower public method for the daily meter — sign + persist + update-the-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without the per-request cost computation `signPerRequestAuth` (buyer-payment-manager.ts:1162) does first. §5.1 currently describes `signPerRequestAuth` as a direct-import reuse for signing, but it's built around metered `responseStats` from a completed request and has no way to accept a flat externally-computed amount. The routing plugin should own 100% of the when/how-much decision (§6.2's daily cadence, catch-up cap); this method is the only new surface needed for the actual signing, since `_needsTopUp()` reads a private `_cumulativeAmount` map that only `signPerRequestAuth` currently updates — bypassing it externally would silently break the `topUpReserve()` reuse in item 4.
+1. What is the distribution of monthly inference spend per active buyer? At $0.59/day the breakeven is ~$45/month at 40% savings (§9.4) — this decides whether the addressable market exists.
+2. Can `maxReserveAmountUsdc` be overridden per seller within one `BuyerPaymentManager`, or does the routing plugin need its own instance? (§6.3) The ramp needs no product decision, but the cleanest wiring for a ~$18 top-up increment (instead of the $1.00 buyer-wide default) needs confirming.
+3. `BuyerPaymentManager` needs a new, narrower public method for the daily meter — sign + persist + update-the-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without the per-request cost computation `signPerRequestAuth` (buyer-payment-manager.ts:1162) does first. §5.1 currently describes `signPerRequestAuth` as a direct-import reuse for signing, but it's built around metered `responseStats` from a completed request and has no way to accept a flat externally-computed amount. The routing plugin should own 100% of the when/how-much decision (§6.2's daily cadence, catch-up cap); this method is the only new surface needed for the actual signing, since `_needsTopUp()` reads a private `_cumulativeAmount` map that only `signPerRequestAuth` currently updates — bypassing it externally would silently break the `topUpReserve()` reuse in item 2.
 
 **From Levanto:**
 
-8. Calendar day or active day billing? (§6.7/§9.4) Decides whether the product is power-user-only.
-9. Is the daily digest (§6.9) default-on with a toggle, or opt-in?
-10. Measure `topUp` gas on Base before fixing the monthly cadence (§6.4).
-11. Which models must the hull cover before release? (§7) Needs AntSeed's model-usage mix, pairs with item 2.
-12. Which baseline model is the savings-page dropdown default at launch? (§8.4)
-13. Do subagent conversations inherit the parent chat's routing gate state, or get their own independent new-user-message gate and routing decision? (§4.2) Some tools (e.g. OpenCode) run a subagent as its own HTTP session with its own session id, linked to the parent chat via a parent-session pointer the tool already sends. Inheriting avoids a subagent silently landing on a different seller than its parent chat and losing cache-warmth continuity; not inheriting is simpler but reopens the mid-conversation seller-switch cost the gate exists to avoid. Needs deciding before the gate's per-conversation keying is implemented.
-14. What is "the seller's observed cache lifetime" (§4.3) that the cached-token estimator decays against — a per-provider constant, something empirically observed per seller, or a flat timeout? Provisionally: a flat 90-second timeout for v1, applied uniformly regardless of provider or seller. Revisit once real per-provider/per-seller cache-lifetime data exists.
-15. Is the savings-page baseline dropdown (§8.4) a fixed, curated set of models, or does it grow dynamically from observed `baselineSuggestion` values over time? §8.4 only says `baselineSuggestion` "can seed the dropdown's options," which reads as open-ended; item 12 above only covers the *default* selection, not whether the option set itself is bounded. This determines how much per-model price data the `routing_decisions` ledger needs to retain per row. Provisionally building against a fixed set for now.
-16. Is a monthly reserve ceiling (§6.4) the right size to commit to immediately after the one-day bootstrap ramp, or should the first `topUp()` raise the ceiling by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Note this isn't a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost. Related to item 4 (the wiring for a per-seller top-up increment), but this is the sizing/cadence decision underneath that wiring question, not the mechanism itself.
-17. Is the daily performance digest's field set (§6.9) complete as specified, or trimmed? `failovers`/`timeouts` and `regenerations`/`overrides` both need genuinely new plumbing (failover-walk counters; a new VPR/CLI UI signal, §8) that nothing else in the design currently produces, unlike the other eight fields which are all already derivable from state the routing-client plugin keeps for other reasons. Building against the trimmed eight-field set for now; the two dropped pairs can be added later without changing the mechanism, since the digest rides along on an existing call regardless of its payload size.
-18. Global minimum-reputation floor for the routing peer, not yet in the design at all. Confirmed neither `sage_model_router` (no reputation awareness anywhere in `set_prices`/`costs_at`/`rank_candidates_from_vector`) nor `buildNetworkServiceOffers` (attaches `reputationScore` as metadata, never filters on it) apply any floor today — an untrusted or spam peer's advertised price can currently feed straight into λ calibration and appear as a ranked candidate. Proposed: a single global floor (provisionally `minTrustScore ≥ 0.70` on §4.4's 0–100 scale) governing three things consistently — which peers' prices build the live `PriceBook` fed to `set_prices()`, which peers are eligible candidates in the ranked list at all, and as a floor under the existing per-buyer `constraints.minTrustScore` (§4.4) — a buyer requesting a *stricter* threshold is honored, a *looser* one is not; the global floor never relaxes. Needs confirming: the exact threshold, and whether "reputation" here means the same `computeOnChainReputationScore(p) ?? p.reputationScore` used by `LocalRouter`'s `minReputation` (`plugins/router-local/src/router.ts:18`) or something routing-specific.
-19. How is the daily digest (§6.9) anonymized for its long-term retention (§6.8 already says "one daily performance digest" is retained permanently, not overwritten)? §6.9 already names the tension this needs to resolve: *"per-subscriber daily data accumulating over time, `modelMix` in particular functions as a usage profile even without content"* — anonymized long-term retention keeps the fleet-calibration value while addressing that, but the mechanism isn't specified. Candidates: strip/pseudonymize `buyerPeerId` before persisting each day's digest, or persist only aggregated (across-subscriber) daily rollups rather than raw per-buyer rows. Either changes what "retained" (§6.8) actually stores.
-20. Does `selectRoute` honor a buyer's `allowedPeerIds` preference (§4.4's `constraints` has no allowlist field — only `maxInputUsdPerMillion`, `minTrustScore`, `blockedPeerIds`)? Restricting the whole network down to a specific peer set fits the old fixed-model pipeline naturally (you're choosing a seller for one already-decided model) but cuts against letting Sage rank broadly across models and sellers for cross-model routing. Whether an allowlist should even apply to a routed request, degrade to something else, or be ignored entirely by the sentinel path is undecided.
-21. What are the five CQT dial positions' actual mapped values on the underlying 0–10 range (§8.1)? The doc only says "five fixed points" — no values specified. Same kind of placeholder gap as item 14's cache-lifetime timeout, flagged here for the same reason: something has to be built against even before the real values are chosen.
+4. Measure `topUp` gas on Base before fixing the monthly cadence (§6.4).
+5. Is a monthly reserve ceiling (§6.4) the right size to commit to immediately after the one-day bootstrap ramp, or should the first `topUp()` raise the ceiling by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost. Related to item 2 (the wiring for a per-seller top-up increment), but this is the sizing/cadence decision underneath that wiring question, not the mechanism itself.
+6. Is the daily performance digest's field set (§6.9) complete as specified, or trimmed? `failovers`/`timeouts` and `regenerations`/`overrides` both need genuinely new plumbing (failover-walk counters; a new VPR/CLI UI signal, §8) that nothing else in the design currently produces, unlike the other eight fields, which are all already derivable from state the routing-client plugin keeps for other reasons. Building against the trimmed eight-field set for now; the two dropped pairs can be added later without changing the mechanism, since the digest rides along on an existing call regardless of its payload size.
+7. Exact threshold for the global reputation floor (§4.4) — provisionally `minTrustScore ≥ 0.70`. The mechanism (global floor, buyer can only tighten it, never loosen) is decided; only the number is provisional.
 
 **Before any savings number goes public:** state which baseline the percentage is measured against, and keep it visually separate from AntSeed's own savings-versus-retail figure (§9.5).
 
