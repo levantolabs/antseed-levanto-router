@@ -21,6 +21,7 @@ const fallbackPreferences: VprRoutingPreferences = {
   minTrustScore: 60,
   allowedPeerIds: [],
   blockedPeerIds: [],
+  cqt: 5,
 };
 
 test('migrates the previous zero default to the new 6.0 minimum', () => {
@@ -78,6 +79,7 @@ test('valid VPR preferences and route selection save and load', () => {
     minTrustScore: 62,
     allowedPeerIds: ['peer-1'],
     blockedPeerIds: ['peer-2', 'peer-3'],
+    cqt: 7,
   };
   const routeSelection: VprRouteSelection = {
     model: {
@@ -104,7 +106,26 @@ test('buyer config projection excludes the Desktop-only auto-routing toggle', ()
     minTrustScore: fallbackPreferences.minTrustScore,
     allowedPeerIds: fallbackPreferences.allowedPeerIds,
     blockedPeerIds: fallbackPreferences.blockedPeerIds,
+    cqt: fallbackPreferences.cqt,
   });
+});
+
+test('cqt dial value (decisions doc SS8.1) round-trips through save/load', () => {
+  saveVprRoutingPreferences({ ...fallbackPreferences, cqt: 9 });
+  assert.equal(loadVprRoutingPreferences(fallbackPreferences).cqt, 9);
+});
+
+test('an invalid stored cqt value falls back to the default rather than an off-scale number', () => {
+  localStorage.setItem(
+    VPR_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ ...fallbackPreferences, cqt: 4 }), // not one of {1,3,5,7,9}
+  );
+  assert.equal(loadVprRoutingPreferences(fallbackPreferences).cqt, fallbackPreferences.cqt);
+});
+
+test('buyer config projection forwards the cqt dial value', () => {
+  const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, cqt: 3 });
+  assert.equal(projected.cqt, 3);
 });
 
 test('buyer config projection drops malformed peer ids before writing config', () => {

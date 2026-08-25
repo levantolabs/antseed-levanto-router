@@ -19,6 +19,113 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-25] VPR/CLI UI (SS4): CQT dial and model disclosure shipped; Auto model-picker entry and savings dashboard scoped down with concrete blockers found
+
+**Type:** Mixed — two pieces implemented and tested end-to-end at the logic level (no
+Electron runtime available in this environment to visually verify, noted below); two
+pieces investigated deeply enough to find the real integration points, then deliberately
+not attempted, since the fix touches live chat-dispatch code this pass can't test.
+
+**Shipped: CQT dial (SS8.1/software-arch SS4.4).** Added `cqt?: number` to
+`ModelRoutingPreferences` (`packages/node/src/routing/model-route-ranking.ts`), default `5`;
+`LevantoRouter.selectRoute` now reads `routingPreferences?.cqt ?? 5` instead of a hardcoded
+`5`. Threaded through the *entire existing* preferences pipeline with no new plumbing --
+`VprRoutingPreferences` already extends `ModelRoutingPreferences`, `updateVprRoutingPreferences`
+already accepts a `Partial<VprRoutingPreferences>` patch generically, and
+`syncBuyerRoutingPreferences`/`updateDashboardConfig` already ship the whole object over
+existing IPC. Only 3 places needed a real (small) edit: `loadVprRoutingPreferences`/
+`buyerModelRoutingPreferences` in `apps/desktop/src/renderer/modules/routing/preferences.ts`
+(load/forward the new field, with a `{1,3,5,7,9}`-only validator so a corrupted/future value
+can't reach the wire), and a new `VprSlider` row in `VprPreferencesView.tsx` mapping 5 UI
+positions to those 5 values via a new small pure module,
+`apps/desktop/src/renderer/modules/routing/cqt.ts`. Position labels ("Cheapest" / "Cheaper" /
+"Balanced" / "Higher quality" / "Best quality") are a new, undocumented UI copy decision --
+the docs only name the middle one ("Balanced") and set the copy constraint (no "save X%"
+language, honored). Tested: `packages/node`, `router-levanto`, and `preferences.ts`/`cqt.ts`
+all have real unit coverage; typechecked clean end-to-end (`packages/node` → rebuilt →
+`plugins/router-levanto`, `apps/cli`, `apps/desktop` renderer all typecheck against it).
+
+**Deviation, logged:** the dial is shown unconditionally in Preferences rather than "visible
+once the subscription is active" (SS4.4's literal wording) -- gating that requires a
+renderer-visible signal for "is router-levanto currently the active buyer router AND is a
+subscription live," and confirmed by grep that nothing like that exists in the renderer today
+(router selection is a main-process/CLI-flag concept, `apps/desktop/src/main/runtime/process-manager.ts`,
+never surfaced to renderer state). Building that signal is itself a small new IPC surface,
+out of scope for this pass. Showing the dial unconditionally is harmless -- it's inert until
+both a Levanto subscription exists and "Levanto Auto" is the selected model -- just not
+spec-exact.
+
+**Shipped: model disclosure (SS8.3/software-arch SS4.6), including the real gap it named.**
+The doc's own audit was right: `attachStreamingAntseedHeaders` (`apps/cli/src/proxy/telemetry.ts`)
+attached peer identity but never `x-antseed-provider`/`x-antseed-service`, so a normal
+*streamed* chat response (the common case) had no way for the client to know which model
+answered — only the rarely-used non-streaming path carried that. Fixed by extending its
+signature to take the resolved `request` (the already-substituted one, `withRoutedModel`,
+per the one call site in `buyer-proxy.ts:~3034`) and resolving provider/service the same way
+`computeResponseTelemetry` already does (`pickProviderForPeer`/`extractRequestedService`).
+**Turned out the desktop UI already had everywhere else needed for this** --
+`AssistantMeta.provider`/`.service` (`chat-shared.ts`) were already read from `msg.meta`, just
+never rendered. Added one line to the existing `buildChatMetaParts` (same per-message meta
+row that already shows peer/tokens/cost/latency) rather than inventing a new UI element —
+`ChatBubble.tsx` needed zero changes, since it already renders whatever `buildChatMetaParts`
+returns. Both the header fix and the disclosure line have real unit tests
+(`apps/cli/src/proxy/telemetry.test.ts`, `apps/desktop/.../chat-shared.test.ts`).
+
+**Scoped down, with concrete blockers found (not just "not started"): "Levanto Auto" model-picker
+entry (SS4.3).** Traced the actual selection path before writing any UI code, since the doc's
+own SS4.1 flags this as a new, separate axis from the existing "auto select seller" mechanism.
+Found two real, specific blockers, both in live chat-dispatch code:
+
+1. `actionSelectVprModel` (`apps/desktop/src/renderer/app.ts:263-265`) does
+   `findCatalogEntry(uiState.vprModelCatalog, provider, serviceId)` and returns immediately if
+   not found — a synthetic "Levanto Auto" entry handed only to the dropdown component would
+   never actually select anything; it has to be inserted into the real, live `vprModelCatalog`
+   array wherever that's constructed (network-discovery-derived, not found yet in this pass).
+2. Even with a catalog entry, `resolveVprChatOption` (`apps/desktop/src/renderer/modules/chat/projection.ts:49`)
+   resolves a chat dispatch by finding a concrete peer offering the exact `(provider, serviceId)`
+   pair via `routesForSelectedModel` (live network discovery) — for `levanto-auto`, that's
+   always empty, since no real seller advertises that model. It falls back to
+   `findChatOptionForVprSelection`, which needs a matching `ChatServiceOptionEntry` — which, for
+   every other model, carries one fixed `peerId` used to *pin* the dispatch. Auto's entire
+   design is the opposite: no fixed peer, model AND peer both chosen per-request by the routing
+   peer (confirmed by re-reading `buyer-proxy.ts`'s wiring from earlier this pass — `selectRoute`
+   only runs inside `if (!explicitPeerId && requestedService)`, i.e. only when nothing pinned a
+   peer already). A `ChatServiceOptionEntry` with a real `peerId` for "Auto" would silently pin
+   a peer and never reach `selectRoute` at all — worse than not selecting anything, since it
+   would look like Auto but route like a fixed model.
+
+Fix needs a genuinely new "no fixed peer" selection mode threaded through
+`ChatServiceOptionEntry`/`resolveVprChatOption`/whatever ultimately sets a chat request's
+`explicitPeerId`, not just a new dropdown entry. That's real surgery to live, currently-working
+chat-dispatch code with no Electron runtime available in this environment to click through and
+verify the result — the wrong kind of change to make on inference alone. Left unbuilt rather
+than shipped half-correct (an Auto entry that either silently no-ops or, worse, silently pins a
+peer and defeats the entire routing feature). `LEVANTO_AUTO_MODEL_ID = 'levanto-auto'` isn't
+even defined as a shared constant yet outside `router-levanto`'s own hardcoded check — next
+attempt should start there.
+
+**Scoped down: savings dashboard (SS4.5/§4.6's three-tier diagram).** `routing_decisions`
+ledger data (`RoutingLedger.all()`, task #9) lives inside the `router-levanto` plugin instance,
+which runs inside the buyer CLI/daemon process — a separate OS process from the Electron
+renderer that would show `VprHomeView.tsx`/`VprActivityView.tsx`. There is currently no channel
+carrying *any* plugin-internal data from that process to the desktop UI (the existing
+`updateDashboardConfig`/`syncBuyerRoutingPreferences` IPC flows the other direction, config
+into the daemon, not data out). Building this needs: (a) some export surface on the daemon side
+(a new IPC handler, or a polled file/socket) exposing ledger rows or a pre-aggregated summary,
+(b) a `computeRouterSavings`-equivalent to `computeMeasuredSavings` (`measured-savings.ts`)
+operating on those rows against the SS8.4 fixed baseline dropdown, (c) new UI on both existing
+views per SS4.5. All three are real, separate, substantial pieces — not attempted this pass.
+The router-side data this would consume (the ledger, `predictedCostUsd`/price-snapshot fields)
+is real and already tested (task #9's runlog entry) — only the cross-process transport and the
+UI on top are missing.
+
+**Ground truth reference:** decisions doc §8.1/§8.3/§8.4/§8.5/§4.6, software-architecture doc
+§4.1–§4.6 — CQT dial and model disclosure implemented as specified (dial visibility gate
+deviated, logged above); the Auto model-picker entry and savings dashboard are genuinely
+unbuilt, with the specific blocking code identified above rather than left as a vague gap.
+
+---
+
 ## [2026-08-25] Daily digest: sending (client) and receiving (server)
 
 **Type:** New decisions (ground truth silent on several mechanics) implementing decisions

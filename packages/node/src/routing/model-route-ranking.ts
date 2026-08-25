@@ -6,6 +6,14 @@ export type ModelRoutingPreferences = {
   minTrustScore: number;
   allowedPeerIds: string[];
   blockedPeerIds: string[];
+  /**
+   * Cost/quality tradeoff dial (model-routing decisions doc SS8.1) -- one of
+   * the five discrete values {1, 3, 5, 7, 9} on Sage's underlying 0-10 scale;
+   * 5 is "Balanced." Only meaningful to a router that implements selectRoute
+   * (model-routing software-architecture doc SS2.1) -- optional so existing
+   * routers (e.g. router-local) that don't read it are unaffected.
+   */
+  cqt?: number;
 };
 
 export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
@@ -14,6 +22,7 @@ export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
   minTrustScore: 60,
   allowedPeerIds: [],
   blockedPeerIds: [],
+  cqt: 5,
 };
 
 export type ModelRouteCandidate = {

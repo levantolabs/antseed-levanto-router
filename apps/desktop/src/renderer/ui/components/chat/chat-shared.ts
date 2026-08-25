@@ -439,6 +439,13 @@ export function buildChatMetaParts(msg: ChatMessage): string[] {
   const assistantMeta = normalizeAssistantMeta(msg);
 
   if (assistantMeta) {
+    // Model disclosure (model-routing decisions doc SS8.3, software-arch doc
+    // SS4.6) -- which model actually answered, most useful for an
+    // Auto-routed request where the picked model isn't the one shown in the
+    // model dropdown. Reuses `provider`/`service`, already carried by
+    // AssistantMeta from the response headers on both the streaming and
+    // non-streaming paths -- no bespoke UI element, just an existing row.
+    if (assistantMeta.service) parts.push(`via ${assistantMeta.service}`);
     if (assistantMeta.peerId) parts.push(`peer ${assistantMeta.peerId.slice(0, 8)}`);
     if (assistantMeta.outputImages > 0) {
       parts.push(`${assistantMeta.outputImages} ${assistantMeta.outputImages === 1 ? 'image' : 'images'}`);

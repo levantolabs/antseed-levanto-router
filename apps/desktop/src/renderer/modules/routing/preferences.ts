@@ -40,6 +40,13 @@ function readNonNegativeFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
 
+/** CQT dial (decisions doc SS8.1): only these five discrete positions are valid. */
+const VALID_CQT_VALUES = new Set([1, 3, 5, 7, 9]);
+
+function readCqt(value: unknown, fallback: number): number {
+  return typeof value === 'number' && VALID_CQT_VALUES.has(value) ? value : fallback;
+}
+
 /** Trimmed, de-duplicated, blank-free peer id list — order preserved. */
 export function normalizePeerIdList(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -102,6 +109,7 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
     blockedPeerIds: Array.isArray(parsed.blockedPeerIds)
       ? normalizePeerIdList(parsed.blockedPeerIds)
       : fallback.blockedPeerIds,
+    cqt: readCqt(parsed.cqt, fallback.cqt ?? 5),
   };
 }
 
@@ -126,6 +134,7 @@ export function buyerModelRoutingPreferences(
     minTrustScore: value.minTrustScore,
     allowedPeerIds: validPeerIds(value.allowedPeerIds),
     blockedPeerIds: validPeerIds(value.blockedPeerIds),
+    cqt: value.cqt,
   };
 }
 

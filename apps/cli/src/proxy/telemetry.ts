@@ -350,9 +350,21 @@ export function attachStreamingAntseedHeaders(
   upstreamHeaders: Record<string, string>,
   selectedPeer: PeerInfo,
   requestId: string,
+  request: SerializedHttpRequest,
 ): Record<string, string> {
   const headers: Record<string, string> = { ...upstreamHeaders }
   headers['x-antseed-request-id'] = requestId
   setPeerIdentityHeaders(headers, selectedPeer)
+  // Model-routing decisions doc SS8.3 / software-arch doc SS4.6: the
+  // streaming path previously carried no provider/service at all, so a
+  // routed ("levanto-auto") message had nothing for the client to read
+  // "which model actually answered" from. `request` is already the
+  // resolved/substituted request by this call site (withRoutedModel), not
+  // the "levanto-auto" sentinel, matching the non-streaming path below.
+  headers['x-antseed-provider'] = pickProviderForPeer(selectedPeer, request)
+  const service = extractRequestedService(request)
+  if (service) {
+    headers['x-antseed-service'] = service
+  }
   return headers
 }

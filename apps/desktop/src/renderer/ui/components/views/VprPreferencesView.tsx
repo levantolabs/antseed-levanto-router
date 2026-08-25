@@ -5,6 +5,7 @@ import { routesForSelectedModel } from '../../../modules/catalog/view-models';
 import { peerAccessSummaryLabel } from '../../../modules/routing/peer-access';
 import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
+import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
@@ -64,6 +65,26 @@ export function VprPreferencesView({ onSelectView }: Props) {
               />
             )}
           />
+
+          <div className={styles.sliderGroup}>
+            <div className={styles.sliderHead}>
+              <span className={styles.sliderTitle}>Cost / quality tradeoff</span>
+              <span className={styles.sliderReadingSmall}>
+                {CQT_LABELS[cqtToPositionIndex(snap.preferences.cqt)]}
+              </span>
+            </div>
+            <VprSlider
+              min={0}
+              max={CQT_LABELS.length - 1}
+              step={1}
+              value={cqtToPositionIndex(snap.preferences.cqt)}
+              onChange={(next) => actions.updateVprRoutingPreferences({ cqt: positionIndexToCqt(next) })}
+              ariaLabel="Cost / quality tradeoff"
+            />
+            <div className={styles.sliderHint}>
+              Only affects "Levanto Auto" model requests. A relative dial, not a spend target.
+            </div>
+          </div>
 
           <VprSettingRow
             title="Prefer free peers when available"

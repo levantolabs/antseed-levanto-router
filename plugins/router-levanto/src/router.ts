@@ -256,7 +256,11 @@ export class LevantoRouter {
       })).filter((entry) => entry.tokens > 0)
       : [];
 
-    const cqt = 5;
+    // CQT dial (decisions doc SS8.1, software-arch doc SS4.4): one of the
+    // five discrete VPR positions {1,3,5,7,9}; 5 ("Balanced") when the host
+    // hasn't wired VprRoutingPreferences.cqt through yet, or for a CLI-only
+    // caller with no preferences UI at all.
+    const cqt = routingPreferences?.cqt ?? 5;
     const body: RouteRequestBody = {
       v: 1,
       cqt,
