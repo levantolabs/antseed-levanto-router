@@ -866,6 +866,119 @@ contract AntseedChannelsTest is Test {
         channels.topUp(channelId, settleAmount, encodeMetadata(5000, 2000), spendingSig, USDC_100, newDeadline, reserveSig);
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    //      CATCH-UP BURST (model-routing daily subscription, toggle-on gap)
+    // ═══════════════════════════════════════════════════════════════════
+
+    /**
+     * @dev Proves the two-call catch-up burst (docs/model-routing-runlog.md,
+     *      2026-08-25 entries) is structurally required, not a design
+     *      choice: settle() rejects any cumulativeAmount above the
+     *      *current* deposit (InvalidAmount below), so a backlog bigger
+     *      than today's small ceiling cannot be settled directly, before
+     *      the ceiling is raised to cover it.
+     */
+    function test_catchUpBurst_directSettleOfBacklogReverts() public {
+        uint128 day = 590_000; // $0.59, one day's charge
+        bytes32 salt = keccak256("catchup-direct-settle");
+        // Deposit must clear AntseedDeposits.MIN_BUYER_DEPOSIT ($1.00) even
+        // though the channel's own ceiling here is just one day ($0.59).
+        bytes32 channelId = doReserve(salt, day, day * 2);
+
+        // Day 1: fully settled, same as any ordinary day.
+        bytes memory day1Sig = signSpendingAuth(BUYER_PK, channelId, day, 0, 0);
+        vm.prank(seller);
+        channels.settle(channelId, day, encodeMetadata(0, 0), day1Sig);
+
+        // A 9-day toggle-on gap follows: app closed, toggle never switched
+        // off, so all 9 days are owed (calendar-day billing, decisions doc SS6.7).
+        vm.warp(block.timestamp + 9 days);
+
+        // Backlog: day 1 + 9 missed days = 10 days total, still within the
+        // channel's own ~30-day catch-up cap.
+        uint128 backlog = day * 10;
+        bytes memory backlogSig = signSpendingAuth(BUYER_PK, channelId, backlog, 0, 0);
+
+        vm.prank(seller);
+        vm.expectRevert(AntseedChannels.InvalidAmount.selector);
+        channels.settle(channelId, backlog, encodeMetadata(0, 0), backlogSig);
+    }
+
+    /**
+     * @dev The actual catch-up mechanism: topUp() raises the ceiling first
+     *      (its own settlement branch is a no-op here, since day 1 was
+     *      already settled against the OLD ceiling -- the 85% gate is
+     *      satisfied for free), then settle() submits the real backlog now
+     *      that the raised ceiling covers it.
+     */
+    function test_catchUpBurst_twoCallSequenceSucceeds() public {
+        uint128 day = 590_000; // $0.59
+        bytes32 salt = keccak256("catchup-two-call");
+        // Fund comfortably beyond the eventual backlog + headroom.
+        bytes32 channelId = doReserve(salt, day, day * 40);
+
+        // Day 1: fully settled.
+        bytes memory day1Sig = signSpendingAuth(BUYER_PK, channelId, day, 0, 0);
+        vm.prank(seller);
+        channels.settle(channelId, day, encodeMetadata(0, 0), day1Sig);
+
+        // A 9-day toggle-on gap.
+        vm.warp(block.timestamp + 9 days);
+
+        uint128 backlog = day * 10; // day 1 + 9 missed days
+        uint128 newCeiling = backlog + day; // backlog, plus one more day's headroom -- back to steady state
+
+        // Call 1: topUp() raises the ceiling only. cumulativeAmount == what's
+        // already settled, so `cumulativeAmount > channel.settled` is false
+        // and the settlement branch never runs -- this call carries no real
+        // settlement, purely raises the ceiling ahead of what's about to be claimed.
+        uint256 newDeadline = block.timestamp + 2 hours;
+        bytes memory reserveSig = signReserveAuth(BUYER_PK, channelId, newCeiling, newDeadline);
+        vm.prank(seller);
+        channels.topUp(channelId, day, encodeMetadata(0, 0), day1Sig, newCeiling, newDeadline, reserveSig);
+
+        (,, uint128 depositAfterRaise, uint128 settledAfterRaise,,,,,) = channels.channels(channelId);
+        assertEq(depositAfterRaise, newCeiling, "ceiling should be raised to cover the full backlog");
+        assertEq(settledAfterRaise, day, "topUp's settlement branch should have been a no-op");
+
+        // Call 2: settle() submits the actual backlog, now that the ceiling covers it.
+        bytes memory backlogSig = signSpendingAuth(BUYER_PK, channelId, backlog, 0, 0);
+        vm.prank(seller);
+        channels.settle(channelId, backlog, encodeMetadata(0, 0), backlogSig);
+
+        (,,, uint128 settledFinal,,,,,) = channels.channels(channelId);
+        assertEq(settledFinal, backlog, "the full backlog should now be settled");
+    }
+
+    /**
+     * @dev A single topUp() call cannot do both at once when the backlog
+     *      exceeds the pre-raise ceiling -- confirms the constraint the
+     *      two-call design works around (AntseedChannels.sol's settlement
+     *      check runs before channel.deposit is updated to newMaxAmount).
+     */
+    function test_catchUpBurst_singleTopUpWithBacklogAmountReverts() public {
+        uint128 day = 590_000;
+        bytes32 salt = keccak256("catchup-single-topup-fails");
+        bytes32 channelId = doReserve(salt, day, day * 40);
+
+        bytes memory day1Sig = signSpendingAuth(BUYER_PK, channelId, day, 0, 0);
+        vm.prank(seller);
+        channels.settle(channelId, day, encodeMetadata(0, 0), day1Sig);
+
+        vm.warp(block.timestamp + 9 days);
+        uint128 backlog = day * 10;
+        uint128 newCeiling = backlog + day;
+
+        // Try to raise the ceiling AND settle the full backlog in one call.
+        bytes memory backlogSig = signSpendingAuth(BUYER_PK, channelId, backlog, 0, 0);
+        uint256 newDeadline = block.timestamp + 2 hours;
+        bytes memory reserveSig = signReserveAuth(BUYER_PK, channelId, newCeiling, newDeadline);
+
+        vm.prank(seller);
+        vm.expectRevert(AntseedChannels.InvalidAmount.selector);
+        channels.topUp(channelId, backlog, encodeMetadata(0, 0), backlogSig, newCeiling, newDeadline, reserveSig);
+    }
+
     function test_topUp_revert_notSeller() public {
         bytes32 salt = keccak256("session-topup-auth");
         bytes32 channelId = doReserve(salt, USDC_100, USDC_150);

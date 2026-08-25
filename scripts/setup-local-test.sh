@@ -14,7 +14,7 @@ CHANNELS=0x0165878A594ca255338adfa4d48449f69242Eb8F      # nonce 6
 # Stats = nonce 7, Emissions = nonce 8
 DEPOSIT_RELAY=0x8A791620dd6260079BF849Dc5567aDC3F2FdC318 # nonce 9
 
-cd /Users/shahafan/Development/antseed
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo "=== Step 1: Deploy contracts ==="
 echo "Make sure anvil is running: anvil"
@@ -66,10 +66,10 @@ ln -sf "$(pwd)/plugins/provider-openai-responses" ~/.antseed/plugins/node_module
 
 echo ""
 echo "=== Step 3: Get wallet addresses ==="
-SELLER_ADDR=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity('/Users/shahafan/.antseed-seller');console.log(i.wallet.address)})()")
-SELLER_KEY=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity('/Users/shahafan/.antseed-seller');console.log(i.wallet.privateKey)})()")
-BUYER_ADDR=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity('/Users/shahafan/.antseed');console.log(i.wallet.address)})()")
-BUYER_KEY=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity('/Users/shahafan/.antseed');console.log(i.wallet.privateKey)})()")
+SELLER_ADDR=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity(process.env.HOME+'/.antseed-seller');console.log(i.wallet.address)})()")
+SELLER_KEY=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity(process.env.HOME+'/.antseed-seller');console.log(i.wallet.privateKey)})()")
+BUYER_ADDR=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity(process.env.HOME+'/.antseed');console.log(i.wallet.address)})()")
+BUYER_KEY=$(node -e "const{loadOrCreateIdentity}=require('./packages/node/dist/p2p/identity.js');(async()=>{const i=await loadOrCreateIdentity(process.env.HOME+'/.antseed');console.log(i.wallet.privateKey)})()")
 SELLER_PEER=$(cat ~/.antseed-seller/identity.key)
 
 echo "Seller EVM: $SELLER_ADDR"
