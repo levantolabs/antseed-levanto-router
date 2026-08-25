@@ -198,3 +198,65 @@ storage/
 To add a new migration: create `NNN_name.ts` exporting `{ migration: Migration }`,
 add it to the domain's `index.ts`. Use `/add-migration` skill for scaffolding.
 Never modify an existing migration file — always create a new one.
+
+## Model Routing (Levanto integration) — working rules
+
+This fork (branch `model-routing`) is building Levanto's model-routing
+subscription on top of AntSeed. Ground truth for this work is:
+
+- `docs/model-routing-architecture-and-open-decisions.md` — design decisions,
+  what's locked vs. still open
+- `docs/model-routing-software-architecture.md` — code-level architecture
+  (client plugin, server plugin, payment mechanics, flows)
+- `docs/model-routing-system-architecture.md` — deployed components and what
+  talks to what
+- `docs/model-routing-payment-flow.md` — the payment mechanism specifically
+
+**Consult these before making any change in this area.** They are the spec,
+not a suggestion.
+
+### Public/private split
+
+This repo (`antseed-levanto-router`) is a **public fork** — anyone can read
+it. An adjacent, private repo (`levanto-routing-server`, not part of this
+monorepo) holds Levanto's proprietary provider-side specifics. Sage itself
+lives in its own separate, already-private repo (`sage_model_router`);
+`levanto-routing-server` is a different repo, for the routing-server plugin's
+own proprietary code plus an end-to-end test harness that installs this fork's
+client.
+
+Belongs **here** (public-safe):
+- Client-side changes: the `routing-client` plugin, any hooks added to
+  existing buyer-proxy/CLI/desktop code, VPR/CLI UI elements
+- Wire-level API/schema contracts between client and routing peer (e.g. the
+  `/_antseed/route` request/response shape) — the *contract*, not the routing
+  peer's internal implementation of it
+- Anything that is itself one of the documented public components (software
+  architecture doc §1–§2, most of §4)
+
+Must **not** go here — goes in `levanto-routing-server` instead:
+- The routing-server plugin's actual proprietary logic (ranking business
+  rules, pricing strategy specifics beyond the public wire contract)
+- Anything Sage-related beyond "it exists and is called over a local
+  interface"
+- Any credential, internal cost figure, or competitive detail not already
+  stated in the public docs above
+
+**Rule of thumb:** if a change can't be pointed back to a documented,
+public-facing component (§1–§4 of the software architecture doc), it
+probably doesn't belong in this repo.
+
+### Ground-truth discipline
+
+- Treat the four docs above as authoritative. Don't edit them to match what
+  got built — they describe the design, not a changelog of it.
+- If implementation needs to deviate from what a doc says, that's fine — but
+  log the deviation (what was decided instead, and why) in
+  `docs/model-routing-runlog.md`. Don't edit the ground-truth docs to reflect
+  it.
+- If a design decision comes up that the docs are silent on (an open item, or
+  something genuinely unspecified), decide it, implement it, and log it the
+  same way, in the runlog.
+- Exception: the user may explicitly ask for the ground-truth docs themselves
+  to be revised — that's a deliberate editorial act, never something to infer
+  from implementation needs.

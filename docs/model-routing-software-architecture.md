@@ -164,15 +164,15 @@ The §8.4 baseline dropdown is decided as a **fixed, curated option set**, not o
 
 ### 2.6 Daily signing (decisions doc §6)
 
-**Ownership split:** the plugin owns 100% of the decision — which day, how much, catch-up cap, whether to skip. `BuyerPaymentManager` owns only the cryptographic operation and the bookkeeping tied to it. This split exists because the plugin can't safely do the signing itself: `_signer` is a private field on `BuyerPaymentManager` (buyer-payment-manager.ts:151) holding the buyer's actual key, and handing it to plugin code — including a third-party routing peer's plugin, per decisions doc G3 — would let that plugin sign arbitrary messages, not just bounded daily `SpendingAuth`s for one channel.
+**Ownership split:** the plugin owns 100% of the decision — which day, how much, the catch-up backlog, whether to skip. `BuyerPaymentManager` owns only the cryptographic operation and the bookkeeping tied to it. This split exists because the plugin can't safely do the signing itself: `_signer` is a private field on `BuyerPaymentManager` (buyer-payment-manager.ts:151) holding the buyer's actual key, and handing it to plugin code — including a third-party routing peer's plugin, per decisions doc G3 — would let that plugin sign arbitrary messages, not just bounded daily `SpendingAuth`s for one channel.
 
 **New AntSeed-side surface (open item 2):** a narrow method, roughly `signCumulativeAuth(sellerPeerId, cumulativeAmount, metadata)`, that does the sign + persist + update-internal-map + check-topup tail `signPerRequestAuth` already does (buyer-payment-manager.ts:1350-1393) — minus the per-request cost computation that precedes it, since there's no per-request data to compute from. Updating the same private `_cumulativeAmount` map is not optional: `_needsTopUp()` reads it, and routing-client is reusing `topUpReserve()`/`_needsTopUp()` **unmodified** (§6.3) — sign independently of `BuyerPaymentManager` and that trigger silently stops firing.
 
 **Plugin-side logic**, all new, none of it touching AntSeed internals:
 
 - **Pay-first, calendar-day (§6.2, §6.7):** sign today's cumulative once per calendar day while the toggle is on — *before* making any routing calls that day, not after using it, and independent of whether the user actually routes anything that day. Billing isn't usage-triggered: a day is charged for every day the toggle stays on, regardless of whether a routing call fired that day; turning the toggle off stops signing immediately. The routing peer requires today's signature on file before serving a request (§3.3). Never sign further ahead than today: `SpendingAuth` has no deadline, so a signature for a future day could be settled by the seller at any time even after the buyer stops routing. This trades the routing peer's free-rider risk (buyer uses a day, never pays) for a smaller buyer-side risk (buyer pays for today, cancels almost immediately) — both capped at one day, ~$0.59, a deliberate choice to put that bounded risk on the buyer rather than the seller.
-- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for the next ceiling and call `topUpReserve()` once — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method. Whether that next ceiling should be a full month's worth immediately, or grow more gradually, is open item 4 in the decisions doc — a monthly jump is the leading candidate, not locked.
-- Catch-up window: cap at ~30 days: older unsigned days are forgiven rather than accumulated indefinitely (§6.7).
+- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for one more day's ceiling and call `topUpReserve()` — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method — and it repeats identically every day after under the daily default (§6.4, §6.5). If the monthly alternative is chosen instead (open item 4, not locked), this same point becomes a real ramp decision: jump the ceiling straight to a full month's worth, or grow it more gradually.
+- Catch-up (§6.7): billing tracks the toggle, not activity, so a toggle-on gap with the app closed still owes a backlog, capped at ~30 toggle-on days, older forgiven — the plugin tracks toggle on/off transitions locally to know which elapsed days actually count. Resolving a capped backlog under the daily default takes two calls, since `topUp()` checks the submitted cumulative against the *current*, pre-raise ceiling (`AntseedChannels.sol:224`): first `topUp()` raises the ceiling to `backlogCumulative + $0.59` (the existing small ceiling is already ~100% settled from routine operation, so the 85% gate clears for free), then `settle()` submits the actual backlog cumulative. Mechanically the bootstrap ramp again, just reconnect-triggered; routing stays refused until it completes.
 - Cancellation is just "stop calling the new method" — no explicit unwind needed (§6.2).
 
 ### 2.7 Daily digest (decisions doc §6.9)
@@ -428,18 +428,15 @@ sequenceDiagram
     Client->>RP: SpendingAuth(cum = $0.59)
     RP->>RP: settled 100% of $0.59 deposit - 85% gate clears
     Client->>RP: /_antseed/route calls (today's signature on file)
-    Client->>RP: fresh ReserveAuth($18.55, deadline)
-    RP->>Chain: topUp() - settles $0.59, raises ceiling [1 tx]
+    Client->>RP: fresh ReserveAuth($1.18, deadline)
+    RP->>Chain: topUp() - settles $0.59, raises ceiling by one more day [1 tx]
 
-    Note over Client,RP: Days 2-30 - signing only, no on-chain activity
+    Note over Client,RP: Every day after - daily default, not locked (open item 4)
     loop each day used
-        Client->>RP: SpendingAuth(cum = $0.59 x n), before that day's use
-        RP->>RP: store, updatedAt = today
+        Client->>RP: SpendingAuth(cum = running total), before that day's use
+        Client->>RP: fresh ReserveAuth(next day's ceiling)
+        RP->>Chain: topUp() - settles yesterday, raises ceiling by one more day [1 tx]
     end
-
-    Note over Client,RP: ~Day 30 - renewal (leading candidate, not locked - open item 4)
-    Client->>RP: fresh ReserveAuth (next ceiling)
-    RP->>Chain: topUp() - settles + extends [1 tx]
 
     Note over Client,RP: Cancellation
     Client->>RP: stop signing

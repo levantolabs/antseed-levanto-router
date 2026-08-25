@@ -18,7 +18,7 @@
 
 **Shape.** A `routing-client` plugin runs in the buyer (VPR/CLI), holding all state — the CQT dial, per-conversation cache estimates, the failover walk, the local savings ledger, and final policy authority. It replaces `router-local` rather than running alongside it, and calls a `routing-server` plugin on a separate **routing peer** only when a conversation has a new user message. The peer is a pure function: conversation in, ranked `(model, peer)` candidates and prices out, nothing retained.
 
-**Pricing.** $0.59/day, shown to the user as a continuous per-day cost. Mechanically, the client signs one cumulative `SpendingAuth` per elapsed day against a payment channel with the routing peer; the peer holds signatures and settles on-chain once a month via `topUp()`. No new smart contracts are needed. Full mechanism in §6.
+**Pricing.** $0.59/day, shown to the user as a continuous per-day cost. Mechanically, the client signs one cumulative `SpendingAuth` per elapsed day against a payment channel with the routing peer; the peer holds signatures and settles on-chain daily via `topUp()`, raising the ceiling by exactly one more day's charge each time — the default for now, not locked against a monthly alternative (§6.4, item 4). No new smart contracts are needed. Full mechanism in §6.
 
 **Reused vs. built.** Peer discovery, peer scoring, model-route ranking, model canonicalisation, and the entire payment/signing stack are called directly from existing AntSeed packages. Two small extraction refactors move currently-private logic into shared packages so both `router-local` and `routing-client` can call it (§5). On the router-library side, dynamic per-peer pricing, ranked output, precomputed-vector input, failover with sinbin demotion, and multi-turn handling already exist in `sage_model_router` and `levanto-router-proxy`; the one gap is that cached-input pricing is computed but never wired into ranking (§4.4 fixes this).
 
@@ -301,7 +301,7 @@ The design question is not which to use, but **how large a ceiling each `Reserve
 
 ### 6.2 The daily meter is free
 
-Because `SpendingAuth` is cumulative and never expires, one signature per day requires no on-chain activity at all. Day 12 is a signature for `$0.59 × 12`; `settle()` only accepts a cumulative above what is already settled, so the peer simply discards stale signatures and submits only its newest one. A user who stops using the router for a week simply doesn't sign during that week — no signature, no routing access, and no charge; when they return, they sign for the day they come back, not a backlog. Settlement is one transaction regardless of how many days have accumulated; there is no per-day gas and no reconciliation logic.
+Because `SpendingAuth` is cumulative and never expires, one signature per day requires no on-chain activity at all. Day 12 is a signature for `$0.59 × 12`; `settle()` only accepts a cumulative above what is already settled, so the peer simply discards stale signatures and submits only its newest one. Billing tracks the toggle, not activity (§6.7): a user who switches the router off in settings for a week owes nothing for that week, full stop. A user who leaves the toggle on but simply isn't using the app — device off, app closed, no messages sent — still owes those days once they reconnect, since the toggle itself was never switched off; the client resolves this as a backlog on reconnect, capped at ~30 toggle-on days (§6.7). Settlement of an ordinary day, with no backlog to resolve, is one transaction regardless of how many prior days were already settled; there is no per-day gas.
 
 **Client-side rule (pay-first):** the client signs today's cumulative — `$0.59 × n` for day *n* — **before** making any routing calls that day, not after using it. The routing peer requires that day's signature to already be on file before it will serve a routing request; without it, routing is refused (§3.3 of the software architecture doc). This is a deliberate inversion of the usual "sign what you already used" pattern: it removes the routing peer's free-rider exposure (a buyer using the service for a day and never paying for it) at the cost of a small, symmetric risk moved onto the buyer instead — sign today, cancel five minutes later, and that day is paid for but barely used. Both risks are capped at one day, ~$0.59; this trade deliberately favors the seller bearing zero risk over the buyer bearing a small one. Pre-signing *beyond* today remains unsafe for the same reason as before — `SpendingAuth` has no deadline, so a signature for day *n+2* could be settled by the seller at any time even after the buyer stops routing — the rule is "sign today, not ahead," never "sign however far ahead." Cancellation is still clean: stop signing, routing is refused from that point on, nothing further is owed.
 
@@ -313,31 +313,34 @@ if (maxAmount > FIRST_SIGN_CAP) revert FirstSignCapExceeded();
 
 `FIRST_SIGN_CAP = 1_000_000` — USDC has 6 decimals, so **$1.00**. This applies unconditionally to every newly opened channel on AntSeed, for every seller, not just the routing peer. At $0.59/day that's 1.7 days of service, so **no channel can open with a full month's ceiling.**
 
-The only way to raise a ceiling is `topUp()`, which requires 85% of the current deposit to already be settled (`TOP_UP_SETTLED_THRESHOLD_BPS = 8500`). This forces a one-time bootstrapping sequence for every new subscriber — but the ceiling doesn't need to be maxed at $1.00 to clear it: reserving exactly one day's charge ($0.59) instead means day 1's `SpendingAuth(cum=$0.59)` settles at 100% of a $0.59 deposit, clearing the 85% gate immediately rather than needing a second day at a $1.00 ceiling (59% settled after day 1, requiring a partial-day top-off on day 2 to reach 100%). Open at $0.59, spend through it (1 day), sign once, then `topUp()` raises the ceiling to the monthly amount. After that, the monthly rhythm below applies indefinitely.
+The only way to raise a ceiling is `topUp()`, which requires 85% of the current deposit to already be settled (`TOP_UP_SETTLED_THRESHOLD_BPS = 8500`). This forces a one-time bootstrapping sequence for every new subscriber — but the ceiling doesn't need to be maxed at $1.00 to clear it: reserving exactly one day's charge ($0.59) instead means day 1's `SpendingAuth(cum=$0.59)` settles at 100% of a $0.59 deposit, clearing the 85% gate immediately rather than needing a second day at a $1.00 ceiling (59% settled after day 1, requiring a partial-day top-off on day 2 to reach 100%). Open at $0.59, spend through it (1 day), sign once, then `topUp()` raises the ceiling by exactly one more day's charge — to $1.18. After that, the same rhythm applies indefinitely: every day looks like day 1, just one day further along (§6.4).
 
 **This ramp has no UX cost**, because AntSeed's existing payment infrastructure already automates it. `packages/buyer-core/src/buyer-payment-manager.ts` signs both `SpendingAuth` and `ReserveAuth` with a locally-held key — there is no popup or confirmation dialog anywhere in the desktop or CLI code for either signature type. It already runs a proactive top-up trigger, `_needsTopUp()`, firing at 65% of the ceiling specifically so the on-chain `topUp()` call lands after the contract's 85% gate clears. Every AntSeed buyer already goes through a version of this ramp on their first channel with any new seller; it has simply never been visible.
 
-`routing-client` reuses `topUpReserve()` unmodified. The one implementation detail: `topUpReserve()` computes `newCeiling = prevCeiling + maxReserveAmountUsdc`, where `maxReserveAmountUsdc` is a buyer-wide config defaulting to $1.00. Left unchanged, the routing channel would keep growing $1.00 at a time forever rather than settling into a monthly cadence — reopening the gas problem the monthly design is meant to avoid. The routing channel needs its own larger top-up increment (~$18), either via a per-seller override or a manager instance scoped to the routing plugin. This is a small wiring question, not a UX one, and is confirmed with AntSeed in §13.
+`routing-client` reuses `topUpReserve()` unmodified. The one implementation detail: `topUpReserve()` computes `newCeiling = prevCeiling + maxReserveAmountUsdc`, where `maxReserveAmountUsdc` is a buyer-wide config defaulting to $1.00 — already comfortably covers the $0.59/day the daily default needs (it slightly over-reserves by ~$0.41 each day, never a correctness problem, since the ceiling is a maximum, not a spend commitment). A per-seller override only becomes necessary if the monthly alternative (§6.4) is chosen instead, where the needed increment is ~$18 rather than $1; confirmed with AntSeed in §13, item 1.
 
 A side effect worth noting: the reserve amount also bounds Levanto's exposure to unused channels — `lockForChannel` reverts unless the buyer already holds at least that amount of unreserved deposit. Reserving $0.59 rather than maxing at the $1.00 cap lowers this bar somewhat (a spam channel needs $0.59 funded rather than $1.00) — a minor trade against reaching the 85% gate a day sooner.
 
-### 6.4 Reserve sizing: monthly
+### 6.4 Reserve sizing: daily by default, monthly the alternative
 
 At $0.59/day, a year of service is $215.35.
 
 | Reserve period | Ceiling | Peak blocked | Avg blocked | On-chain txs/user/yr | Gas budget per tx to stay under 1% of revenue |
 |---|---|---|---|---|---|
+| **1 day** | **$0.59** | **$0.59** | **~$0.30** | **~365** | **$0.006** |
 | ~2 days | $1.18 | $1.18 | $0.59 | ~182 | $0.012 |
 | 1 week | $4.13 | $4.13 | $2.07 | ~52 | $0.041 |
-| **1 month** | **$17.96** | **$17.96** | **~$9** | **~12** | **$0.18** |
+| 1 month | $17.96 | $17.96 | ~$9 | ~12 | $0.18 |
 | 1 quarter | $53.88 | $53.88 | ~$27 | ~4 | $0.54 |
 | 1 year | $215.35 | $215.35 | ~$108 | ~1 | $2.15 |
 
-The last column avoids guessing Base's actual fee: it's the gas a `topUp` may cost before eating 1% of annual revenue. A `topUp` is a heavy call — two ECDSA recoveries, a USDC transfer, several storage writes — and should be measured on Base before this is locked, but monthly cadence gives roughly an order of magnitude of headroom against any plausible L2 fee.
+The last column avoids guessing Base's actual fee: it's the gas a `topUp` may cost before eating 1% of annual revenue. A `topUp` is a heavy call — two ECDSA recoveries, a USDC transfer, several storage writes — and should be measured on Base before any reserve period here is locked in (item 3).
 
-**Leading candidate, not locked: a monthly ceiling (open item 16).** Twelve transactions per user per year keeps gas comfortably under 1% of revenue without needing batching. Peak blocked capital of $17.96 (average ~$9, since blocked funds are `deposit − settled` and drain daily) is modest against the $45+/month spend the target user has (§9.4), and a 15-minute unilateral exit caps the downside — `requestClose()` is buyer-callable anytime, `TIMEOUT_GRACE_PERIOD` is 15 minutes, then `withdraw()` recovers the headroom. Weekly quadruples gas to save ~$7 of average blocked capital, a bad trade; quarterly saves roughly a dollar a year in exchange for locking $54 and losing a natural monthly renewal beat. This is a pure gas/blocked-capital trade-off, though — it doesn't weigh committing a full month's ceiling on a brand-new subscriber's very first successful day.
+**Default for now, not locked: daily.** Every ordinary day looks exactly like the bootstrap day in §6.3 — sign a `SpendingAuth` for today, sign a fresh `ReserveAuth` for one more day's ceiling, the peer's `topUp()` settles yesterday and extends by exactly one more day (§6.5). Day to day, one mechanism covers the whole subscription lifetime — no separate "ramp, then settle into a different rhythm" distinction — buyer blocked capital sits at its lowest possible average (~$0.30 vs. ~$9 for monthly), and the seller collects real revenue every day instead of holding valid-but-uncollected signatures for up to a month. The exception is a toggle-on-but-unsigned gap (app closed, device off): daily's ceiling tracks actual use so closely that it can't absorb a multi-day gap the way monthly's pre-loaded ceiling does, so reconnecting after one needs a dedicated two-transaction catch-up burst (§6.7) — a real, if rare, second mechanism daily needs that monthly mostly avoids. The routine cost is gas: ~365 transactions/user/year against monthly's ~12, so the per-`topUp` budget to hold the same 1%-of-revenue bar drops from $0.18 to $0.006 — nearly two orders of magnitude tighter, and not yet measured against Base's actual fee (item 3). That measurement is what could overturn this choice: if real `topUp` cost lands meaningfully above $0.006, monthly (or something between the two) becomes the better trade. This is exactly why item 4 stays open rather than resolving here — daily is the working default, not the locked answer.
 
-The reserve period and the billing period don't have to match: the ceiling is a ceiling, not a commitment. Billing is calendar-day while the toggle is on (§6.7), so a user who leaves the router switched off for stretches of the month simply signs fewer days and reaches the 85% top-up mark more slowly — light usage gets cheaper gas as a side effect, with no separate mechanism needed.
+Weekly or ~2-day reserve periods don't win either way: they land between daily and monthly on both axes without daily's "one mechanism, ever" simplicity or monthly's gas headroom, so they're not carried forward as a third candidate.
+
+Under the daily default, the reserve period and the billing period are the same thing — each `topUp()` reserves exactly the next billed day, nothing more. This decoupling only matters if the monthly alternative is chosen instead: there the ceiling is a ceiling, not a commitment, while billing stays calendar-day regardless (§6.7) — a user who leaves the router switched off for stretches of the month simply signs fewer days and reaches the 85% top-up mark more slowly, with lighter usage getting cheaper gas as a side effect.
 
 ### 6.5 Lifecycle
 
@@ -347,28 +350,28 @@ The reserve period and the billing period don't have to match: the ceiling is a 
 | Opt-in | Peer | `reserve()` | Locks $0.59. 1 tx |
 | Start of day 1 | Client | Sign `SpendingAuth(cum = $0.59)`, before routing | Settles 100% of the $0.59 deposit — clears the 85% gate immediately |
 | Day 1 | Peer | Serve routing requests | Gated on today's signature already being on file (§3.3 of the software architecture doc) |
-| Day 1 | Client | Sign `ReserveAuth($18.55, deadline)` | Ramp complete — one day, not two |
-| Day 1 | Peer | `topUp()` — settles $0.59 and raises the ceiling in one call | Locks a further $17.96. 1 tx |
-| Days 2–30 | Client | One `SpendingAuth` per elapsed day | No on-chain activity |
-| ~Day 30 | Client + Peer | Sign next `ReserveAuth`; `topUp()` settles and extends | 1 tx, then repeat monthly |
+| Day 1 | Client | Sign `ReserveAuth($1.18, deadline)` | One more day's ceiling — ramp complete, day 1 already looks like every day after |
+| Day 1 | Peer | `topUp()` — settles $0.59, raises the ceiling by one more day | Locks a further $0.59. 1 tx |
+| Every day *n* after | Client | Sign `SpendingAuth(cum = $0.59 × n)`, before routing; sign fresh `ReserveAuth($0.59 × (n+1), deadline)` | Today's charge, plus tomorrow's ceiling |
+| Every day *n* after | Peer | `topUp()` — settles day *n−1*, raises the ceiling by one more day | 1 tx/day |
 | Cancellation | Client | Stop signing | Nothing further owed |
 | Cancellation | Peer | `close(finalAmount = last signed cum)` | Releases the unsettled remainder — courtesy, 1 tx |
 | Cancellation, peer unresponsive | Client | `requestClose()` → 15 min → `withdraw()` | Unilateral recovery |
 
 Three implementation details worth flagging explicitly:
 
-- **Day 2's signature is a partial day.** `settle()` rejects any cumulative above the deposit, so the client clamps to `min($0.59 × days, ceiling)`. The shortfall isn't lost — it's recovered once the ceiling rises.
-- **`topUp` must fire before the ceiling is reached, not after.** Once the cumulative hits the ceiling the client can't sign higher, and the meter stalls silently — the user routes for free and nothing surfaces until the ledger is checked. On an $18.96 ceiling: the 85% gate opens at day 27.3, the scheduler should fire at 95% (day 30.5), hard stop is day 32.1 — a ~5-day window that must be monitored, not assumed.
-- **The two signature types must not share a code path.** The daily `SpendingAuth` is silent and automatic; the monthly `ReserveAuth` renewal is where a deliberate consent moment belongs (§6.6). Conflating them risks turning a monthly renewal into something unnoticed.
+- **Partial-day clamping only exists under monthly.** Under the daily default the ceiling always exactly matches the day's cumulative — there is nothing to clamp. If monthly is chosen instead, `settle()` rejects any cumulative above the deposit, so the client clamps day 2's signature to `min($0.59 × days, ceiling)`; the shortfall isn't lost, it's recovered once the ceiling rises.
+- **`topUp` must fire before the ceiling is reached, not after — now on a daily rhythm rather than a monthly one.** Once the cumulative hits the ceiling the client can't sign higher, and the meter stalls silently until the next `topUp()` lands. `_needsTopUp()`'s existing 65%-of-ceiling trigger (§6.3) still fires with margin to spare — the whole cycle is one day, not thirty — but daily cadence also means 365 chances a year for a `topUp` to land late instead of 12; R16's monitoring matters just as much, at a different rhythm.
+- **The two signature types must not share a code path, even though both now happen daily.** `ReserveAuth` and `SpendingAuth` authorize different things regardless of cadence (§6.1); keeping them separate in code is what lets §6.6's visibility choices be made independently of the mechanism.
 
 ### 6.6 Signing visibility
 
-Neither signature type requires a visible prompt — both are signed with a locally-held key, with zero UI anywhere in the existing desktop or CLI code. Whether to surface the monthly renewal is therefore a **deliberate product choice**, not a mechanism requirement:
+Neither signature type requires a visible prompt — both are signed with a locally-held key, with zero UI anywhere in the existing desktop or CLI code. Whether to surface either one is a **deliberate product choice**, not a mechanism requirement — though daily `ReserveAuth` removes the natural checkpoint monthly gave this decision:
 
 | Moment | Frequency | What the mechanism requires | What we show |
 |---|---|---|---|
 | Funding the AntSeed deposit | Once | Nothing — AntSeed's onboarding | Nothing new |
-| `ReserveAuth` — monthly renewal | ~12/yr, plus the one-time ramp | Nothing — can be fully silent | **Shown anyway:** a one-line "renewed your $17.96/month routing subscription" notice, since this is the one signing moment tied to money the user might not be tracking |
+| `ReserveAuth` | 365/yr under the daily default (~12/yr if monthly is chosen instead), plus the one-time ramp | Nothing — can be fully silent | **Open.** Monthly gave this signature a natural once-a-month "renewed your $17.96/month routing subscription" moment (§9.4, R17) tied to money the user might not be tracking. Daily removes that checkpoint — same frequency as the silent `SpendingAuth` below — without a replacement proposed yet. Revisit once item 4 (daily vs. monthly) is settled. |
 | `SpendingAuth` — daily meter | 365/yr | Nothing — matches existing per-request auto-signing | Stays silent. Bounded by `$0.59 × elapsed days` and the authorised ceiling, so a compromised client caps out at a fraction of a dollar |
 
 ### 6.7 Sub-decisions
@@ -376,10 +379,21 @@ Neither signature type requires a visible prompt — both are signed with a loca
 | Sub-decision | Options | Decision |
 |---|---|---|
 | Calendar day or active day billing | Calendar = predictable revenue, users pay for idle days. Active = fairer, self-limiting, lumpier revenue | **Calendar day, for every day the router toggle is switched on.** Not usage-based — a day is billed regardless of whether a routing call actually fired that day, but only while the toggle is on; turning it off stops signing immediately (§6.2) |
-| Signing consent | Silent within a cap, vs. a visible prompt | Silent daily; visible monthly renewal (§6.6) |
-| Catch-up window | Unlimited, or capped | Cap at ~30 days; older unsigned days forgiven (the ceiling limits this anyway) |
+| Signing consent | Silent within a cap, vs. a visible prompt | Silent for the daily meter; `ReserveAuth`'s visibility re-opens under the daily default — see §6.6 |
+| Catch-up window | Unlimited, or capped | Cap at ~30 toggle-on days; older unsigned days forgiven. Applies the same way under either cadence — it's a backlog-billing question, not a ceiling-sizing one. See below for the daily default's two-transaction mechanism |
 | Deposit exhausted | Routing stops; how surfaced | Non-modal notice, fall back to timeout behaviour |
-| Cross-user bulk settlement | Contract seller wallet, ask AntSeed for `settleMany`, or accept per-user tx | **Not pursuing.** One `topUp` per subscriber per month is already budgeted (§7) and is not worth the added complexity at this scale |
+| Cross-user bulk settlement | Contract seller wallet, ask AntSeed for `settleMany`, or accept per-user tx | **Not pursuing.** Daily `topUp` cadence is already budgeted (§10) and this isn't worth the added complexity at this scale |
+
+**The catch-up edge case, precisely.** Calendar-day billing (§6.7 above, §9.1) means every day the toggle is on is owed, whether or not the app was even open that day — the only free days are ones where the toggle was explicitly switched off in settings. So a buyer who leaves the toggle on but doesn't have the app running for a stretch — device off, app closed, no messages sent — comes back owing a real backlog, not just "today." The client tracks toggle on/off transitions locally (not just the last signed day), so only genuinely toggle-on days count toward this; toggle-off spans are free regardless of length. The owed backlog is capped at ~30 toggle-on days — anything older is forgiven rather than billed, the same rule regardless of whether daily or monthly cadence is chosen, since this is a backlog-billing question, not a ceiling-sizing one.
+
+Settling a capped backlog under the daily default takes exactly two on-chain calls, both seller-paid, because of a real ordering constraint in the contract: `topUp()` checks the submitted `cumulativeAmount` against the *current* (pre-raise) ceiling before applying the raise (`AntseedChannels.sol:224`), so a backlog cumulative that exceeds today's small ceiling can't be settled in the same call that raises it to cover it.
+
+1. `topUp()` — raises the ceiling straight to `backlogCumulative + $0.59` (the full backlog, plus one more day's headroom, landing the channel back in its normal steady state). The 85% settled-threshold gate is already satisfied for free here, since the ceiling being raised is the small one from the last normal day, already settled to ~100% by routine operation before the gap began — this call carries no real settlement, it exists purely to raise the ceiling ahead of what's about to be claimed.
+2. `settle()` — submits the actual backlog `SpendingAuth(cum = backlogCumulative)`, now that the raised ceiling comfortably covers it.
+
+This is mechanically the same shape as the original bootstrap ramp (§6.3) — a small step, then one larger jump — just triggered by a reconnect instead of day 1, and bounded to at most ~$18.55 (30 days × $0.59, plus one day's headroom) by the 30-day cap, which happens to land in the same range as monthly's own ceiling. Routing stays refused (§3.3's subscription gate) until this completes, the same way it's refused before day 1's first signature — the client should treat catch-up as a blocking reconnect step, not something to run in the background while already routing.
+
+This is a real cost the daily default carries that monthly mostly avoids: monthly's ~30-day pre-loaded ceiling already covers a mid-cycle gap without any special-cased burst, since the ceiling was sized for a month up front regardless of whether every day gets used — it only needs this same two-call mechanism if the gap is long enough to run past the current ceiling and hit its own catch-up cap. Daily's ceiling tracks actual use closely instead (its whole appeal — lowest blocked capital, one mechanism day-to-day), which is exactly why a toggle-on-but-unsigned gap needs this burst as a second, less frequent mechanism.
 
 ### 6.8 What's retained, precisely
 
@@ -448,7 +462,7 @@ Because this is per-subscriber daily data accumulating over time, `modelMix` in 
 
 ## 9. Business
 
-**9.1 — Fee collection.** One `SpendingAuth` per elapsed day against a channel with the routing peer, held by the peer and settled monthly against the ceiling from §6. No new contracts required; because `SpendingAuth` is cumulative, "stockpiling signatures" while offline is automatic and settlement is always one transaction.
+**9.1 — Fee collection.** One `SpendingAuth` per elapsed day against a channel with the routing peer, held by the peer and settled daily by default against the ceiling from §6 (item 4). No new contracts required; because `SpendingAuth` is cumulative, "stockpiling signatures" while offline is automatic and settlement is always one transaction.
 
 **9.2 — Platform fee.** 2% = $0.0118/day, ~$0.36/month. Ordinary seller, ordinary fee.
 
@@ -487,8 +501,10 @@ At the marketed 40%, the user must already be spending ~$45/month on inference �
 |---|---|---|---|
 | Sage @ ~$0.0006–0.001/call | $0.18–0.30 | $0.36–0.60 | $0.90–1.50 |
 | Routing-peer infra (amortised) | ~$0.20 | ~$0.30 | ~$0.50 |
-| Channel gas — 1 `topUp`/month | ~$0.05 | ~$0.05 | ~$0.05 |
-| **Gross margin** | **~$17.1** | **~$16.7** | **~$15.6** |
+| Channel gas — ~30 `topUp`/month at the daily default (§6.4) | ~$1.50 | ~$1.50 | ~$1.50 |
+| **Gross margin** | **~$15.6** | **~$15.2** | **~$14.1** |
+
+At the monthly alternative's 1 `topUp`/month, channel gas drops to ~$0.05 and gross margin returns to roughly ~$17.1/~$16.7/~$15.6 — the same ~$1.4–1.5/month this table shows daily costing is exactly what item 4 (daily vs. monthly, §6.4) is weighing against daily's lower blocked capital and same-day settlement.
 
 Under a per-turn cost model, a heavy agentic user at 20,000 routed turns/month would have been −$4 to −$12/month. The message-level gate turns the previously worst-margin segment into the second-best one; the margin problem is solved, and the harder remaining question is user value at this price (§9.4).
 
@@ -512,11 +528,11 @@ Under a per-turn cost model, a heavy agentic user at 20,000 routed turns/month w
 | R10 | Per-user λ drift via `OnlineBudgetController` | Medium | Medium | Disable it (§4.5) |
 | R11 | Cached-token estimate drifts on prefix invalidation | Medium | Low | Local prefix guard (§4.3) |
 | R12 | Channel-open gas as a spam vector | Low | Low | Bounded by `FIRST_SIGN_CAP` + funded-deposit requirement (§6.3) |
-| R13 | Gas per subscriber outruns revenue at scale | Medium | Medium | Monthly `topUp` cadence; measure on Base first (§6.4) |
+| R13 | Gas per subscriber outruns revenue at scale | Medium | Medium | Daily `topUp` cadence by default has a far tighter margin than monthly ($0.006/tx vs. $0.18/tx to hold 1% of revenue, §6.4) — measuring real Base gas is what item 3/4 exist to resolve |
 | R14 | Daily digest becomes a usage profile over time | Medium | Medium | Ten scalars, day granularity, digest keyed by `hash(buyerPeerId)` rather than raw peer id (§6.9) |
 | R15 | Untested code in the money path | Medium | High | Test story before billing (§7) |
-| R16 | `topUp` fires late → cumulative hits the ceiling, meter stalls silently | Medium | High | Schedule at ~95% consumed; alert on a stalled cumulative (§6.5) |
-| R17 | Monthly `ReserveAuth` renewal read as a surprise charge | Medium | Medium | Frame as a renewal notice; show days used and next ceiling (§6.6) |
+| R16 | `topUp` fires late → cumulative hits the ceiling, meter stalls silently | Medium | High | The existing 65%-of-ceiling `_needsTopUp()` trigger (§6.3) carries proportionally more margin under the daily default, since the whole cycle is one day rather than thirty — but daily also means 365 chances a year for a `topUp` to land late instead of 12, so alerting on a stalled cumulative still matters (§6.5) |
+| R17 | `ReserveAuth` renewal read as a surprise charge | Medium | Medium | Under monthly, frame as a renewal notice showing days used and next ceiling; daily removes the natural moment to attach this to and is unresolved until item 4 is settled (§6.6) |
 | R18 | Untrusted or spam peer prices feed into λ calibration or appear as a ranked candidate | Medium | Medium | Global reputation floor, buyer can only tighten it (§4.4) |
 
 ---
@@ -544,13 +560,13 @@ Everything else in this document is decided. What's left:
 
 **From AntSeed:**
 
-1. Can `maxReserveAmountUsdc` be overridden per seller within one `BuyerPaymentManager`, or does the routing plugin need its own instance? (§6.3) The ramp needs no product decision, but the cleanest wiring for a ~$18 top-up increment (instead of the $1.00 buyer-wide default) needs confirming.
-2. `BuyerPaymentManager` needs a new, narrower public method for the daily meter — sign + persist + update-the-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without the per-request cost computation `signPerRequestAuth` (buyer-payment-manager.ts:1162) does first. §5.1 currently describes `signPerRequestAuth` as a direct-import reuse for signing, but it's built around metered `responseStats` from a completed request and has no way to accept a flat externally-computed amount. The routing plugin should own 100% of the when/how-much decision (§6.2's daily cadence, catch-up cap); this method is the only new surface needed for the actual signing, since `_needsTopUp()` reads a private `_cumulativeAmount` map that only `signPerRequestAuth` currently updates — bypassing it externally would silently break the `topUpReserve()` reuse in item 1.
+1. Can `maxReserveAmountUsdc` be overridden per seller within one `BuyerPaymentManager`, or does the routing plugin need its own instance? (§6.3) Not needed under the daily default — the $1.00 buyer-wide default already comfortably covers the $0.59/day increment. Only becomes a real question if monthly (§6.4) is chosen instead, where the needed increment is ~$18 rather than $1.
+2. `BuyerPaymentManager` needs a new, narrower public method for the daily meter — sign + persist + update-the-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without the per-request cost computation `signPerRequestAuth` (buyer-payment-manager.ts:1162) does first. §5.1 currently describes `signPerRequestAuth` as a direct-import reuse for signing, but it's built around metered `responseStats` from a completed request and has no way to accept a flat externally-computed amount. The routing plugin should own 100% of the when/how-much decision (§6.2's daily cadence, §6.7's catch-up backlog); this method is the only new surface needed for the actual signing, since `_needsTopUp()` reads a private `_cumulativeAmount` map that only `signPerRequestAuth` currently updates — bypassing it externally would silently break the `topUpReserve()` reuse in item 1.
 
 **From Levanto:**
 
-3. Measure `topUp` gas on Base before fixing the monthly cadence (§6.4).
-4. Is a monthly reserve ceiling (§6.4) the right size to commit to immediately after the one-day bootstrap ramp, or should the first `topUp()` raise the ceiling by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost. Related to item 1 (the wiring for a per-seller top-up increment), but this is the sizing/cadence decision underneath that wiring question, not the mechanism itself.
+3. Measure `topUp` gas on Base before locking in daily over monthly, or vice versa (§6.4).
+4. Daily (default, §6.4) vs. monthly reserve cadence — not locked either way. Daily needs measured `topUp` gas near $0.006/tx to hold the same 1%-of-revenue bar monthly holds at $0.18/tx (item 3); if real Base gas lands meaningfully higher, monthly (or something between the two) is the better trade despite losing daily's simplicity, lowest average blocked capital, and same-day seller revenue. If monthly is chosen instead, its own sizing question resurfaces: should the first `topUp()` after the one-day bootstrap ramp jump straight to a full month's ceiling, or raise it by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost.
 5. How does versioning work for `routing-client`/`routing-server` in general, beyond the wire-protocol `"v": 1` field (§4.4), which only covers the request/response schema? Does `routing-server`'s own code version (distinct from Sage's `artifactVersion`) need tracking; does `routing-client`'s version matter given it's potentially third-party code (§G3) talking to a peer that might be a different version; how are `routing-server`/Sage deployments and rollouts sequenced without breaking in-flight requests? (The digest sub-question this originally raised is resolved: `artifactVersion`/`lambdaVersion` are dropped from the digest's field list — the routing peer stores its own λ/price calibration history directly, since it isn't user-related data, and correlates against `predictedCostUsd`/`observedCostUsd` by `period` instead.)
 
 **Before any savings number goes public:** state which baseline the percentage is measured against, and keep it visually separate from AntSeed's own savings-versus-retail figure (§9.5).
