@@ -11,7 +11,7 @@
 - **Declare `selectRoute` as a formal optional method on the `Router` interface** (`packages/node/src/interfaces/buyer-router.ts`), and export the `RouteCandidate` type (§2.1) from wherever both buyer-proxy and plugins can import it. Not just a wiring change — the type itself doesn't exist yet.
 - **Skip the local `rankModelRoutes` reputation re-sort (buyer-proxy.ts:2448/2451-2453) when candidates came from `selectRoute`.** See §2.4 — the routing peer's returned order already is the decision; re-sorting it locally by reputation would discard that.
 - **Extend `Router.onResult`'s result payload** with the token split and cost telemetry `computeResponseTelemetry` already computes at that exact call site (buyer-proxy.ts:3039, right before `onResult` fires) — `freshInputTokens`, `cachedInputTokens`, `outputTokens`, `estimatedCostUsd` — not just the current flat `tokens: number`. See §2.5; nothing new to compute, just forward what's already there.
-- **New `BuyerPaymentManager` method for the daily flat-fee signing tail** (decisions doc open item 3, §2.6) — sign + persist + update-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without `signPerRequestAuth`'s per-request cost computation.
+- **New `BuyerPaymentManager` method for the daily flat-fee signing tail** (decisions doc open item 2, §2.6) — sign + persist + update-internal-cumulative-map + check-topup, given an externally-supplied `cumulativeAmount`, without `signPerRequestAuth`'s per-request cost computation.
 - **New `RoutingServer` plugin type + single-slot registration + reserved-path wiring in `seller-request-handler.ts`, with its own per-buyer rate limiter.** See §3.1.
 - **New `'routing'` capability value** (`packages/protocol/src/capability.ts`) so a routing peer's discovery announcement is distinguishable from an inference provider's — no services/pricing array entry, per decisions doc §5.2.
 - **New `attachDiscovery` optional method on `RoutingServer` + `node.setRoutingServer(...)`**, wired in `seller/start.ts` alongside the existing provider/prover registration loops. See §3.2 — mirrors `node.setRouter`'s existing wiring exactly, nothing reused from prior work (verified nothing like it exists on this branch).
@@ -161,12 +161,12 @@ The §8.4 baseline dropdown is decided as a **fixed, curated option set**, not o
 
 **Ownership split:** the plugin owns 100% of the decision — which day, how much, catch-up cap, whether to skip. `BuyerPaymentManager` owns only the cryptographic operation and the bookkeeping tied to it. This split exists because the plugin can't safely do the signing itself: `_signer` is a private field on `BuyerPaymentManager` (buyer-payment-manager.ts:151) holding the buyer's actual key, and handing it to plugin code — including a third-party routing peer's plugin, per decisions doc G3 — would let that plugin sign arbitrary messages, not just bounded daily `SpendingAuth`s for one channel.
 
-**New AntSeed-side surface (open item 3):** a narrow method, roughly `signCumulativeAuth(sellerPeerId, cumulativeAmount, metadata)`, that does the sign + persist + update-internal-map + check-topup tail `signPerRequestAuth` already does (buyer-payment-manager.ts:1350-1393) — minus the per-request cost computation that precedes it, since there's no per-request data to compute from. Updating the same private `_cumulativeAmount` map is not optional: `_needsTopUp()` reads it, and routing-client is reusing `topUpReserve()`/`_needsTopUp()` **unmodified** (§6.3) — sign independently of `BuyerPaymentManager` and that trigger silently stops firing.
+**New AntSeed-side surface (open item 2):** a narrow method, roughly `signCumulativeAuth(sellerPeerId, cumulativeAmount, metadata)`, that does the sign + persist + update-internal-map + check-topup tail `signPerRequestAuth` already does (buyer-payment-manager.ts:1350-1393) — minus the per-request cost computation that precedes it, since there's no per-request data to compute from. Updating the same private `_cumulativeAmount` map is not optional: `_needsTopUp()` reads it, and routing-client is reusing `topUpReserve()`/`_needsTopUp()` **unmodified** (§6.3) — sign independently of `BuyerPaymentManager` and that trigger silently stops firing.
 
 **Plugin-side logic**, all new, none of it touching AntSeed internals:
 
 - **Pay-first, calendar-day (§6.2, §6.7):** sign today's cumulative once per calendar day while the toggle is on — *before* making any routing calls that day, not after using it, and independent of whether the user actually routes anything that day. Billing isn't usage-triggered: a day is charged for every day the toggle stays on, regardless of whether a routing call fired that day; turning the toggle off stops signing immediately. The routing peer requires today's signature on file before serving a request (§3.3). Never sign further ahead than today: `SpendingAuth` has no deadline, so a signature for a future day could be settled by the seller at any time even after the buyer stops routing. This trades the routing peer's free-rider risk (buyer uses a day, never pays) for a smaller buyer-side risk (buyer pays for today, cancels almost immediately) — both capped at one day, ~$0.59, a deliberate choice to put that bounded risk on the buyer rather than the seller.
-- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for the next ceiling and call `topUpReserve()` once — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method. Whether that next ceiling should be a full month's worth immediately, or grow more gradually, is open item 5 in the decisions doc — a monthly jump is the leading candidate, not locked.
+- The bootstrap ramp (§6.3, §6.5): first `ReserveAuth` is sized to exactly one day's charge ($0.59), not maxed at `FIRST_SIGN_CAP` ($1.00) — settling $0.59 against a $0.59 deposit is 100%, clearing the 85% gate after a single day instead of two. Once cleared, sign a fresh `ReserveAuth` for the next ceiling and call `topUpReserve()` once — this is the one point where the plugin's flow *does* call back into existing top-up machinery, not the new narrow method. Whether that next ceiling should be a full month's worth immediately, or grow more gradually, is open item 4 in the decisions doc — a monthly jump is the leading candidate, not locked.
 - Catch-up window: cap at ~30 days: older unsigned days are forgiven rather than accumulated indefinitely (§6.7).
 - Cancellation is just "stop calling the new method" — no explicit unwind needed (§6.2).
 
@@ -187,7 +187,7 @@ Trimmed to fields with zero new plumbing — everything below is already produce
 | `predictedCostUsd` | Sum of the new `predictedCostUsd` field (§2.5) across today's rows |
 | `modelMix` | Tally of `actualModel` across today's rows |
 
-Dropped from decisions doc §6.9's original field list — both need genuinely new plumbing that doesn't exist anywhere else in this design: `failovers`/`timeouts` (would need new counters on the §2.4 failover walk) and `regenerations`/`overrides` (would need a new signal from the VPR/CLI UI, §4, which nothing currently produces). **Flagged as open item 6** in the decisions doc — this trimmed field set isn't locked, just what's cheap enough to build first.
+Dropped from decisions doc §6.9's original field list — both need genuinely new plumbing that doesn't exist anywhere else in this design: `failovers`/`timeouts` (would need new counters on the §2.4 failover walk) and `regenerations`/`overrides` (would need a new signal from the VPR/CLI UI, §4, which nothing currently produces). **Flagged as open item 5** in the decisions doc — this trimmed field set isn't locked, just what's cheap enough to build first.
 
 ## 3. Routing-Server Plugin (Peer-Side)
 
@@ -278,7 +278,7 @@ Confirmed nothing currently applies one: neither `sage_model_router` (`set_price
 2. **Ranking eligibility** — the same floor gates which peers are even in the candidate set `rank_candidates_from_vector` ranks over (has to happen in the routing-server plugin's own peer-set construction, since that function itself has no reputation parameter).
 3. **Per-buyer tightening only, never loosening** — layered under the existing per-buyer `constraints.minTrustScore` (§4.4): a buyer requesting a *stricter* threshold than the global floor is honored on the returned ranked list; a *looser* request is ignored. The global floor is a hard minimum.
 
-Only the exact threshold is still open — decisions doc open item 7, provisionally `minTrustScore ≥ 0.70` on the 0–100 scale.
+Threshold decided: `minTrustScore ≥ 0.70` on the 0–100 scale.
 
 ### 3.6 Digest receiving (decisions doc §6.9, §6.8)
 
@@ -428,7 +428,7 @@ sequenceDiagram
         RP->>RP: store, updatedAt = today
     end
 
-    Note over Client,RP: ~Day 30 - renewal (leading candidate, not locked - open item 5)
+    Note over Client,RP: ~Day 30 - renewal (leading candidate, not locked - open item 4)
     Client->>RP: fresh ReserveAuth (next ceiling)
     RP->>Chain: topUp() - settles + extends [1 tx]
 
