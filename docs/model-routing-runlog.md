@@ -19,6 +19,47 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-25] Three unformalized failure modes: routing-peer timeout, sidecar-down, zero-eligible-candidates
+
+**Type:** New decisions (ground truth silent) — the mission brief explicitly calls these
+three out as not covered by any of the four docs and asks for a logged approach.
+
+**1. Routing peer unreachable or hung (client side).**
+`LevantoRouter.selectRoute` (`plugins/router-levanto/src/router.ts`) now wraps its fetch to
+`/_antseed/route` in an `AbortController` with a configurable `routeTimeoutMs` (default
+3000ms, new `LevantoRouterConfig` field). A refused connection and a hung/never-responding
+one both surface identically — the abort fires the same way fetch's own rejection would —
+and both are handled by returning `null` from `selectRoute`, exactly like a clean 402: the
+existing buyer-proxy pipeline falls through to `selectCandidatePeersForRouting`'s normal
+narrowing rather than surfacing a routing-specific error to the end user. Covered by a new
+test using a `fetchImpl` mock that only resolves/rejects when its `AbortSignal` fires,
+configured with a short `routeTimeoutMs` so the test doesn't wait out the real default.
+
+**2. Mock Sage sidecar down while the routing peer itself is up (server side).**
+`LevantoRoutingServerHandler.handleRoute` (`levanto-routing-server/src/routing-server-handler.ts`)
+now wraps the `sidecar.rank(...)` call in its own try/catch, returning a distinct `503` with
+`error.type: 'sidecar_unavailable'` — rather than letting the exception propagate uncaught to
+`seller-request-handler.ts`'s generic dispatch wrapper, which would otherwise return an
+indistinguishable generic `500 routing_error` for this case and any other internal bug. The
+client currently treats any non-OK status the same (decline, per failure mode 1 above), so
+this doesn't change client behavior yet — the value is purely in making the seller-side
+response/logs diagnostic. Covered by a new test with a `SidecarClient` fake whose `rank()`
+throws.
+
+**3. Buyer config with zero eligible candidates.**
+No change needed — already correct. `handleRoute` filters the catalog by constraints first;
+if the filtered set is empty it returns a normal `200` with `ranked: []` and
+`baselineSuggestion: null` before ever touching the sidecar (lines ~89-96, pre-existing).
+Confirmed by the pre-existing `'returns an empty ranked list rather than erroring when every
+candidate is filtered out'` test in `routing-server-handler.test.ts` — no gap here, just
+verifying and recording it as covered under this task.
+
+**Ground truth reference:** None — the mission prompt itself names these three as gaps the
+docs don't specify a mechanism for, and asks that the approach be logged here rather than
+filled in silently.
+
+---
+
 ## [2026-08-25] The subscription gate doesn't distinguish a bootstrap reserve from a real day's payment
 
 **Type:** Observation surfaced while building the full-lifecycle e2e test

@@ -106,6 +106,22 @@ describe('LevantoRouter.selectRoute', () => {
     expect(result).toBeNull();
   });
 
+  it('aborts and declines (does not hang) if the routing peer never responds within routeTimeoutMs', async () => {
+    const fetchImpl = vi.fn().mockImplementation((_url: string, init: { signal?: AbortSignal }) => {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+      });
+    });
+    const router = new LevantoRouter({
+      routingPeerUrl: 'http://x',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      routeTimeoutMs: 20,
+    });
+    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+    expect(result).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledWith('http://x/_antseed/route', expect.objectContaining({ signal: expect.any(Object) }));
+  });
+
   describe('new-user-message gate (decisions doc SS4.2)', () => {
     it('a tool-loop continuation (same last user message) skips the network call and reuses the pinned decision', async () => {
       const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });

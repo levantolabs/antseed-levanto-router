@@ -25,7 +25,16 @@ export interface LevantoRouterConfig {
    */
   signDailyIfNeeded?: (sellerPeerId: string) => Promise<void>;
   fetchImpl?: typeof fetch;
+  /**
+   * Bounds a hung connection, not just a refused one -- plain fetch() has no
+   * default timeout, so an unresponsive (not just unreachable) routing peer
+   * would otherwise hang selectRoute indefinitely. Default chosen to sit
+   * comfortably under typical chat-completion client timeouts.
+   */
+  routeTimeoutMs?: number;
 }
+
+const DEFAULT_ROUTE_TIMEOUT_MS = 3000;
 
 function calendarDayKey(now = new Date()): string {
   return `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
@@ -222,16 +231,27 @@ export class LevantoRouter {
     const doFetch = this.config.fetchImpl ?? fetch;
     let res: Response;
     const routingCallStartedAt = Date.now();
+    const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
+    const timeoutController = new AbortController();
+    const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
     try {
       res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(body),
+        signal: timeoutController.signal,
       });
     } catch {
-      // Routing peer unreachable -- task #12 covers this properly (timeout
-      // vs. clean 402). For now: decline rather than hang.
+      // Routing peer unreachable OR unresponsive (the AbortController above
+      // fires the same way for both) -- decisions doc/software-arch doc
+      // leave the client-side mechanism unspecified for this case (flagged
+      // as an unformalized gap earlier in this project); the chosen
+      // behavior: decline rather than hang or error the chat request, same
+      // as a clean 402 -- the existing pipeline falls through to a real
+      // model rather than surfacing a routing-specific failure to the user.
       return null;
+    } finally {
+      clearTimeout(timeoutHandle);
     }
     const routingLatencyMs = Date.now() - routingCallStartedAt;
     if (!res.ok) return null; // includes the 402 "not subscribed" case
