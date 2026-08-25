@@ -28,3 +28,5 @@ const plugin: AntseedRouterPlugin = {
 export default plugin;
 export { LevantoRouter } from './router.js';
 export type { LevantoRouterConfig } from './router.js';
+export { buildDigest, periodKey } from './digest.js';
+export type { DailyDigestBody } from './digest.js';

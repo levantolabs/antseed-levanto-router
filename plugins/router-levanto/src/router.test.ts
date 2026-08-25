@@ -191,8 +191,11 @@ describe('LevantoRouter.selectRoute', () => {
 
     it('signs before the routing call it gates, not after', async () => {
       const order: string[] = [];
-      const fetchImpl = vi.fn().mockImplementation(async () => {
-        order.push('fetch');
+      const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
+        // Only the SS4.4 routing call (carries sagePrompt) is the "fetch" this
+        // test cares about ordering against sign -- the digest submission
+        // fires alongside it but isn't part of what this test verifies.
+        if ('sagePrompt' in JSON.parse(init.body)) order.push('fetch');
         return { ok: true, json: async () => rankedResponse() };
       });
       const signDailyIfNeeded = vi.fn().mockImplementation(async () => { order.push('sign'); });
@@ -227,6 +230,69 @@ describe('LevantoRouter.selectRoute', () => {
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
       const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
       expect(result).not.toBeNull();
+    });
+  });
+
+  describe('daily digest (decisions doc SS2.7/SS6.9)', () => {
+    function digestAwareFetch(routeHandler: () => unknown) {
+      return vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
+        const parsedBody = JSON.parse(init.body);
+        if ('sagePrompt' in parsedBody) {
+          return { ok: true, json: async () => routeHandler() };
+        }
+        return { ok: true, json: async () => ({ accepted: true }) };
+      });
+    }
+
+    it('sends a digest as its own request, once per calendar day, alongside signing', async () => {
+      const fetchImpl = digestAwareFetch(rankedResponse);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await router.selectRoute(req('levanto-auto', 'first'), [peer('0xAAA')], conversation('a'), null);
+      expect(fetchImpl).toHaveBeenCalledTimes(2); // one digest submission, one routing call
+
+      await router.selectRoute(req('levanto-auto', 'second'), [peer('0xAAA')], conversation('b'), null);
+      expect(fetchImpl).toHaveBeenCalledTimes(3); // no repeat digest send same day
+    });
+
+    it('does not send a digest when there is no sellerPeerId to send it to', async () => {
+      const fetchImpl = digestAwareFetch(rankedResponse);
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+      expect(fetchImpl).toHaveBeenCalledTimes(1); // routing call only
+    });
+
+    it('a failed digest send never blocks or fails the routing call itself', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
+        const parsedBody = JSON.parse(init.body);
+        if ('sagePrompt' in parsedBody) return { ok: true, json: async () => rankedResponse() };
+        throw new Error('digest endpoint unreachable');
+      });
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+      expect(result).not.toBeNull();
+      expect(result?.[0]?.serviceId).toBe('gpt-5.6-luna');
+    });
+
+    it('retries the digest send on a later call if the earlier attempt failed', async () => {
+      let digestCalls = 0;
+      const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
+        const parsedBody = JSON.parse(init.body);
+        if ('sagePrompt' in parsedBody) return { ok: true, json: async () => rankedResponse() };
+        digestCalls += 1;
+        if (digestCalls === 1) throw new Error('digest endpoint unreachable');
+        return { ok: true, json: async () => ({ accepted: true }) };
+      });
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      await router.selectRoute(req('levanto-auto', 'first'), [peer('0xAAA')], conversation('a'), null);
+      await router.selectRoute(req('levanto-auto', 'second'), [peer('0xAAA')], conversation('b'), null);
+      expect(digestCalls).toBe(2); // first attempt failed, second call retried it
     });
   });
 

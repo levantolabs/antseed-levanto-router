@@ -19,6 +19,97 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-25] Daily digest: sending (client) and receiving (server)
+
+**Type:** New decisions (ground truth silent on several mechanics) implementing decisions
+doc §6.9 / software-architecture doc §2.7 (sending) and §3.6 (receiving).
+
+**Wire mechanics, decided:** software-arch doc §3.6 offered two options for distinguishing
+a digest submission from a §4.4 routing request on the same reserved path -- body-sniffing
+(no `sagePrompt` field) or a `/_antseed/route/digest` path suffix -- and said either is
+fine. Chose body-sniffing: `LevantoRoutingServerHandler.handleRoute`
+(`levanto-routing-server/src/routing-server-handler.ts`) parses the body once, then checks
+`'sagePrompt' in parsed` before deciding which shape to treat it as. This means zero changes
+to `packages/node`'s dispatch (`ANTSEED_ROUTE_PATH` stays a single exact-match path) --
+picked over the suffix specifically to avoid touching the public repo's generic plumbing a
+second time for the same feature. Digest fields (`DigestSubmissionBody`,
+`levanto-routing-server/src/digest-store.ts`) are a local duplicate of the client's
+`DailyDigestBody` (`plugins/router-levanto/src/digest.ts`), same reasoning as the existing
+`RouteRequestBody` duplication noted elsewhere in this file.
+
+**No `v` field on the digest body.** Decisions doc's own open item 5 explicitly leaves
+digest versioning unresolved ("the digest sub-question... is resolved [for artifactVersion/
+lambdaVersion]" but general versioning stays open) -- didn't invent an answer to a
+still-open question; the digest body carries only the §6.9 field list, nothing else.
+
+**Client-side send timing, decided:** §2.7 says "same daily cadence" as the SpendingAuth
+signature but doesn't say which day's numbers a given send reports. Chose: report the day
+that just closed (yesterday, relative to when the send fires), not today-so-far -- because
+at the moment this fires (the first `selectRoute` of a new calendar day, same trigger as
+`ensureSignedToday`), today's own ledger rows don't exist yet, and §3.6's retention model
+("each day's digest accumulates... a single overwritten snapshot couldn't answer...")
+implies a digest is a closed day's tally, not a live partial one. `LevantoRouter.sendDailyDigestIfNeeded`
+(`plugins/router-levanto/src/router.ts`) is called right after `ensureSignedToday()` in
+`selectRoute`, same call site, at most once per calendar day. No signing key involved (unlike
+§2.6's daily payment), so the plugin sends this directly with its own `fetchImpl` rather than
+needing a host-mediated method -- matches system-architecture doc's ownership line
+("[routing-client] owns... sending the daily digest") literally.
+
+**Best-effort, never blocks routing:** a failed digest send is caught and swallowed --
+`lastDigestSentDayKey` only advances on a successful (`res.ok`) send, so a failure is
+retried on the next `selectRoute` call rather than lost or surfaced as a routing error.
+Matches §2.7's "not required for correct routing to work" directly.
+
+**Server-side gate, new decision:** a digest submission is gated on `hasSession(buyerPeerId)`
+only, not the full `isSubscribedToday` freshness check §3.3 uses for routing requests --
+reasoning: a digest isn't consuming today's paid routing service, and a client flushing
+yesterday's finished tally shortly after midnight (before today's signature lands) should
+still be able to deliver it. Requiring *some* known channel still keeps this from being an
+open write endpoint for an arbitrary peer id. Ground truth doesn't specify this gate at all.
+
+**Side effect on gate ordering (routing requests):** to sniff the body shape before deciding
+which gate applies, `handleRoute` now parses JSON *before* the `isSubscribedToday` check,
+reversed from before this change (gate first, then parse). A malformed body from an
+unsubscribed buyer now returns 400 instead of 402 -- a minor, non-security-relevant behavior
+change (both are error responses, no additional data disclosed), required by the shape-sniffing
+approach chosen above, not otherwise motivated.
+
+**Retention/anonymization, implemented as specified:** `InMemoryDigestStore`
+(`levanto-routing-server/src/digest-store.ts`) accumulates one entry per `period` per
+`hash(buyerPeerId)` (sha256, lowercased first) rather than overwriting -- matches §3.6's
+retention model. In-memory only, no durable persistence yet, consistent with the rest of
+this project's storage layer (subscriptions, ledger) being unpersisted in this pass --
+not logged as a new gap, same accepted limitation already on record.
+
+**Scoped down, per §2.7's own table:** `regenerations`, `overrides`, `failovers`, `timeouts`
+are always `0` -- the doc itself says these need signals that don't exist yet (VPR/CLI UI
+for the first two, task #10, not started; failover-walk counters for the last two, no
+counting currently exists on the walk buyer-proxy already does). Not fabricated data --
+`buildDigest` (`plugins/router-levanto/src/digest.ts`) computes real sums/tallies for every
+other field from the existing `routing_decisions` ledger, which is the actual source §2.7's
+own table cites for most fields ("already there").
+
+**Verified genuinely end-to-end, not just unit-level:** added a real-process e2e test
+(`levanto-routing-server/src/e2e/thin-loop.test.ts`, new describe block) -- a real
+`LevantoRouter` posting over real HTTP to a real `LevantoRoutingServerHandler`, asserting the
+digest actually lands in an injected `InMemoryDigestStore` keyed by hash. Caught a real bug
+in the process: the e2e test initially failed silently (empty digest store) because
+`levanto-routing-server`'s `@antseed/router-levanto` dependency resolves through that
+package's built `dist/`, not live `src/` -- the same class of gotcha logged earlier this
+project for `ConversationIdentity` (apps/cli picking up packages/node's dist). The plugin's
+`src/router.ts`/`src/digest.ts` changes were invisible to the e2e test until `npx tsc` was
+re-run in `plugins/router-levanto` to refresh `dist/`. Worth remembering for any future
+cross-repo change here: edit `src/`, rebuild, then trust the e2e result -- an e2e pass
+against a stale `dist/` proves nothing.
+
+**Ground truth reference:** decisions doc §6.9 (field list, "default on, no opt-out"),
+software-architecture doc §2.7 (sending) and §3.6 (receiving, retention, anonymization) --
+implemented as specified where the doc states a mechanism; the send-timing choice, the
+server-side gate, and the body-sniffing-over-suffix pick are new decisions the docs leave
+open.
+
+---
+
 ## [2026-08-25] Three unformalized failure modes: routing-peer timeout, sidecar-down, zero-eligible-candidates
 
 **Type:** New decisions (ground truth silent) — the mission brief explicitly calls these

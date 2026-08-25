@@ -7,6 +7,7 @@ import type {
 } from '@antseed/node';
 import { ConversationState, pinnedToRouteCandidate, type PinnedDecision } from './conversation-state.js';
 import { RoutingLedger, type RoutingDecisionRow } from './ledger.js';
+import { buildDigest, periodKey } from './digest.js';
 
 export interface LevantoRouterConfig {
   /** Base URL of the routing peer's HTTP surface, e.g. http://127.0.0.1:8787 */
@@ -114,6 +115,7 @@ export class LevantoRouter {
   private readonly conversations = new ConversationState();
   private readonly ledger = new RoutingLedger();
   private lastSignedDayKey: string | null = null;
+  private lastDigestSentDayKey: string | null = null;
 
   constructor(private readonly config: LevantoRouterConfig) {}
 
@@ -134,6 +136,44 @@ export class LevantoRouter {
     if (this.lastSignedDayKey === todayKey) return;
     await this.config.signDailyIfNeeded(this.config.sellerPeerId);
     this.lastSignedDayKey = todayKey;
+  }
+
+  /**
+   * Daily digest (decisions doc SS6.9, software-arch doc SS2.7): same daily
+   * cadence as the SpendingAuth signature above, but its own request, not
+   * bundled into it (SS3.6 -- SpendingAuthMetadata is the wrong shape, and
+   * PaymentMux's MessageType enum is closed). Unlike signing, no signing key
+   * is involved -- this is plain stats -- so the plugin sends it directly
+   * with its own fetchImpl rather than needing a host-mediated method.
+   * Best-effort: a failed send must never block or fail routing (SS2.7:
+   * "not required for correct routing to work"), so errors are swallowed
+   * and retried on the next selectRoute call rather than surfaced.
+   *
+   * Reports the day that just closed, not the one starting now: "one daily
+   * performance digest" per day only makes sense as a finished tally (SS3.6's
+   * retention model -- each day's digest accumulates as a permanent record),
+   * and at the moment this fires (the first selectRoute of a new calendar
+   * day, same trigger as ensureSignedToday) today's own ledger rows don't
+   * exist yet. Sent the same way signing works one day "late" relative to
+   * the toggle -- yesterday's numbers, flushed at the start of today.
+   */
+  private async sendDailyDigestIfNeeded(): Promise<void> {
+    if (!this.config.sellerPeerId) return; // nowhere to send it yet
+    const todayKey = calendarDayKey();
+    if (this.lastDigestSentDayKey === todayKey) return;
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const digest = buildDigest(this.ledger.all(), periodKey(yesterday));
+    const doFetch = this.config.fetchImpl ?? fetch;
+    try {
+      const res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(digest),
+      });
+      if (res.ok) this.lastDigestSentDayKey = todayKey;
+    } catch {
+      // Routing peer unreachable -- try again next call, same as a skipped day's stats.
+    }
   }
 
   // Required Router members -- levanto-auto only participates via selectRoute;
@@ -203,6 +243,9 @@ export class LevantoRouter {
     // before this call, not after -- and only now, since a pinned reuse
     // above never reaches the network at all.
     await this.ensureSignedToday();
+    // Same daily cadence, its own request (SS2.7) -- fire-and-forget, never
+    // blocks or fails the routing call itself.
+    await this.sendDailyDigestIfNeeded();
 
     const contextTokens = estimateTokens(lastUserText);
     const expectedCachedTokens = convKey
