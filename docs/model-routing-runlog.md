@@ -19,6 +19,41 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-25] The subscription gate doesn't distinguish a bootstrap reserve from a real day's payment
+
+**Type:** Observation surfaced while building the full-lifecycle e2e test
+(`levanto-routing-server/src/e2e/full-lifecycle.test.ts`) -- not a code change, the gate
+already matches its spec exactly; flagging because the test's own first draft assumed
+otherwise and was wrong.
+
+**Context:** Testing that routing stays blocked between "buyer opts in (`reserve()`)" and
+"buyer signs day 1's real cumulative" -- expected a 402 in between, using a real
+`BuyerPaymentManager` + real `SellerPaymentManager` (on-chain calls mocked, same pattern as
+`packages/node/tests/payment-flow-integration.test.ts`).
+
+**Finding:** That in-between state is NOT blocked. `reserve()`'s own bootstrap step signs a
+`SpendingAuth(cumulativeAmount=0)` as "reserve proof" (`AntseedChannels.sol`'s own doc
+comment on `reserve()`) -- and that signature alone bumps `StoredChannel.updatedAt` to
+today, which is 100% of what the gate checks ("hasSession && updatedAt is today",
+software-architecture doc SS3.3, verbatim). The gate has no amount check anywhere in any of
+the four docs, so this isn't a bug relative to spec -- it's a real, verified consequence of
+building the gate exactly as documented: a channel that was JUST opened today, with nothing
+real ever signed for it, already reads as "subscribed today."
+
+**Why this doesn't necessarily matter in practice:** the documented lifecycle (decisions doc
+SS6.5) always signs day 1's real cumulative before the first routing call ever happens, same
+calendar day -- so a real buyer following the intended flow never actually exercises this
+gap window. It only shows up if something (a crash, a race, third-party routing-client code
+per SSG3) lets a routing call reach the gate between `reserve()` and the first real
+`signCumulativeAuth`.
+
+**Not changed:** this is exactly what "hasSession && updatedAt is today" says to build, and
+none of the four docs ask for an amount check. Flagging for awareness, not fixing
+unprompted — a stricter gate (e.g. requiring `cumulativeAmount > 0`) would be a real design
+change beyond what's specified.
+
+---
+
 ## [2026-08-25] routing-client remaining pieces: what's real, what's scoped down
 
 **Type:** New decisions (ground truth silent) + honest scope notes, batched from one pass
