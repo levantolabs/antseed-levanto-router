@@ -2377,91 +2377,137 @@ export class BuyerProxy {
     }
 
     if (!explicitPeerId && requestedService) {
-      const selectModelPeers = (candidateSources: PeerInfo[]): CandidatePeerRouteSelection =>
-        selectCandidatePeersForRouting(candidateSources, requestProtocol, requestedService, explicitProvider, 'strict')
-      let discoveredPeers = peers
-      let { candidatePeers: modelPeers, routePlanByPeerId: modelPlans } = selectModelPeers(discoveredPeers)
-      const cacheAgeMs = Date.now() - this._cacheLastUpdatedAtMs
-      if (modelPeers.length === 0 || cacheAgeMs > this._peerCacheTtlMs) {
-        discoveredPeers = await this._getPeers({ forceRefresh: true })
-        ;({ candidatePeers: modelPeers, routePlanByPeerId: modelPlans } = selectModelPeers(discoveredPeers))
-      }
-
       const router = this._node.router
       const policyRouter = router as BuyerPolicyRouter | null | undefined
-      const routeCandidates = modelPeers
-        .map((peer) => {
-          const plan = modelPlans.get(peer.peerId)
-            ?? resolvePeerRoutePlan(peer, requestProtocol, requestedService, explicitProvider, 'strict')
-          if (!plan?.serviceId) return null
-          const offer = findAdvertisedServiceOffer(peer, plan.provider, plan.serviceId)
-          if (!offer) return null
-          const missingRequired = plan.selection?.requiresTransform
-            ? requiredParameters
-            : findMissingRequiredParameters(
-                peer,
-                plan.provider,
-                plan.serviceId,
-                requiredParameters,
+
+      // Additive, optional: a router that implements selectRoute picks both
+      // model and seller together, ahead of the fixed-model narrowing below.
+      // Declining (null) — including simply not implementing the method —
+      // falls straight through to the unmodified pipeline (software-arch
+      // doc SS2.1). Host code carries no knowledge of any sentinel string;
+      // that's entirely the plugin's business.
+      const routeSelected = await router?.selectRoute?.(
+        serializedReq,
+        peers,
+        conversationIdentity,
+        this._routingPreferences,
+      ) ?? null
+
+      let candidates: Array<{
+        peer: PeerInfo
+        peerId: string
+        serviceId: string
+        request: SerializedHttpRequest
+        reputation: number
+        hasCachedInputPricing: boolean
+        inputUsdPerMillion: number | null
+        outputUsdPerMillion: number | null
+        minImageUsdPerImage: number | null
+        effectiveReputationScore: number | null
+        peerCooldownUntil: number | null
+        peerFailureStreak: number
+      }>
+      // modelPlans stays empty for a selectRoute-sourced walk; _dispatchToPeer
+      // falls back to resolving the route plan itself per peer+model when a
+      // peer has no entry (existing 'lenient' fallback, buyer-proxy.ts _dispatchToPeer).
+      let modelPlans: Map<string, PeerProtocolRoutePlan> = new Map()
+
+      if (routeSelected) {
+        // The routing peer's returned order already *is* the score/quality/
+        // cost decision (decisions doc SS4.4) — walk it as given, no local
+        // re-ranking or reputation re-sort (software-arch doc SS2.4).
+        candidates = routeSelected.map((candidate) => ({
+          ...candidate,
+          effectiveReputationScore: candidate.reputation,
+          peerCooldownUntil: null,
+          peerFailureStreak: 0,
+        }))
+      } else {
+        const selectModelPeers = (candidateSources: PeerInfo[]): CandidatePeerRouteSelection =>
+          selectCandidatePeersForRouting(candidateSources, requestProtocol, requestedService, explicitProvider, 'strict')
+        let discoveredPeers = peers
+        let { candidatePeers: modelPeers, routePlanByPeerId } = selectModelPeers(discoveredPeers)
+        modelPlans = routePlanByPeerId
+        const cacheAgeMs = Date.now() - this._cacheLastUpdatedAtMs
+        if (modelPeers.length === 0 || cacheAgeMs > this._peerCacheTtlMs) {
+          discoveredPeers = await this._getPeers({ forceRefresh: true })
+          ;({ candidatePeers: modelPeers, routePlanByPeerId } = selectModelPeers(discoveredPeers))
+          modelPlans = routePlanByPeerId
+        }
+
+        const routeCandidates = modelPeers
+          .map((peer) => {
+            const plan = modelPlans.get(peer.peerId)
+              ?? resolvePeerRoutePlan(peer, requestProtocol, requestedService, explicitProvider, 'strict')
+            if (!plan?.serviceId) return null
+            const offer = findAdvertisedServiceOffer(peer, plan.provider, plan.serviceId)
+            if (!offer) return null
+            const missingRequired = plan.selection?.requiresTransform
+              ? requiredParameters
+              : findMissingRequiredParameters(
+                  peer,
+                  plan.provider,
+                  plan.serviceId,
+                  requiredParameters,
+                )
+            if (missingRequired.length > 0) {
+              log(
+                `Capability filter: peer ${peer.peerId.slice(0, 12)}... service="${plan.serviceId}" `
+                + `missing required parameter(s): ${missingRequired.join(', ')}`,
               )
-          if (missingRequired.length > 0) {
-            log(
-              `Capability filter: peer ${peer.peerId.slice(0, 12)}... service="${plan.serviceId}" `
-              + `missing required parameter(s): ${missingRequired.join(', ')}`,
-            )
-            return null
-          }
-          const requestForPolicy = withRoutedModel(serializedReq, plan.serviceId)
-          if (!peerAllowedByPolicy(policyRouter, requestForPolicy, peer)) return null
+              return null
+            }
+            const requestForPolicy = withRoutedModel(serializedReq, plan.serviceId)
+            if (!peerAllowedByPolicy(policyRouter, requestForPolicy, peer)) return null
+            return {
+              peer,
+              peerId: peer.peerId,
+              serviceId: plan.serviceId,
+              request: requestForPolicy,
+              reputation: normalizedModelReputationScore(peer, this._now()) ?? -1,
+              hasCachedInputPricing: offer.cachedInputUsdPerMillion !== undefined,
+              inputUsdPerMillion: offer.inputUsdPerMillion ?? null,
+              outputUsdPerMillion: offer.outputUsdPerMillion ?? null,
+              minImageUsdPerImage: offer.minImageUsdPerImage ?? null,
+            }
+          })
+          .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+        const now = this._now()
+        const preferCachedPricing = routeCandidates.some((candidate) => candidate.hasCachedInputPricing)
+        const ranked = routeCandidates.map((candidate) => {
+          const health = this._peerHealth.get(candidate.peer.peerId)
           return {
-            peer,
-            peerId: peer.peerId,
-            serviceId: plan.serviceId,
-            request: requestForPolicy,
-            reputation: normalizedModelReputationScore(peer, this._now()) ?? -1,
-            hasCachedInputPricing: offer.cachedInputUsdPerMillion !== undefined,
-            inputUsdPerMillion: offer.inputUsdPerMillion ?? null,
-            outputUsdPerMillion: offer.outputUsdPerMillion ?? null,
-            minImageUsdPerImage: offer.minImageUsdPerImage ?? null,
+            ...candidate,
+            effectiveReputationScore: effectiveModelReputationScore(
+              candidate.reputation >= 0 ? candidate.reputation : null,
+              candidate.hasCachedInputPricing,
+              preferCachedPricing,
+              modelRouteTotalPrice(candidate) === 0,
+            ),
+            peerCooldownUntil: health?.cooldownUntil ?? null,
+            peerFailureStreak: health?.failureStreak ?? 0,
           }
         })
-        .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
-      const now = this._now()
-      const preferCachedPricing = routeCandidates.some((candidate) => candidate.hasCachedInputPricing)
-      const ranked = routeCandidates.map((candidate) => {
-        const health = this._peerHealth.get(candidate.peer.peerId)
-        return {
-          ...candidate,
-          effectiveReputationScore: effectiveModelReputationScore(
-            candidate.reputation >= 0 ? candidate.reputation : null,
-            candidate.hasCachedInputPricing,
-            preferCachedPricing,
-            modelRouteTotalPrice(candidate) === 0,
-          ),
-          peerCooldownUntil: health?.cooldownUntil ?? null,
-          peerFailureStreak: health?.failureStreak ?? 0,
+        const routingPreferences = this._routingPreferences
+        if (routingPreferences) {
+          candidates = rankModelRoutes(ranked, routingPreferences, now)
+            .filter((candidate) => isModelRouteEligible(candidate, routingPreferences))
+        } else {
+          ranked.sort((a, b) =>
+            (b.effectiveReputationScore ?? -1) - (a.effectiveReputationScore ?? -1)
+            || a.peer.peerId.localeCompare(b.peer.peerId))
+          const ready = ranked.filter((candidate) => !isCoolingDown(this._peerHealth.get(candidate.peer.peerId), now))
+          candidates = ready.length > 0 ? ready : ranked
         }
-      })
-      let candidates: typeof ranked
-      const routingPreferences = this._routingPreferences
-      if (routingPreferences) {
-        candidates = rankModelRoutes(ranked, routingPreferences, now)
-          .filter((candidate) => isModelRouteEligible(candidate, routingPreferences))
-      } else {
-        ranked.sort((a, b) =>
-          (b.effectiveReputationScore ?? -1) - (a.effectiveReputationScore ?? -1)
-          || a.peer.peerId.localeCompare(b.peer.peerId))
-        const ready = ranked.filter((candidate) => !isCoolingDown(this._peerHealth.get(candidate.peer.peerId), now))
-        candidates = ready.length > 0 ? ready : ranked
-      }
-      if (preferredConversationPeerId) {
-        const preferredIndex = candidates.findIndex((candidate) => (
-          candidate.peer.peerId.toLowerCase() === preferredConversationPeerId
-          && !isCoolingDown(this._peerHealth.get(candidate.peer.peerId), now)
-        ))
-        if (preferredIndex > 0) {
-          const [preferred] = candidates.splice(preferredIndex, 1)
-          if (preferred) candidates.unshift(preferred)
+        if (preferredConversationPeerId) {
+          const preferredIndex = candidates.findIndex((candidate) => (
+            candidate.peer.peerId.toLowerCase() === preferredConversationPeerId
+            && !isCoolingDown(this._peerHealth.get(candidate.peer.peerId), now)
+          ))
+          if (preferredIndex > 0) {
+            const [preferred] = candidates.splice(preferredIndex, 1)
+            if (preferred) candidates.unshift(preferred)
+          }
         }
       }
       if (candidates.length === 0) {
