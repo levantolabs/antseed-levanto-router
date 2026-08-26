@@ -19,6 +19,42 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] A second, distinct blocker found live: the desktop-spawned buyer daemon isn't reliably running current code
+
+Investigating a real symptom the user hit trying Auto routing live (`model_not_found` on a genuine
+chat message) surfaced a second, separate problem from the DHT/NAT-hairpin one logged above —
+found with direct process inspection, not inferred:
+
+- The buyer daemon actually serving traffic on port 8377 was an **orphan**: `~/.antseed/buyer.state.json`
+  claimed `state: 'stopped'`, `pid: 2261944`, while the process genuinely answering requests was a
+  different, long-lived pid the desktop app's own tracking had lost. Every desktop restart today
+  (multiple, across several forks' work) spawned a fresh child that found port 8377 already held and
+  gracefully deferred to it ("Proxy port 8377 already in use; reusing existing local proxy") — meaning
+  none of today's fixes (`router: 'levanto'`, the `LEVANTO_ROUTING_PEER_URL`/`LEVANTO_SELLER_PEER_ID`
+  env vars) were ever reaching the process actually handling the user's chat requests.
+- Killed the orphan and confirmed port 8377 freed. But the *next* process the live desktop app itself
+  spawned (pid 2444591, `/proc/2444591/cmdline` and `/proc/2444591/environ` both checked directly)
+  **also** came up with no `--router` flag and none of the `LEVANTO_*` env vars from `main.ts`'s
+  current source — despite that source (`router: 'levanto'` at `main.ts:326`) being real, committed,
+  and surviving a full desktop restart earlier today. A separately, correctly-configured buyer process
+  spawned manually against the same identity (proven working: real router-levanto load, real 10 USDC
+  deposit, real P2P connect) lost the race for port 8377 to this misconfigured one and never served
+  anything.
+- Root cause of *why* the currently-running Electron process is still spawning children without the
+  current `main.ts` code not fully pinned down in the time available — the source fix is real, but
+  something between it and the live process (stale compiled `dist/main` output not reloaded into the
+  running Electron main process, since Electron's main process does not hot-reload the way its
+  renderer does, is the leading theory) is not reflecting it. This needs a real desktop app restart to
+  clear, which was intentionally not done here (out of scope for this pass — the live app has a user
+  looking at it).
+
+Net effect: two independent, stacked problems currently block a real end-to-end Auto-routing demo,
+not one. Getting a genuinely current buyer process running (via a real desktop restart) is necessary
+but not sufficient — the DHT/NAT-hairpin issue logged in the entry below would still need solving on
+top of that for a real subscribe-and-route request to succeed.
+
+---
+
 ## [2026-08-26] Daily subscription price advertised for real, closing decisions doc §13 item 6
 
 Implements the design worked through in conversation: advertising and serving are separable, so
