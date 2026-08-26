@@ -15,6 +15,21 @@ export interface LevantoRouterConfig {
   /** The routing peer's own peerId -- who the daily SpendingAuth is signed against. */
   sellerPeerId?: string;
   /**
+   * This buyer's own peerId, sent as `x-antseed-buyer-peer-id` on every
+   * `/_antseed/route`/`/_antseed/route/digest` call. `routingPeerUrl` is a
+   * bare, unauthenticated HTTP endpoint (decisions doc has no wire mechanism
+   * for the routing peer to otherwise learn who's asking), so without this
+   * the subscription gate has no buyerPeerId to check `hasSession`/
+   * `getChannelByPeer` against at all. A client-supplied, unverified header
+   * is not a real authentication mechanism -- anyone who can reach
+   * `routingPeerUrl` could claim to be any buyer. Genuinely open: how this
+   * channel gets authenticated for real (a routing-peer-side P2P bridge, a
+   * signed header, TLS client certs, or something else) is unresolved; see
+   * the runlog. Omitted -- the routing peer gets no buyerPeerId, so the
+   * subscription gate always rejects.
+   */
+  buyerPeerId?: string;
+  /**
    * Pay-first daily signing (decisions doc SS6.2): called at most once per
    * calendar day, before the first routing call that day. Deliberately
    * narrow -- this plugin never holds a BuyerPaymentManager or PaymentMux
@@ -295,7 +310,10 @@ export class LevantoRouter {
       // body-sniff for an absent sagePrompt field.
       const res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route/digest`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
+        },
         body: JSON.stringify(digest),
       });
       if (res.ok) this.lastDigestSentDayKey = todayKey;
@@ -440,7 +458,10 @@ export class LevantoRouter {
     try {
       res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: {
+          'content-type': 'application/json',
+          ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
+        },
         body: JSON.stringify(body),
         signal: timeoutController.signal,
       });

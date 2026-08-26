@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import { createConnection } from 'node:net'
 import { getGlobalOptions } from '../types.js'
 import { loadConfig } from '../../../config/loader.js'
-import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
+import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, loadOrCreateIdentity, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
 import type { NodePaymentsConfig } from '@antseed/node'
 import { OFFICIAL_BOOTSTRAP_NODES, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
 import { setupShutdownHandler } from '../../shutdown.js'
@@ -228,6 +228,12 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         buyerOverrides: runtimeOverrides,
       })
 
+      // Loaded early, before the node itself starts, purely so router plugins
+      // (e.g. router-levanto's LEVANTO_BUYER_PEER_ID) can be told this
+      // buyer's own peerId at construction time -- idempotent, the node's
+      // own startup reads the same identity file again later.
+      const buyerIdentity = await loadOrCreateIdentity(globalOpts.dataDir)
+
       let router
       let toolHints: Array<{ name: string; envVar: string }> = []
       const routerName = resolveBuyerRouterName({ router: options.router as string | undefined })
@@ -249,7 +255,10 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         const spinner = ora(`Loading router plugin "${instance.package}"...`).start()
         try {
           const plugin = await loadRouterPlugin(instance.package)
-          const runtimeEnv = buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig)
+          const runtimeEnv = {
+            ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
+            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+          }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv, instance.config as Record<string, string>)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))
@@ -265,7 +274,10 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         const spinner = ora(`Loading router plugin "${routerName}"...`).start()
         try {
           const plugin = await loadRouterPlugin(routerName)
-          const runtimeEnv = buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig)
+          const runtimeEnv = {
+            ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
+            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+          }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))

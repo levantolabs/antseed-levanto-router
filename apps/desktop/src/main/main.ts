@@ -316,11 +316,20 @@ const piChatEngine = registerPiChatHandlers({
 
     const startOptions: StartOptions = {
       mode: 'connect',
-      router: 'local',
+      // Hardcoded to the Levanto model router for local model-routing-feature
+      // demo purposes (runlog: "local routing-peer daemon", 2026-08-26) --
+      // there is no settings/config path yet that lets a buyer choose a
+      // router, so this is a deliberate, temporary stand-in for that real
+      // choice, not a finished decision. The routing peer URL/peer id below
+      // point at whatever `local-peer-daemon.ts` instance is running locally
+      // and will need to become real config once one exists.
+      router: 'levanto',
       ...(isDesktopDebugEnabled() ? { verbose: true } : {}),
       env: {
         ...(isDesktopDebugEnabled() ? { ANTSEED_DEBUG: '1' } : {}),
         ...secureIdentityEnv(),
+        LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
+        LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
       },
     };
 

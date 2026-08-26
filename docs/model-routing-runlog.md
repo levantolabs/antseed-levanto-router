@@ -19,6 +19,129 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] New infrastructure: a real, running local routing-peer daemon
+
+Nobody had ever built the process that actually runs a Levanto routing peer.
+`AntseedNode.registerRoutingServerHandler()` (packages/node) was defined but
+called nowhere in the whole antseed-fork repo; every existing test drove
+`LevantoRoutingServerHandler.handleRoute()` directly in-process, bypassing
+real P2P/transport entirely. This wasn't a decided-and-unimplemented item —
+it's genuinely new scope, prompted by wanting to see the feature actually
+running end to end, not just passing tests.
+
+**What got built, in `levanto-routing-server` (proprietary logic stays out
+of the public repo, per this project's own public/private split):**
+
+- `src/local-peer-daemon.ts` — one process, one identity, two roles: a real
+  `AntseedNode` (role: seller, real DHT/signaling ports, real payments
+  config against a real chain) with a canned `FakeModelProvider` registered
+  (3 models matching `sidecar/mock_sage.py`'s known-quality table, real
+  prices, real OpenAI-chat-completions-shaped responses, no real LLM call —
+  needed so ranked candidates have somewhere real to route actual
+  completions to without requiring a real provider API key), plus a plain
+  HTTP listener (`http-server.ts`'s `startHttpServer`) serving
+  `/_antseed/route`/`/_antseed/route/digest` via the same
+  `LevantoRoutingServerHandler`, backed by the node's real
+  `SellerPaymentManager`.
+- `scripts/setup-local-routing-peer.sh` — extends
+  `antseed-fork/scripts/setup-local-test.sh`'s proven local-devnet pattern
+  (same `base-local` chain, same deterministic contract addresses) to also
+  fund, register, and stake the routing-peer identity.
+
+**A real transport finding, not previously documented anywhere:**
+`router-levanto`'s actual client (`plugins/router-levanto/src/router.ts`)
+does a bare `fetch()` to `LevantoRouterConfig.routingPeerUrl` for
+`/_antseed/route` — not a P2P-authenticated call. So `http-server.ts`'s
+plain-HTTP listener, previously commented as "for testing outside the full
+AntSeed P2P/PaymentMux transport," IS the real transport for this specific
+request, not a stand-in for something else. The daily subscription
+SpendingAuth is different — that genuinely does travel over real
+P2P/PaymentMux (confirmed by reading
+`apps/cli/src/proxy/daily-subscription-signing.ts`'s
+`node.getOrConnectPaymentMux`), so the routing peer still needs to be a
+real, P2P-connected `AntseedNode`, just for a different reason than the
+routing query itself.
+
+**A genuinely open gap this surfaced, not resolved here:** the plain HTTP
+`/_antseed/route` call carries no buyer identity at all in the wire
+protocol as built — no header, nothing. Without one, the subscription gate
+has no `buyerPeerId` to check `hasSession`/`getChannelByPeer` against. Added
+`LevantoRouterConfig.buyerPeerId` (sent as `x-antseed-buyer-peer-id`) as a
+stopgap so this could be demoed at all — explicitly NOT a real
+authentication mechanism (an unverified, client-supplied header; anyone who
+can reach `routingPeerUrl` could claim to be any buyer). How this channel
+gets authenticated for real is unresolved; flagged in the decisions doc
+alongside item 6 (price discovery), which has the same "no wire mechanism
+exists" shape.
+
+**A second real gap: no public getter for a seller's `SellerPaymentManager`
+on `AntseedNode`.** `packages/node/src/node.ts` exposes
+`get buyerPaymentManager()` but no seller-side counterpart, so
+`local-peer-daemon.ts`'s `SubscriptionSource` reads the `_sellerPaymentManager`
+private field directly (TS `private`, not a real runtime-private `#field`,
+so this works, just relies on an internal implementation detail). Not
+proprietary or routing-specific — a real fix is a two-line symmetric getter
+next to the existing buyer one.
+
+**A separate, pre-existing bug this surfaced and fixed:** `apps/desktop`'s
+main process (`apps/desktop/src/main/main.ts`) hardcoded `router: 'local'`
+in the `StartOptions` it passes when spawning the embedded buyer daemon —
+there was no settings/config path that ever selected anything else, so the
+desktop app could never have used router-levanto regardless of whether a
+routing peer existed. Flipped to `router: 'levanto'` with the routing
+peer's URL/peer id passed as env vars, explicitly commented as a deliberate
+temporary stand-in (no real router-selection UI exists yet), not a finished
+design decision.
+
+**What's real and verified, end to end:** real anvil chain, real contract
+deployment, real on-chain staking (50 USDC) and buyer deposit (10 USDC) via
+`cast`; the daemon's real `AntseedNode` starts, binds real DHT/signaling
+ports, and the real mock Sage sidecar subprocess responds with real
+per-model quality scores; the real `apps/cli buyer start --router levanto`
+loads router-levanto for real (after fixing a stale global-plugin symlink at
+`~/.antseed/plugins/node_modules/@antseed/router-levanto` that was pointing
+at an unrelated, several-days-stale package build from outside this
+session's work — not this project's code, but it was silently shadowing it),
+connects to real P2P, and initializes a real `BuyerPaymentManager` that
+correctly reads the real 10 USDC on-chain deposit; a direct `curl` to
+`/_antseed/route` correctly returns 402 "not subscribed" before any payment
+exists, proving the subscription gate is reading real (not stubbed) seller
+payment state.
+
+**What's NOT verified — a real, unresolved blocker, not a shortcut:** the
+daily SpendingAuth never successfully reached the routing peer over P2P.
+`node.getOrConnectPaymentMux(sellerPeerId)` triggers a DHT `findPeer` for
+the routing peer's peer id; logs show `per-peer topic empty; falling back
+to wildcard scan`, then a wildcard scan across hundreds of real public DHT
+endpoints (mostly timeouts), ending in `Peer ... could not be found on the
+network.` Added the routing peer's local DHT port
+(`127.0.0.1:6891`) to the buyer's `network.bootstrapNodes` — this fixed
+general P2P connectivity (bootstrap node count went from 2 to 3) but did
+not fix per-peer-topic discovery specifically, which appears to need the
+routing peer to have successfully announced itself into that DHT topic
+first — not confirmed either way given time spent. This is exactly the kind
+of "how does a buyer actually discover the routing peer over the real AntSeed
+network" question that hasn't come up before now because nothing before
+this daemon ever exercised real P2P peer discovery for a fresh, previously
+unknown peer id — worth a focused follow-up, not a guess made under time
+pressure here.
+
+Closes decisions doc §13 item 8 (formerly), now §14 item 29. Checked `sage_model_router`'s own
+reference integration point directly: `rank_candidates(prompt: str)` (router.py:555-586) is the
+wrapper meant for exactly this situation — it calls Sage itself, vectorizes the result, then
+calls `rank_candidates_from_vector`. Its docstring states the reason a proxy would want this
+shape: "A proxy wants Sage's raw response for its audit log, so it calls Sage itself and hands
+the vector here rather than making a second, unlogged call." The routing peer is that proxy.
+
+So: no client-side change. `sagePrompt` continues to carry raw, trimmed last-user-turn text
+exactly as already built. The routing peer is responsible for calling Sage and vectorizing
+before ranking. `levanto-routing-server`'s current mock sidecar (`ranking.ts`) doesn't do this —
+it fakes quality scores from the model name and barely touches `sagePrompt`'s content — but that
+was already true before this question came up, and wiring a real Sage call into the sidecar is
+separate, later work, not something this resolution requires.
+
+---
+
 ## [2026-08-26] Final verification pass: full test suites, decisions doc cleanup, real on-chain suite reconfirmed
 
 Closing pass after implementing everything with a decided direction from the runlog walkthrough
