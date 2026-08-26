@@ -427,6 +427,25 @@ export function registerPiChatHandlers({
     }
   });
 
+  ipcMain.handle('chat:ai-get-subscription-price', async () => {
+    // The real, live-advertised `type: 'subscription'` price (model-routing
+    // decisions doc SS13 item 6), for the Levanto Auto Preferences toggle's
+    // disclosure copy. Same localhost-fetch-to-buyer-proxy pattern as
+    // chat:ai-list-routing-decisions above -- no new transport. `null` (not
+    // an error) whenever no routing peer has been discovered yet or none
+    // advertises a subscription price; the toggle falls back to its generic
+    // copy in that case.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/subscription-price`);
+      if (!response.ok) return { ok: true, data: null };
+      const body = await response.json() as { ok?: boolean; offer?: { peerId?: string; flatUsdPrice?: number } | null };
+      return { ok: true, data: body.offer ?? null };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
   ipcMain.handle('api:try-proxy-request', async (
     _event,
     params: { port: number; path: string; method: string; headers: Record<string, string>; body: string },

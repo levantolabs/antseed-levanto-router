@@ -19,6 +19,87 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] Daily subscription price advertised for real, closing decisions doc §13 item 6
+
+Implements the design worked through in conversation: advertising and serving are separable, so
+the daily subscription price can ride the network's existing announce → discovery →
+service-catalog pipeline (the same one ordinary per-token model pricing already uses) without
+touching how routing requests actually get served (still the reserved `/_antseed/route` path,
+unchanged). Two precedents grounded this: image generation already gets its own
+`NetworkServiceOffer.type: 'image'` alongside `'text'`, proving a third type is architecturally
+consistent, not a stretch; and AntSeed's own attestation feature (`Prover`/`/_antseed/attest`)
+already establishes that a non-inference seller capability can live outside `Provider.handleRequest`
+entirely, and specifically outside the standard per-request metered billing gate, which doesn't fit
+a flat daily fee at all (no per-token cost to compute for a routing decision).
+
+**antseed-fork (generic protocol/type support, no Levanto business logic):**
+- `packages/protocol/src/service-api.ts`: new `antseed-subscription` protocol value in
+  `WELL_KNOWN_SERVICE_API_PROTOCOLS`. Not a real HTTP request shape -- a seller advertising a
+  service on it is publishing a flat, non-metered price, not something `Provider.handleRequest`
+  ever actually answers.
+- `packages/api-adapter/src/types.ts`: same value added to this package's *independently
+  duplicated* copy of the same constant (confirmed via `tsc` failing with a type-assignability
+  error otherwise -- this package deliberately doesn't depend on `@antseed/protocol`, so the two
+  lists have to be kept in sync by hand; not something to "fix" by adding a dependency here).
+- `packages/node/src/discovery/service-catalog.ts`: `NetworkServiceOffer.type` becomes
+  `'text' | 'image' | 'subscription'`. New `flatUsdPrice?: number` field -- on the wire it rides
+  the same generic `inputUsdPerMillion` numeric field ordinary token pricing uses (no dedicated
+  flat-price field exists in the announce/metadata-codec protocol, and adding one was judged out
+  of scope for this pass since the existing field is already fully generic, untyped-beyond-"a
+  number" wire plumbing); exposed under its own name so no caller needs to know that convention.
+  `comparableOfferPrice` returns `+Infinity` for `type: 'subscription'` so a flat daily fee can
+  never sort as "cheapest" against real per-token model offers.
+- `packages/node/src/health/model-health-checker.ts`: `supportsHealthProbe` now excludes
+  `antseed-subscription`, same as `openai-images`. This was the safety-critical piece: without it,
+  the health checker's blind synthetic-completion probe would hit the pseudo-service, fail every
+  sweep (nothing answers a fake chat completion for a billing placeholder), and after 3 consecutive
+  failures auto-remove it from `provider.services` -- silently un-advertising a correctly working
+  price. New test file `model-health-checker.test.ts` (didn't exist before this) proves it's never
+  probed and never removed across repeated sweeps, and that an ordinary text service on the same
+  provider is still probed and can still be removed -- the exclusion is narrow, not a checker-wide
+  bypass.
+
+**levanto-routing-server (the actual advertisement, proprietary):**
+- `src/local-peer-daemon.ts`: new `SubscriptionPriceAdProvider`, registered on the same node
+  identity as the existing `FakeModelProvider` and `RoutingServerHandler` -- one process, one
+  identity, now three roles. `pricing.defaults.inputUsdPerMillion = 0.59` (the documented daily
+  default, decisions doc §6.3, same value the real on-chain e2e test signs). `handleRequest` is a
+  deliberate 501 stub, not a silent no-op or a crash: nothing should ever legitimately call it
+  (real routing traffic goes through `/_antseed/route`; the health checker now skips this protocol
+  entirely), so if something unexpected does call it, it fails loudly and says why. Confirmed
+  staking is per-identity (`registerProvider` just appends to an array; on-chain stake gating is
+  keyed by the seller's wallet address, not by which `Provider` object registered which services)
+  -- no separate staking needed for the second provider.
+
+**Client-side (showing the real price):** neither of the two existing renderer-facing catalog
+pipes fit -- `apps/cli/src/proxy/network-models.ts`'s `buildNetworkModels` (feeds `/v1/models` and
+the chat model picker) and `apps/desktop/src/main/chat/service-catalog.ts` are both deliberately
+scoped to real, pickable models and correctly exclude `type: 'subscription'` (the former needed an
+explicit filter added -- `canonicalModelKey` already excluded it implicitly, made explicit instead
+of left implicit; the latter already excludes it for free via its own independent protocol
+whitelist). So a new, narrow, single-purpose path was added instead, mirroring the existing
+`/_antseed/routing-decisions` → `chat:ai-list-routing-decisions` precedent exactly: a new
+`GET /_antseed/subscription-price` endpoint on `buyer-proxy.ts` (reads `buildNetworkServiceOffers`
+generically, returns the first `type: 'subscription'` offer or `null`), a matching
+`chat:ai-get-subscription-price` IPC handler in `apps/desktop`'s main process, and a
+`subscriptionPriceResource` (`createCachedResource`, same convention as `routingDecisionsResource`)
+consumed by `VprPreferencesView.tsx` to interpolate the real price into the Levanto Auto toggle's
+disclosure copy ("starts a real $0.59/day USDC subscription charge") when one's been discovered,
+falling back to the pre-existing generic copy otherwise.
+
+**Not observed live, and said so rather than claimed otherwise:** discovering this specific routing
+peer's advertised price over real P2P from a real desktop buyer is gated on the separate, already
+-logged P2P peer-discovery gap (decisions doc §13 item 9) -- not this pass's concern to fix. What's
+verified for real: `packages/node`, `apps/cli`, `apps/desktop` (renderer + main), `plugins
+/router-levanto`, and `levanto-routing-server` all typecheck and pass their full test suites with
+this change in place (1018/1018, 453/453, 358+253/611, 61/61, 35/35 respectively -- zero
+regressions); the local-peer-daemon starts cleanly with the new provider registered and no runtime
+errors; and the announce/serialization path (`announcer.ts`'s `_buildSignedMetadata`) reads
+`Provider.pricing`/`serviceApiProtocols` fully generically, with no per-provider special-casing,
+the same way it already does for `FakeModelProvider`.
+
+---
+
 ## [2026-08-26] P2P peer-discovery root cause found: NAT hairpinning on a same-machine devnet, not a DHT bug
 
 Investigated why a buyer on this local devnet can never discover/connect to the local routing-peer

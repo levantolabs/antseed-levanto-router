@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildNetworkServiceOffers } from './service-catalog.js';
+import { buildNetworkServiceOffers, compareNetworkServiceOfferPrice, selectLowestPricedNetworkServiceOffer } from './service-catalog.js';
 
 describe('buildNetworkServiceOffers', () => {
   it('projects provider-specific services, pricing, protocols, and image billing', () => {
@@ -71,5 +71,51 @@ describe('buildNetworkServiceOffers', () => {
       protocol: 'openai-chat-completions',
       type: 'text',
     }]);
+  });
+
+  it('derives type "subscription" for the antseed-subscription protocol and carries a flat price', () => {
+    const offers = buildNetworkServiceOffers([{
+      peerId: 'c'.repeat(40),
+      displayName: 'Routing Peer',
+      providerPricing: {
+        'levanto-routing': {
+          services: { 'antseed-subscription': { inputUsdPerMillion: 0.59 } },
+        },
+      },
+      providerServiceApiProtocols: {
+        'levanto-routing': { services: { 'antseed-subscription': ['antseed-subscription'] } },
+      },
+    }]);
+
+    expect(offers).toHaveLength(1);
+    expect(offers[0]).toMatchObject({
+      serviceId: 'antseed-subscription',
+      protocol: 'antseed-subscription',
+      type: 'subscription',
+      flatUsdPrice: 0.59,
+    });
+  });
+
+  it('never lets a subscription offer sort as "cheapest" against real per-token model offers', () => {
+    const offers = buildNetworkServiceOffers([{
+      peerId: 'd'.repeat(40),
+      providerPricing: {
+        'levanto-routing': {
+          services: { 'antseed-subscription': { inputUsdPerMillion: 0.59 } },
+        },
+        openai: {
+          services: { 'gpt-real-model': { inputUsdPerMillion: 10, outputUsdPerMillion: 30 } },
+        },
+      },
+      providerServiceApiProtocols: {
+        'levanto-routing': { services: { 'antseed-subscription': ['antseed-subscription'] } },
+        openai: { services: { 'gpt-real-model': ['openai-chat-completions'] } },
+      },
+    }]);
+
+    expect(offers).toHaveLength(2);
+    const sorted = [...offers].sort(compareNetworkServiceOfferPrice);
+    expect(sorted[0]?.serviceId).toBe('gpt-real-model');
+    expect(selectLowestPricedNetworkServiceOffer(offers)?.serviceId).toBe('gpt-real-model');
   });
 });

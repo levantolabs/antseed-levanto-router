@@ -219,8 +219,16 @@ export function buildNetworkModels(
     normalizedReputationByPeerId.set(peer.peerId, normalizedModelReputationScore(peer, nowMs))
   }
 
-  const allOffers = buildNetworkServiceOffers(peers)
-  const offersByPeerModel = new Map<string, NetworkServiceOffer[]>()
+  // Not a model at all -- a flat, non-metered subscription fee, advertised
+  // via the same discovery pipe purely for price visibility (model-routing
+  // decisions doc SS13 item 6). Excluded here rather than left to
+  // `canonicalModelKey` implicitly never matching it, so this list's `type`
+  // stays genuinely 'text' | 'image' and a "browse/pick a model" UI never
+  // has to know 'subscription' exists.
+  const isModelOffer = (offer: NetworkServiceOffer): offer is NetworkServiceOffer & { type: NetworkModelType } =>
+    offer.type !== 'subscription'
+  const allOffers = buildNetworkServiceOffers(peers).filter(isModelOffer)
+  const offersByPeerModel = new Map<string, Array<NetworkServiceOffer & { type: NetworkModelType }>>()
   for (const offer of allOffers) {
     const key = canonicalModelKey(offer.serviceId)
     if (!key) continue

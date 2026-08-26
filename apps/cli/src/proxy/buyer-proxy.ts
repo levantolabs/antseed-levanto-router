@@ -7,6 +7,7 @@ import {
   ANTSEED_BUYER_FAULT_ERROR_CODE,
   ANTSEED_FAULT_ATTRIBUTION_HEADER,
   ANTSEED_ATTEST_PATH,
+  buildNetworkServiceOffers,
   computeOnChainReputationScore,
   decodeSweepRequest,
   faultAttributionOf,
@@ -1882,6 +1883,24 @@ export class BuyerProxy {
       const rows = router?.getRoutingDecisions?.() ?? []
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, rows }))
+      return
+    }
+
+    if (path === '/_antseed/subscription-price' && method === 'GET') {
+      // Generic read of any discovered peer's advertised `type: 'subscription'`
+      // offer (model-routing decisions doc SS13 item 6) -- for the Levanto
+      // Auto Preferences toggle to show a real, live daily price instead of
+      // a bare "starts a daily subscription" with no number. `null` (not an
+      // error) whenever no such offer has been discovered yet -- a buyer who
+      // hasn't found a routing peer over the network, or one advertising
+      // nothing, sees the generic copy rather than a broken price.
+      const peers = await this._getPeers()
+      const offer = buildNetworkServiceOffers(peers).find((o) => o.type === 'subscription' && o.flatUsdPrice !== undefined) ?? null
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        ok: true,
+        offer: offer ? { peerId: offer.peerId, flatUsdPrice: offer.flatUsdPrice } : null,
+      }))
       return
     }
 

@@ -7,6 +7,8 @@ import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
 import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
 import { AUTO_SUBSCRIPTION_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
+import { subscriptionPriceResource } from '../../../modules/app/vpr-resources';
+import { useCachedResource } from '../../../modules/app/cached-resource';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
@@ -39,6 +41,13 @@ export function VprPreferencesView({ onSelectView }: Props) {
   // SS14 item 29) -- a standing, explicit toggle, not a proxy for whatever
   // model happens to be selected at this moment.
   const autoSubscriptionEnabled = snap.preferences.autoSubscriptionEnabled ?? false;
+  // Real, live-advertised price when a routing peer has been discovered
+  // (decisions doc SS13 item 6); undefined/null falls back to the generic
+  // copy below rather than showing a broken number.
+  const subscriptionPrice = useCachedResource(subscriptionPriceResource, true).data?.flatUsdPrice;
+  const subscriptionHint = subscriptionPrice !== undefined
+    ? `Turns on Auto model routing across all your chats. This starts a real ${formatUsdShort(subscriptionPrice)}/day USDC subscription charge — you're billed every day it's on, separate from any per-request model cost.`
+    : 'Turns on Auto model routing across all your chats. This starts a real daily USDC subscription charge — you\'re billed every day it\'s on, separate from any per-request model cost.';
 
   const selectTheme = (mode: ThemeMode) => {
     applyThemeMode(mode);
@@ -74,7 +83,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
           <VprSettingRow
             title="Levanto Auto model routing"
             caption="(Daily subscription)"
-            hint="Turns on Auto model routing across all your chats. This starts a real daily USDC subscription charge — you're billed every day it's on, separate from any per-request model cost."
+            hint={subscriptionHint}
             control={(
               <VprToggle
                 checked={autoSubscriptionEnabled}
