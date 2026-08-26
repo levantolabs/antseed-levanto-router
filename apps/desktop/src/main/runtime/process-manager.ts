@@ -75,6 +75,37 @@ function normalizeRouterIdentifier(value: string | undefined): string {
   return raw;
 }
 
+/**
+ * Hardcoded to the Levanto model router for local model-routing-feature demo
+ * purposes (runlog: "local routing-peer daemon", 2026-08-26) -- there is no
+ * settings/config path yet that lets a buyer choose a router, so this is a
+ * deliberate, temporary stand-in for that real choice, not a finished
+ * decision. The routing peer URL/peer id below point at whatever
+ * `local-peer-daemon.ts` instance is running locally and will need to become
+ * real config once one exists.
+ *
+ * Applied here, at the single point every connect-mode `start()` call
+ * ultimately funnels through (`ProcessManager.start` itself), rather than at
+ * each individual caller -- there are at least two independent places that
+ * start the connect runtime (a main-process auto-start on first chat message,
+ * and a renderer-side auto-start on app boot that races ahead of it using its
+ * own, unrelated router preference), and applying the override in only one of
+ * them left the other silently winning the race with the wrong router. A
+ * single choke point means neither caller needs to know this override exists.
+ */
+export function applyLevantoRouterDemoOverride(opts: StartOptions): StartOptions {
+  if (opts.mode !== 'connect') return opts;
+  return {
+    ...opts,
+    router: 'levanto',
+    env: {
+      ...opts.env,
+      LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
+      LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
+    },
+  };
+}
+
 function resolveAlignedNodeFromMarker(): string | null {
   const markerCandidates = [
     resolve(process.cwd(), RUNTIME_NATIVE_MARKER_FILE),
@@ -444,7 +475,8 @@ export class ProcessManager {
     }
   }
 
-  async start(opts: StartOptions): Promise<RuntimeProcessState> {
+  async start(rawOpts: StartOptions): Promise<RuntimeProcessState> {
+    const opts = applyLevantoRouterDemoOverride(rawOpts);
     const mode = opts.mode;
     if (this.processes.has(mode)) {
       throw new Error(`${mode} is already running`);

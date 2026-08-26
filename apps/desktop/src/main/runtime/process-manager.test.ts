@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { ProcessManager, resolveCommandArgs } from './process-manager.js';
+import { ProcessManager, resolveCommandArgs, applyLevantoRouterDemoOverride } from './process-manager.js';
 
 test('resolveCommandArgs launches the grouped buyer runtime command without forcing the default router', () => {
   const args = resolveCommandArgs({
@@ -33,6 +33,32 @@ test('resolveCommandArgs forwards non-default routers', () => {
     '--data-dir', join(homedir(), '.antseed'),
     'buyer', 'start', '--router', 'custom-router',
   ]);
+});
+
+test('applyLevantoRouterDemoOverride forces the Levanto router on connect-mode starts regardless of the caller-requested router', () => {
+  // Regression for the real bug this was written to fix: the renderer's own
+  // boot-time auto-start (app.ts's ensureConnectRuntimeStarted) requests
+  // whatever router the user has configured (defaulting away from
+  // 'levanto'), races ahead of the main process's own attempt to force
+  // 'levanto', and wins -- so the override has to hold regardless of what a
+  // caller asks for, not just when nothing is specified.
+  for (const requestedRouter of [undefined, 'local', 'custom-router']) {
+    const result = applyLevantoRouterDemoOverride({
+      mode: 'connect',
+      router: requestedRouter,
+      env: { EXISTING: '1' },
+    });
+    assert.equal(result.router, 'levanto', `router should be forced to levanto when requested router was ${String(requestedRouter)}`);
+    assert.equal(result.env?.['LEVANTO_ROUTING_PEER_URL'], process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787');
+    assert.equal(result.env?.['LEVANTO_SELLER_PEER_ID'], process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265');
+    assert.equal(result.env?.['EXISTING'], '1', 'existing env entries must be preserved, not dropped');
+  }
+});
+
+test('applyLevantoRouterDemoOverride leaves non-connect modes untouched', () => {
+  const opts = { mode: 'system-proxy' as const, systemProxyPort: 8080 };
+  const result = applyLevantoRouterDemoOverride(opts);
+  assert.deepEqual(result, opts);
 });
 
 test('resolveCommandArgs launches the System Proxy runtime with selected profiles and models', () => {

@@ -19,6 +19,63 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] Root cause and fix for the "buyer daemon not running current code" blocker below: not staleness, a race between two independent auto-starters
+
+The entry directly below this one left the root cause as an unconfirmed "leading theory" (stale
+compiled `dist/main`, not reloaded into the running Electron main process). That theory doesn't
+hold — checked directly, `dist/main/main.js` contained the current, correct `router: 'levanto'`
+source at every point this was tested, including immediately before a fresh, verified-clean
+process restart still failed to produce a `--router levanto` flag on the spawned buyer daemon.
+This entry does not edit that one; it corrects the theory forward instead.
+
+Added a temporary debug trace (`console.error` + stack, in `ProcessManager.start()`) rather than
+keep guessing from source reading alone, and reproduced live against a fully clean process table
+(verified via explicit-PID `kill -9` and a confirmed-free port 8377, not just `pkill` pattern
+matching, which was itself unreliable — `pkill -9 -f electron` repeatedly left Electron's
+zygote/renderer/gpu child processes alive; explicit PIDs from a fresh `ps aux` did not).
+
+**The real root cause: two independent, uncoordinated places start the buyer connect runtime, and
+the wrong one always wins the race at boot.**
+
+- `apps/desktop/src/main/main.ts`'s `ensureBuyerRuntimeStarted` (main process) is the one carrying
+  the deliberate `router: 'levanto'` demo override -- but it's *lazy*, only invoked from
+  `chat/engine.ts`/`chat/streaming-run.ts` when a chat message actually needs the buyer proxy and
+  it isn't already running.
+- `apps/desktop/src/renderer/app.ts`'s `ensureConnectRuntimeStarted` (renderer process) is a
+  pre-existing, general-purpose auto-starter that fires on app boot, well before any chat message,
+  calling the generic `bridge.start({ mode: 'connect', router: normalizeRouterRuntime(uiState.connectRouterValue) })`
+  -- `uiState.connectRouterValue` is the renderer's own, unrelated router preference (there's no UI
+  to set it to `'levanto'`, so it resolves away from it). This one wins every time, because it fires
+  first. Once it marks `connect` as running, `ensureBuyerRuntimeStarted`'s own `if (connectState?.running) return true`
+  short-circuits and its `router: 'levanto'` override is never applied at all -- not stale code,
+  code that's correct but never actually reached in the boot sequence that matters.
+
+Confirmed via the debug trace's stack, which pointed at `ipc/runtime.ts`'s generic `runtime:start`
+IPC handler (the renderer's path), not `main.ts`'s direct call -- and confirmed the fired call
+carried `router=local`.
+
+**Fix:** moved the override to the one place every connect-mode start of either kind actually funnels
+through -- `ProcessManager.start()` itself (`process-manager.ts`), via a new
+`applyLevantoRouterDemoOverride()` applied unconditionally at the top of `start()`. Removed the
+now-redundant duplicate from `main.ts`'s `ensureBuyerRuntimeStarted` (leaving it there risked exactly
+this class of bug recurring -- two copies of the same override drifting apart again). Whichever
+caller reaches `start()` first now gets the same result, so the race no longer matters.
+
+**Proof, not just claim:** fully clean process kill (explicit PIDs, confirmed port 8377 free) →
+fresh `npm run dev` → checked the spawned buyer daemon's real command line via both `ps aux` and
+`/proc/<pid>/cmdline` directly: `... buyer start --router levanto`. Process stayed up and stable
+(not crash-looping) for the following minutes. New regression tests in
+`process-manager.test.ts` (`applyLevantoRouterDemoOverride forces the Levanto router...`,
+`...leaves non-connect modes untouched`) cover the exact scenario that broke -- a caller requesting
+`'local'` (or anything else) for connect mode still gets `'levanto'`. Full `apps/desktop` suite (main
+`node --test`, 6/6 including the 2 new tests; renderer `vitest`, 358/358) reran clean.
+
+This closes the "desktop-spawned buyer daemon isn't reliably running current code" half of the
+two-stacked-blockers picture from the entry below. The DHT/NAT-hairpin issue in the entry after that
+one is untouched by this and still blocks a real end-to-end subscribe-and-route request.
+
+---
+
 ## [2026-08-26] A second, distinct blocker found live: the desktop-spawned buyer daemon isn't reliably running current code
 
 Investigating a real symptom the user hit trying Auto routing live (`model_not_found` on a genuine
