@@ -16,7 +16,7 @@ import {
   ensureOpenRouterPrices,
   getCachedOpenRouterPrices,
 } from '../catalog/openrouter-baseline.js';
-import { withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
+import { isLevantoAutoSelected, withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
 import type {
   DesktopBridge,
   PreparedChatAttachment,
@@ -1416,8 +1416,18 @@ export function initChatModule({
 
     // The selected model may only have been offered by a seller the new rules
     // exclude — leaving it selected would strand every send with no route.
+    // The Auto sentinel is exempt: no real seller ever advertises its
+    // serviceId (by design — selectRoute intercepts it before normal model
+    // matching), so it always has zero entries here. That's its permanent,
+    // correct state, not stranding — without this check, applyPeerAccessRules
+    // silently reset the selection away from Auto back to a real model on
+    // every discovery refresh, moments after a buyer picked it.
     const selected = uiState.vprRouteSelection.model;
-    if (selected && routesForSelectedModel(uiState.vprRoutableRows, selected).length === 0) {
+    if (
+      selected
+      && !isLevantoAutoSelected(selected)
+      && routesForSelectedModel(uiState.vprRoutableRows, selected).length === 0
+    ) {
       const defaultModel = selectDefaultVprModel(uiState.vprModelCatalog, null, freeEntryRouteReputation);
       uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
       saveVprRouteSelection(uiState.vprRouteSelection);

@@ -418,11 +418,19 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       console.log('')
 
       const directPeerAddresses = resolveDirectPeerAddresses(process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON'])
+      // Local-dev isolation escape hatch, same family as ANTSEED_DIRECT_PEER_ADDRESSES_JSON
+      // above -- without this, a buyer bootstrapped through a local-only peer still
+      // transitively discovers the real public AntSeed network (dht1/dht2.antseed.com),
+      // since that peer is itself a full participant of it unless told otherwise. Real
+      // production usage must never set this (it would make the buyer unable to find any
+      // real seller at all), so it's env-gated, not a default.
+      const noOfficialBootstrap = process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] === '1'
 
       const node = new AntseedNode({
         role: 'buyer',
         bootstrapNodes,
         allowPrivateIPs: true,
+        ...(noOfficialBootstrap ? { noOfficialBootstrap: true } : {}),
         dataDir: globalOpts.dataDir,
         configPath: globalOpts.config,
         metadataFetchTimeoutMs: effectiveBuyerConfig.metadataFetchTimeoutMs,

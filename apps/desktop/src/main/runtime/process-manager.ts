@@ -102,6 +102,16 @@ export function applyLevantoRouterDemoOverride(opts: StartOptions): StartOptions
       ...opts.env,
       LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
       LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
+      // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
+      // override"), not a production NAT solution -- see resolveDirectPeerAddresses
+      // in apps/cli's buyer start command for what actually consumes this.
+      ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
+        ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892"}',
+      // Isolates this demo buyer from the real public AntSeed network -- without
+      // it, bootstrapping through the local-only routing peer still transitively
+      // discovers real public sellers, since that peer is itself connected to
+      // dht1/dht2.antseed.com. Local-dev only, same reasoning as the two vars above.
+      ANTSEED_NO_OFFICIAL_BOOTSTRAP: process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1',
     },
   };
 }
