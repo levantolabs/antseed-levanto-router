@@ -184,6 +184,16 @@ export interface NodePaymentsConfig {
   minBudgetPerRequest?: string;
   /** Minimum unsettled delta (base units) required before idle settle submits a tx. Default: "2000" (~$0.002). */
   minSettleDelta?: string;
+  /**
+   * Seller-side: settle and close a channel the instant its buyer's live
+   * connection drops. Default: true — correct for ordinary per-session
+   * inference, where a dropped connection means the conversation is over.
+   * Wrong for a subscription-priced channel meant to persist across many
+   * short connect/disconnect cycles between infrequent requests — set false
+   * there, or a signed subscription gets torn down the moment the buyer's
+   * connection goes idle, before the next real request ever arrives.
+   */
+  settleOnDisconnect?: boolean;
   /** Optional seller-side slack for estimate-only reserve preflight checks. Unset disables estimate-only rejection. */
   reserveEstimateOverdraftUsdc?: string;
   /** Maximum USDC the buyer authorizes per single request (base units). Default: "500000" ($0.50). */
@@ -2191,6 +2201,7 @@ export class AntseedNode extends EventEmitter {
         dataDir: paymentsDir,
         ...(payments.minBudgetPerRequest ? { minBudgetPerRequest: payments.minBudgetPerRequest } : {}),
         ...(payments.minSettleDelta ? { minSettleDelta: payments.minSettleDelta } : {}),
+        ...(payments.settleOnDisconnect !== undefined ? { settleOnDisconnect: payments.settleOnDisconnect } : {}),
       };
       this._sellerPaymentManager = new SellerPaymentManager(this._identity, sellerConfig, this._channelStore);
       debugLog(`[Node] SellerPaymentManager initialized`);

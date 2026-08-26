@@ -1284,8 +1284,15 @@ export class SellerPaymentManager {
           && this._hydratedChannelIds.has(channel.sessionId)
           && nowSecs > channel.deadline;
 
-        // If we have auths and the buyer is disconnected, try to close
-        if (accepted > 0n && buyerDisconnected) {
+        // If we have auths and the buyer is disconnected, try to close --
+        // gated by the same settleOnDisconnect flag onBuyerDisconnect()
+        // respects (default true). A subscription-style channel (config'd
+        // false) must survive its buyer's connection going idle between
+        // infrequent requests; without this gate, this periodic sweep
+        // closed it anyway even when the immediate disconnect handler
+        // correctly preserved it -- found live: a real signed subscription
+        // got torn down by this exact path seconds after being established.
+        if (accepted > 0n && buyerDisconnected && (this._config.settleOnDisconnect ?? true)) {
           debugLog(`[SellerPayment] Channel ${channel.sessionId.slice(0, 18)}... buyer disconnected — attempting close`);
           await this.settleSession(channel.peerId);
           continue;
