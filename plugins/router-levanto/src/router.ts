@@ -33,6 +33,16 @@ export interface LevantoRouterConfig {
    * comfortably under typical chat-completion client timeouts.
    */
   routeTimeoutMs?: number;
+  /**
+   * Buyer data directory for persisting the routing_decisions ledger
+   * (decisions doc SS13 item 12) -- mirrors the `join(dataDir, 'payments')`/
+   * `join(dataDir, 'conversations.json')` convention `ChannelStore`/
+   * `ConversationStore` already use (apps/cli/src/cli/commands/metrics.ts,
+   * apps/cli/src/proxy/conversation-store.ts). Omitted -- the ledger stays
+   * in-memory only, same as before this pass; not a regression, just no
+   * durability without a directory to write to.
+   */
+  dataDir?: string;
 }
 
 const DEFAULT_ROUTE_TIMEOUT_MS = 3000;
@@ -74,6 +84,47 @@ interface RouteResponseBody {
   receipt: { routerId: string; artifactVersion: string; lambdaVersion: string };
 }
 
+/**
+ * Curated baseline/dropdown model list (decisions doc SS8.4, SS13 item 10,
+ * resolved). Names TBD from the real model hull (SS7) per the user's own
+ * note -- these are placeholders, not a final curated list. Picked from this
+ * codebase's own existing catalog code, not invented fresh: `recommended.ts`
+ * (apps/desktop/src/renderer/modules/catalog/recommended.ts) already treats
+ * `claude-opus-5` and `gpt-5.6-sol` as distinct, notable flagship-tier
+ * variants with their own slot, matching SS8.4's "the most expensive, most
+ * capable flagship -- the top GPT or Claude model."
+ */
+export const DEFAULT_BASELINE_MODELS: readonly string[] = ['claude-opus-5', 'gpt-5.6-sol'];
+
+type BaselinePrices = Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
+
+/**
+ * One entry per curated baseline model actually present in this decision's
+ * ranked response, collapsed across peers to the best available offer
+ * (decisions doc SS2.5) -- "best" here means lowest inUsdPerM, the simplest
+ * defensible single-axis choice absent a fixed token mix to combine input
+ * and output into one true total cost. Absent entirely for a baseline model
+ * that wasn't offered at all in this ranking.
+ */
+function computeBaselinePrices(ranked: RouteResponseBody['ranked']): BaselinePrices {
+  const out: BaselinePrices = {};
+  for (const model of DEFAULT_BASELINE_MODELS) {
+    let best: RouteResponseBody['ranked'][number] | null = null;
+    for (const entry of ranked) {
+      if (entry.model !== model) continue;
+      if (!best || entry.price.inUsdPerM < best.price.inUsdPerM) best = entry;
+    }
+    if (best) {
+      out[model] = {
+        inUsdPerM: best.price.inUsdPerM,
+        outUsdPerM: best.price.outUsdPerM,
+        cachedInUsdPerM: best.price.cachedInUsdPerM > 0 ? best.price.cachedInUsdPerM : null,
+      };
+    }
+  }
+  return out;
+}
+
 /** Head+tail trim, matching the "trimmed last user turn" shape sagePrompt expects. */
 const SAGE_PROMPT_HEAD_TAIL_CHARS = 4096;
 
@@ -111,17 +162,52 @@ function conversationKey(conversation: ConversationIdentity): string {
   return `${conversation.tool}:${conversation.sessionKey}`;
 }
 
+/**
+ * Thrown by `selectRoute` when it can't produce a real routing decision for
+ * an Auto request -- decisions doc SS13 item 16. Returning `null` here (the
+ * old behavior) falls through to the existing fixed-model peer-selection
+ * pipeline, which can't resolve `"levanto-auto"` as a real model and fails a
+ * moment later with a confusing, generic "no candidates for this model"
+ * error instead of a clear one. `null` is still returned, unmodified, for
+ * the one case where declining is actually correct: the request's model
+ * isn't the Auto sentinel at all (the very first check in `selectRoute`).
+ *
+ * Covers both `kind`s the software-architecture doc's own SS2.2 note already
+ * describes as "meant to reject cleanly" rather than fall through -- the
+ * implementation just hadn't matched that yet for either: `'unreachable'`
+ * (the routing peer couldn't be reached, or didn't respond within
+ * `routeTimeoutMs`) and `'rejected'` (the routing peer responded but
+ * declined the request, e.g. 402 "not subscribed today").
+ */
+export class RoutingPeerError extends Error {
+  constructor(
+    public readonly kind: 'unreachable' | 'rejected',
+    message: string,
+    public readonly statusCode?: number,
+  ) {
+    super(message);
+    this.name = 'RoutingPeerError';
+  }
+}
+
 export class LevantoRouter {
   private readonly conversations = new ConversationState();
-  private readonly ledger = new RoutingLedger();
+  private readonly ledger: RoutingLedger;
   private lastSignedDayKey: string | null = null;
   private lastDigestSentDayKey: string | null = null;
 
-  constructor(private readonly config: LevantoRouterConfig) {}
+  constructor(private readonly config: LevantoRouterConfig) {
+    this.ledger = new RoutingLedger(config.dataDir);
+  }
 
   /** routing_decisions ledger (software-architecture doc SS2.5) -- for the savings dashboard (task #10). */
   getLedgerRows(): readonly RoutingDecisionRow[] {
     return this.ledger.all();
+  }
+
+  /** Waits for any pending ledger persistence writes (decisions doc SS13 item 12) -- tests / graceful shutdown. */
+  flushLedger(): Promise<void> {
+    return this.ledger.flush();
   }
 
   /**
@@ -134,6 +220,33 @@ export class LevantoRouter {
    */
   getRoutingDecisions(): RoutingDecisionRow[] {
     return [...this.ledger.all()];
+  }
+
+  /**
+   * `Router.configureDailySigning` (packages/node/src/interfaces/buyer-router.ts,
+   * decisions doc SS13 item 11) -- the generic hook the host calls once,
+   * after loading, to hand this router a real signing closure. Mutates
+   * `config.signDailyIfNeeded` in place rather than requiring it at
+   * construction time, since the host builds the closure from a real,
+   * *started* `AntseedNode` (it needs `node.buyerPaymentManager`, which
+   * only exists once payments are configured) -- constructing the router
+   * itself happens earlier, before the node has started.
+   */
+  configureDailySigning(signDailyIfNeeded: (sellerPeerId: string) => Promise<void>): void {
+    this.config.signDailyIfNeeded = signDailyIfNeeded;
+  }
+
+  /**
+   * `Router.triggerDailySigningCheck` (packages/node/src/interfaces/buyer-router.ts,
+   * decisions doc SS13 item 9) -- lets a host-side background timer keep
+   * billing continuous even on a day the buyer never sends a routable chat
+   * message, by calling the exact same gated logic selectRoute() calls
+   * internally. ensureSignedToday's own bookkeeping (at most one real call
+   * per calendar day) is shared, not duplicated -- a background tick on a
+   * day already signed by a real chat request is a no-op, and vice versa.
+   */
+  async triggerDailySigningCheck(): Promise<void> {
+    await this.ensureSignedToday();
   }
 
   /**
@@ -177,7 +290,10 @@ export class LevantoRouter {
     const digest = buildDigest(this.ledger.all(), periodKey(yesterday));
     const doFetch = this.config.fetchImpl ?? fetch;
     try {
-      const res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
+      // Explicit suffix path (decisions doc SS13 item 20, resolved) -- states
+      // intent via the URL rather than relying on the routing peer to
+      // body-sniff for an absent sagePrompt field.
+      const res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route/digest`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(digest),
@@ -216,9 +332,17 @@ export class LevantoRouter {
     cachedInputTokens?: number;
     outputTokens?: number;
     estimatedCostUsd?: number | null;
+    requestId?: string;
   }): void {
     if (!result.success) return; // a failed/retried dispatch isn't a resolved decision
-    this.ledger.recordResult(peer.peerId, {
+    // Correlates by requestId, not peer (decisions doc SS13 item 13, resolved)
+    // -- two different conversations concurrently routed to the same peer no
+    // longer risk mis-pairing predicted vs. actual. Without a requestId (an
+    // older or non-conforming caller), there's genuinely nothing to
+    // correlate against -- the result is silently dropped from the ledger
+    // rather than guessed at.
+    if (!result.requestId) return;
+    this.ledger.recordResult(result.requestId, peer.peerId, {
       promptTokens: (result.freshInputTokens ?? 0) + (result.cachedInputTokens ?? 0),
       cachedTokens: result.cachedInputTokens ?? 0,
       completionTokens: result.outputTokens ?? 0,
@@ -231,6 +355,7 @@ export class LevantoRouter {
     peers: PeerInfo[],
     conversation: ConversationIdentity | null,
     routingPreferences: ModelRoutingPreferences | null,
+    defaultRoutedModel?: string | null,
   ): Promise<RouteCandidate[] | null> {
     const { model, lastUserText } = parseChatBody(req);
     // levanto-auto sentinel check is host-agnostic: any concrete model name
@@ -247,6 +372,25 @@ export class LevantoRouter {
     if (convKey && !this.conversations.isNewUserMessage(convKey, lastUserText)) {
       const pinned = this.conversations.getPinned(convKey);
       if (pinned) {
+        // A reused dispatch still costs real money and still resolves via
+        // the normal onResult flow -- decisions doc SS13 item 14: give it
+        // its own ledger row too, associated with THIS request's own
+        // requestId, reusing the pinned decision's predicted fields rather
+        // than requiring a fresh prediction it has no network call to
+        // derive one from. routingLatencyMs is null, matching
+        // RoutingDecisionRow's own field doc ("null when the gate skipped
+        // the call entirely").
+        this.ledger.recordPending(req.requestId, {
+          model: pinned.serviceId,
+          predictedCostUsd: pinned.predictedCostUsd,
+          predictedInputTokens: pinned.predictedInputTokens,
+          predictedCachedInputTokens: pinned.predictedCachedInputTokens,
+          predictedOutputTokens: pinned.predictedOutputTokens,
+          cqt: pinned.cqt,
+          routingLatencyMs: null,
+          atMs: Date.now(),
+          baselinePrices: pinned.baselinePrices,
+        });
         return [pinnedToRouteCandidate(pinned, substituteModel(req, pinned.serviceId))];
       }
     }
@@ -300,28 +444,39 @@ export class LevantoRouter {
         body: JSON.stringify(body),
         signal: timeoutController.signal,
       });
-    } catch {
-      // Routing peer unreachable OR unresponsive (the AbortController above
-      // fires the same way for both) -- decisions doc/software-arch doc
-      // leave the client-side mechanism unspecified for this case (flagged
-      // as an unformalized gap earlier in this project); the chosen
-      // behavior: decline rather than hang or error the chat request, same
-      // as a clean 402 -- the existing pipeline falls through to a real
-      // model rather than surfacing a routing-specific failure to the user.
-      return null;
+    } catch (err) {
+      // Routing peer unreachable OR unresponsive -- the AbortController
+      // above fires the same way for both, so both land here. Throws rather
+      // than returning null (decisions doc SS13 item 16): null would fall
+      // through to the fixed-model pipeline, which can't handle the Auto
+      // sentinel and fails a moment later with a confusing error instead of
+      // a clear one.
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new RoutingPeerError('unreachable', `Levanto routing peer at ${this.config.routingPeerUrl} is unreachable or timed out: ${reason}`);
     } finally {
       clearTimeout(timeoutHandle);
     }
     const routingLatencyMs = Date.now() - routingCallStartedAt;
-    if (!res.ok) return null; // includes the 402 "not subscribed" case
+    if (!res.ok) {
+      // Includes the 402 "not subscribed today" case. Same reasoning as the
+      // unreachable branch above -- throws instead of falling through to a
+      // pipeline that can't handle the Auto sentinel.
+      let message = `Levanto routing peer rejected the request (status ${res.status}).`;
+      try {
+        const errBody = (await res.json()) as { error?: { message?: string } };
+        if (errBody?.error?.message) message = errBody.error.message;
+      } catch {
+        // Non-JSON or empty error body -- keep the generic message.
+      }
+      throw new RoutingPeerError('rejected', message, res.status);
+    }
 
     const parsed = (await res.json()) as RouteResponseBody;
     const peerById = new Map(peers.map((p) => [p.peerId, p] as const));
-
-    // For SS2.5's ledger: predicted fields per (peer, model), read back once
-    // the winner is known below -- absent for a candidate synthesized by the
-    // allowedPeerIds fallback (no real Sage prediction for it).
-    const predictedByPeer = new Map(parsed.ranked.map((entry) => [entry.peer, entry] as const));
+    // One snapshot per response, not per candidate -- decisions doc SS13
+    // item 10, resolved. Duplicated onto every PinnedDecision below the same
+    // way cqt already is, since it's a request-level value.
+    const baselinePrices = computeBaselinePrices(parsed.ranked);
 
     let ranked: PinnedDecision[] = [];
     for (const entry of parsed.ranked) {
@@ -336,6 +491,15 @@ export class LevantoRouter {
         inputUsdPerMillion: entry.price.inUsdPerM,
         outputUsdPerMillion: entry.price.outUsdPerM,
         minImageUsdPerImage: null,
+        // For SS2.5's ledger, and reused as-is by a later pinned/reused
+        // dispatch (SS13 item 14) -- carried on the candidate itself now
+        // rather than looked up separately once the winner is known.
+        predictedCostUsd: entry.predictedCostUsd,
+        predictedInputTokens: entry.predictedInputTokens,
+        predictedCachedInputTokens: entry.predictedCachedInputTokens,
+        predictedOutputTokens: entry.predictedOutputTokens,
+        cqt,
+        baselinePrices,
       });
     }
 
@@ -343,25 +507,45 @@ export class LevantoRouter {
     // peer narrows by (decisions doc SS4.4) -- walk the ranked list as usual,
     // skip anything outside the allowlist. If that empties the list, fall
     // back to the allowed peers directly rather than giving up.
+    //
+    // The fallback needs a model to pair with those peers -- decisions doc
+    // SS13 item 8: use whatever the pre-existing "antseed" alias currently
+    // resolves to (defaultRoutedModel, host-owned buyer.state.json state
+    // passed in by buyer-proxy.ts), not parsed.baselineSuggestion. Sage's
+    // baselineSuggestion is its own ranked opinion of a cheap/simple model --
+    // it has no reason to be one this buyer has actually allowlisted a
+    // peer for, whereas defaultRoutedModel is the buyer's own already-chosen
+    // fallback target. No price data comes with defaultRoutedModel (unlike
+    // baselineSuggestion's price block), so the synthesized candidates carry
+    // null pricing -- honest "unknown," not a fabricated number.
     const allowedPeerIds = routingPreferences?.allowedPeerIds;
     if (allowedPeerIds && allowedPeerIds.length > 0) {
       const allowedSet = new Set(allowedPeerIds.map((p) => p.toLowerCase()));
       const filtered = ranked.filter((c) => allowedSet.has(c.peerId.toLowerCase()));
       if (filtered.length > 0) {
         ranked = filtered;
-      } else if (parsed.baselineSuggestion) {
-        const fallbackModel = parsed.baselineSuggestion.model;
+      } else if (defaultRoutedModel) {
         ranked = peers
           .filter((peer) => allowedSet.has(peer.peerId.toLowerCase()))
           .map((peer) => ({
             peer,
             peerId: peer.peerId,
-            serviceId: fallbackModel,
+            serviceId: defaultRoutedModel,
             reputation: 0,
             hasCachedInputPricing: false,
-            inputUsdPerMillion: parsed.baselineSuggestion!.price.inUsdPerM,
-            outputUsdPerMillion: parsed.baselineSuggestion!.price.outUsdPerM,
+            inputUsdPerMillion: null,
+            outputUsdPerMillion: null,
             minImageUsdPerImage: null,
+            // No real Sage prediction for a synthesized fallback candidate --
+            // honest "unknown," same reasoning as the null price fields above.
+            predictedCostUsd: null,
+            predictedInputTokens: null,
+            predictedCachedInputTokens: null,
+            predictedOutputTokens: null,
+            cqt,
+            // Still real: baselinePrices comes from the actual ranked
+            // response, independent of which candidate the walk ends up on.
+            baselinePrices,
           }));
       } else {
         ranked = [];
@@ -375,16 +559,16 @@ export class LevantoRouter {
       this.conversations.recordDecision(convKey, lastUserText, winner);
     }
 
-    const predicted = predictedByPeer.get(winner.peerId);
-    this.ledger.recordPending(winner.peerId, {
+    this.ledger.recordPending(req.requestId, {
       model: winner.serviceId,
-      predictedCostUsd: predicted?.predictedCostUsd ?? null,
-      predictedInputTokens: predicted?.predictedInputTokens ?? null,
-      predictedCachedInputTokens: predicted?.predictedCachedInputTokens ?? null,
-      predictedOutputTokens: predicted?.predictedOutputTokens ?? null,
-      cqt,
+      predictedCostUsd: winner.predictedCostUsd,
+      predictedInputTokens: winner.predictedInputTokens,
+      predictedCachedInputTokens: winner.predictedCachedInputTokens,
+      predictedOutputTokens: winner.predictedOutputTokens,
+      cqt: winner.cqt,
       routingLatencyMs,
       atMs: Date.now(),
+      baselinePrices: winner.baselinePrices,
     });
 
     return ranked.map((c) => pinnedToRouteCandidate(c, substituteModel(req, c.serviceId)));

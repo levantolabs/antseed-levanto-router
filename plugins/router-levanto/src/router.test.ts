@@ -92,21 +92,40 @@ describe('LevantoRouter.selectRoute', () => {
     expect(result).toBeNull();
   });
 
-  it('declines (does not throw) when the routing peer is unreachable', async () => {
+  it('throws RoutingPeerError("unreachable") instead of silently declining when the routing peer is unreachable (decisions doc SS13 item 16)', async () => {
     const fetchImpl = vi.fn().mockRejectedValue(new Error('ECONNREFUSED'));
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
-    expect(result).toBeNull();
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({
+      name: 'RoutingPeerError',
+      kind: 'unreachable',
+    });
   });
 
-  it('declines when the routing peer returns a non-OK status (e.g. 402 not subscribed)', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 402 });
+  it('throws RoutingPeerError("rejected") when the routing peer returns a non-OK status (e.g. 402 not subscribed)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 402,
+      json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }),
+    });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
-    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
-    expect(result).toBeNull();
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({
+      name: 'RoutingPeerError',
+      kind: 'rejected',
+      statusCode: 402,
+      message: 'Not subscribed, or today\'s signature is not yet on file.',
+    });
   });
 
-  it('aborts and declines (does not hang) if the routing peer never responds within routeTimeoutMs', async () => {
+  it('falls back to a generic message when a non-OK response has no JSON error body', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => { throw new Error('not json'); } });
+    const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({
+      kind: 'rejected',
+      statusCode: 500,
+    });
+  });
+
+  it('aborts and throws RoutingPeerError("unreachable") if the routing peer never responds within routeTimeoutMs', async () => {
     const fetchImpl = vi.fn().mockImplementation((_url: string, init: { signal?: AbortSignal }) => {
       return new Promise((_resolve, reject) => {
         init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -117,8 +136,7 @@ describe('LevantoRouter.selectRoute', () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
       routeTimeoutMs: 20,
     });
-    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
-    expect(result).toBeNull();
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ kind: 'unreachable' });
     expect(fetchImpl).toHaveBeenCalledWith('http://x/_antseed/route', expect.objectContaining({ signal: expect.any(Object) }));
   });
 
@@ -233,6 +251,68 @@ describe('LevantoRouter.selectRoute', () => {
     });
   });
 
+  describe('configureDailySigning / triggerDailySigningCheck (decisions doc SS13 items 9 and 11)', () => {
+    it('configureDailySigning wires a callback that was never provided at construction', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+      expect(signDailyIfNeeded).not.toHaveBeenCalled(); // not wired yet
+
+      router.configureDailySigning(signDailyIfNeeded);
+      await router.selectRoute(req('levanto-auto', 'a new message'), [peer('0xAAA')], null, null);
+      expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
+    });
+
+    it('triggerDailySigningCheck signs today independent of any chat request (decisions doc SS13 item 9)', async () => {
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+
+      await router.triggerDailySigningCheck();
+
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+      expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
+    });
+
+    it('shares the once-per-day gate with selectRoute -- a background trigger after a real chat already signed today is a no-op', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null); // real chat signs today
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+
+      await router.triggerDailySigningCheck(); // background tick, same day
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1); // still just once
+    });
+
+    it('and the reverse: a real chat after a background trigger already signed today does not sign again', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await router.triggerDailySigningCheck(); // background tick signs first
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null); // real chat, same day
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1); // still just once
+    });
+
+    it('triggerDailySigningCheck does nothing when signDailyIfNeeded is not configured', async () => {
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x' });
+      await expect(router.triggerDailySigningCheck()).resolves.toBeUndefined();
+    });
+  });
+
   describe('daily digest (decisions doc SS2.7/SS6.9)', () => {
     function digestAwareFetch(routeHandler: () => unknown) {
       return vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
@@ -255,6 +335,18 @@ describe('LevantoRouter.selectRoute', () => {
 
       await router.selectRoute(req('levanto-auto', 'second'), [peer('0xAAA')], conversation('b'), null);
       expect(fetchImpl).toHaveBeenCalledTimes(3); // no repeat digest send same day
+    });
+
+    it('sends the digest to the explicit /_antseed/route/digest suffix path, not the routing path (decisions doc SS13 item 20)', async () => {
+      const fetchImpl = digestAwareFetch(rankedResponse);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], conversation('a'), null);
+
+      const calledUrls = fetchImpl.mock.calls.map((call: unknown[]) => call[0]);
+      expect(calledUrls).toContain('http://x/_antseed/route'); // the routing call
+      expect(calledUrls).toContain('http://x/_antseed/route/digest'); // the digest, at its own path
     });
 
     it('does not send a digest when there is no sellerPeerId to send it to', async () => {
@@ -316,6 +408,7 @@ describe('LevantoRouter.selectRoute', () => {
       router.onResult(peer('0xAAA'), {
         success: true, latencyMs: 250, tokens: 140,
         freshInputTokens: 90, cachedInputTokens: 18, outputTokens: 42, estimatedCostUsd: 0.0011,
+        requestId: 'r1', // matches req()'s fixed requestId
       });
 
       const rows = router.getLedgerRows();
@@ -336,6 +429,37 @@ describe('LevantoRouter.selectRoute', () => {
       expect(rows[0]?.routingLatencyMs).toBeGreaterThanOrEqual(0);
     });
 
+    it('populates baselinePrices from the curated model list, collapsed across peers to the cheapest input price (decisions doc SS13 item 10)', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => rankedResponse({
+          ranked: [
+            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.0012,
+              predictedInputTokens: 100, predictedCachedInputTokens: 20, predictedOutputTokens: 45,
+              price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
+            // Two sellers of a curated baseline model -- the cheaper one (0xCCC) should win.
+            { model: 'claude-opus-5', peer: '0xBBB', score: 0.5, predictedQuality: 0.95, predictedCostUsd: 0.02,
+              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 45,
+              price: { inUsdPerM: 16, outUsdPerM: 80, cachedInUsdPerM: 1.6 } },
+            { model: 'claude-opus-5', peer: '0xCCC', score: 0.4, predictedQuality: 0.95, predictedCostUsd: 0.018,
+              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 45,
+              price: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 0 } },
+            // gpt-5.6-sol (the other curated model) is NOT offered at all this call.
+          ],
+        }),
+      });
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA'), peer('0xBBB'), peer('0xCCC')], null, null);
+      router.onResult(peer('0xAAA'), { success: true, latencyMs: 10, tokens: 10, requestId: 'r1' });
+
+      const row = router.getLedgerRows()[0];
+      expect(row?.baselinePrices).toEqual({
+        'claude-opus-5': { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: null }, // 0xCCC wins (cheaper), 0 -> null
+      });
+      expect(row?.baselinePrices['gpt-5.6-sol']).toBeUndefined(); // never offered -- absent, not fabricated
+    });
+
     it('does not write a row for a failed dispatch', async () => {
       const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -344,10 +468,100 @@ describe('LevantoRouter.selectRoute', () => {
       expect(router.getLedgerRows()).toHaveLength(0);
     });
 
-    it('does not write a row for an onResult with no matching pending decision', () => {
+    it('does not write a row for an onResult carrying no requestId at all (nothing to correlate against)', () => {
       const router = new LevantoRouter({ routingPeerUrl: 'http://x' });
       router.onResult(peer('0xUNRELATED'), { success: true, latencyMs: 10, tokens: 5 });
       expect(router.getLedgerRows()).toHaveLength(0);
+    });
+
+    it('does not write a row for an onResult whose requestId matches no pending decision', () => {
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x' });
+      router.onResult(peer('0xAAA'), { success: true, latencyMs: 10, tokens: 5, requestId: 'never-routed' });
+      expect(router.getLedgerRows()).toHaveLength(0);
+    });
+
+    it('correctly pairs two concurrent requests to the same peer by requestId, not peer alone (decisions doc SS13 item 13)', async () => {
+      const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => ({
+        ok: true,
+        json: async () => rankedResponse({
+          ranked: [
+            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9,
+              predictedCostUsd: JSON.parse(init.body).sagePrompt === 'first' ? 0.001 : 0.002,
+              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+              price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
+          ],
+        }),
+      }));
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+
+      // Two different conversations, both routed to peer 0xAAA, before either resolves.
+      const reqA: SerializedHttpRequest = { ...req('levanto-auto', 'first'), requestId: 'req-A' };
+      const reqB: SerializedHttpRequest = { ...req('levanto-auto', 'second'), requestId: 'req-B' };
+      await router.selectRoute(reqA, [peer('0xAAA')], conversation('conv-a'), null);
+      await router.selectRoute(reqB, [peer('0xAAA')], conversation('conv-b'), null);
+
+      // Resolve out of order: B's real outcome arrives before A's.
+      router.onResult(peer('0xAAA'), { success: true, latencyMs: 50, tokens: 10, estimatedCostUsd: 0.0025, requestId: 'req-B' });
+      router.onResult(peer('0xAAA'), { success: true, latencyMs: 40, tokens: 10, estimatedCostUsd: 0.0015, requestId: 'req-A' });
+
+      const rows = router.getLedgerRows();
+      expect(rows).toHaveLength(2);
+      const rowA = rows.find((r) => r.actualUsdcPaid === 0.0015);
+      const rowB = rows.find((r) => r.actualUsdcPaid === 0.0025);
+      // Each result must be paired with ITS OWN request's predicted cost, not the other's.
+      expect(rowA?.predictedCostUsd).toBe(0.001);
+      expect(rowB?.predictedCostUsd).toBe(0.002);
+    });
+
+    it('writes its own row for a pinned tool-loop continuation, reusing the real decision it was pinned to (decisions doc SS13 item 14)', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => rankedResponse({
+          ranked: [
+            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.0012,
+              predictedInputTokens: 100, predictedCachedInputTokens: 20, predictedOutputTokens: 45,
+              price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
+          ],
+        }),
+      });
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+      const conv = conversation('sess-1');
+
+      // Real decision: a genuine new user message, network call fires.
+      const realReq: SerializedHttpRequest = { ...req('levanto-auto', 'hello'), requestId: 'req-real' };
+      await router.selectRoute(realReq, [peer('0xAAA')], conv, null);
+      router.onResult(peer('0xAAA'), {
+        success: true, latencyMs: 250, tokens: 140,
+        freshInputTokens: 90, cachedInputTokens: 18, outputTokens: 42, estimatedCostUsd: 0.0011,
+        requestId: 'req-real',
+      });
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+      // Tool-loop continuation: same last user message, no new network call,
+      // but a real dispatch with its own requestId and its own eventual outcome.
+      const pinnedReq: SerializedHttpRequest = { ...req('levanto-auto', 'hello'), requestId: 'req-pinned' };
+      const candidates = await router.selectRoute(pinnedReq, [peer('0xAAA')], conv, null);
+      expect(fetchImpl).toHaveBeenCalledTimes(1); // still no new network call
+      expect(candidates).toHaveLength(1);
+
+      router.onResult(peer('0xAAA'), {
+        success: true, latencyMs: 5, tokens: 30,
+        freshInputTokens: 0, cachedInputTokens: 20, outputTokens: 10, estimatedCostUsd: 0.0003,
+        requestId: 'req-pinned',
+      });
+
+      const rows = router.getLedgerRows();
+      expect(rows).toHaveLength(2);
+      const pinnedRow = rows.find((r) => r.actualUsdcPaid === 0.0003);
+      expect(pinnedRow).toBeDefined();
+      // Reuses the real decision's predicted fields (same model/cost/cqt prediction)...
+      expect(pinnedRow?.actualModel).toBe('gpt-5.6-luna');
+      expect(pinnedRow?.predictedCostUsd).toBe(0.0012);
+      expect(pinnedRow?.predictedInputTokens).toBe(100);
+      expect(pinnedRow?.cqt).toBe(5);
+      // ...but records its OWN actual outcome, and null latency (gate skipped the call).
+      expect(pinnedRow?.actualUsdcPaid).toBe(0.0003);
+      expect(pinnedRow?.routingLatencyMs).toBeNull();
     });
   });
 
@@ -375,7 +589,34 @@ describe('LevantoRouter.selectRoute', () => {
       expect(result?.[0]?.peerId).toBe('0xBBB');
     });
 
-    it('falls back to the allowed peers directly when the walk exhausts the ranked list', async () => {
+    it('falls back to the allowed peers directly, paired with defaultRoutedModel, when the walk exhausts the ranked list', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => rankedResponse({
+          ranked: [
+            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
+              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+              price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
+          ],
+          // Sage's own baselineSuggestion is deliberately NOT what the fallback
+          // should use (decisions doc SS13 item 8) -- if the fallback still
+          // read it, this test's serviceId assertion below would fail.
+          baselineSuggestion: { model: 'gpt-5.6-sol', peer: '0xCCC', price: { inUsdPerM: 1.1, outUsdPerM: 8.9 } },
+        }),
+      });
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+      // 0xCCC is allowed but never appeared in the ranked list.
+      const peers = [peer('0xAAA'), peer('0xCCC')];
+
+      const result = await router.selectRoute(req('levanto-auto'), peers, null, { allowedPeerIds: ['0xCCC'] }, 'gpt-4o');
+
+      expect(result).toHaveLength(1);
+      expect(result?.[0]?.peerId).toBe('0xCCC');
+      expect(result?.[0]?.serviceId).toBe('gpt-4o'); // defaultRoutedModel, not baselineSuggestion's model
+      expect(result?.[0]?.inputUsdPerMillion).toBeNull(); // no real price data for this synthesized pair
+    });
+
+    it('gives up (null) when the walk exhausts the ranked list and no defaultRoutedModel is set', async () => {
       const fetchImpl = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => rankedResponse({
@@ -388,14 +629,12 @@ describe('LevantoRouter.selectRoute', () => {
         }),
       });
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
-      // 0xCCC is allowed but never appeared in the ranked list.
       const peers = [peer('0xAAA'), peer('0xCCC')];
 
+      // No 5th arg -- no default route configured for this buyer.
       const result = await router.selectRoute(req('levanto-auto'), peers, null, { allowedPeerIds: ['0xCCC'] });
 
-      expect(result).toHaveLength(1);
-      expect(result?.[0]?.peerId).toBe('0xCCC');
-      expect(result?.[0]?.serviceId).toBe('gpt-5.6-sol'); // baselineSuggestion's model
+      expect(result).toBeNull();
     });
   });
 });

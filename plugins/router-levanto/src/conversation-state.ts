@@ -15,6 +15,22 @@ export interface PinnedDecision {
   inputUsdPerMillion: number | null;
   outputUsdPerMillion: number | null;
   minImageUsdPerImage: number | null;
+  /**
+   * Carried over from the real decision that produced this candidate (null
+   * for a synthesized allowedPeerIds fallback with no real Sage prediction)
+   * -- decisions doc SS13 item 14: a later pinned/reused tool-loop
+   * continuation reuses these exact fields to write its own ledger row,
+   * rather than requiring a full independent prediction it has no network
+   * call to derive one from.
+   */
+  predictedCostUsd: number | null;
+  predictedInputTokens: number | null;
+  predictedCachedInputTokens: number | null;
+  predictedOutputTokens: number | null;
+  /** The CQT dial value in effect when this decision was made -- always known, even for a fallback. */
+  cqt: number;
+  /** decisions doc SS13 item 10 -- same value across every candidate from one response, reused as-is by a later pinned dispatch (SS13 item 14). */
+  baselinePrices: Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
 }
 
 interface CacheObservation {
