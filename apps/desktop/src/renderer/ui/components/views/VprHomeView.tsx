@@ -159,8 +159,8 @@ export function VprHomeView({ onSelectView }: Props) {
   // (not zero) for a buyer who has never used Levanto Auto.
   const routingDecisions = useCachedResource(routingDecisionsResource, true).data;
   const routerSavings = useMemo(
-    () => computeRouterSavings(routingDecisions ?? undefined, referencePrices),
-    [routingDecisions, referencePrices],
+    () => computeRouterSavings(routingDecisions ?? undefined),
+    [routingDecisions],
   );
   const projectedSavingsPct = useMemo(() => {
     const values = snap.catalog

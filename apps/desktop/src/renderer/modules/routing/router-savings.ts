@@ -6,54 +6,62 @@
  * line answers "how much did Auto-routing save you," distinct from "AntSeed
  * savings" (which every AntSeed user gets regardless of routing).
  *
- * Deviation from the doc's literal SS4.6 middle tier, logged in the runlog:
- * the doc's middle tier compares against one FIXED reference model's AntSeed
- * price at the time of each decision (`RoutingDecisionRow.baselinePrices`,
- * SS2.5) -- that field needs the SS8.4 fixed baseline dropdown, which is not
- * built yet (no VPR config surface exists to pick or persist it). Rather than
- * fabricate a hardcoded "current flagship" guess, this computes retail-price
- * savings per row's own actual model instead (same math as
- * `computeMeasuredSavings`, reused here on the ledger instead of aggregate
- * usage) -- a real, honestly-labeled approximation until that dropdown lands.
+ * Implements SS4.6's middle tier literally: actual paid vs. one fixed
+ * reference model's real AntSeed price *at the time of each decision*
+ * (`RoutingDecisionRow.baselinePrices`, decisions doc SS13 item 10, now
+ * populated) -- not an approximation against today's retail price for each
+ * row's own actual model, which is what this used to compute before
+ * baselinePrices existed to read from (see the runlog for that prior stand-in
+ * and why it was superseded, not just replaced silently).
  */
 import type { RoutingDecisionRow } from '@antseed/node';
-import type { OpenRouterReferenceMap } from '../catalog/openrouter-baseline.js';
-import { canonicalModelKey } from '../catalog/model-identity.js';
 import type { MeasuredSavings } from '../catalog/measured-savings.js';
+
+/**
+ * Default reference model for the SS8.4 savings-page dropdown -- "the most
+ * expensive, most capable flagship... the top GPT or Claude model." No
+ * dropdown UI exists yet to let a buyer pick a different one (SS8.4 is not
+ * built), so callers get this default unless/until that UI exists to pass a
+ * different `baselineModel` through. Matches (duplicated, not imported)
+ * `DEFAULT_BASELINE_MODELS[0]` in `plugins/router-levanto/src/router.ts` --
+ * that package is buyer/Node-side and now depends on `node:fs`, no
+ * cross-boundary dependency into renderer UI code is intended.
+ */
+export const DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL = 'claude-opus-5';
 
 export function computeRouterSavings(
   rows: readonly RoutingDecisionRow[] | undefined,
-  referenceMap: OpenRouterReferenceMap | null,
+  baselineModel: string = DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL,
 ): MeasuredSavings | null {
-  if (!rows || rows.length === 0 || !referenceMap) return null;
+  if (!rows || rows.length === 0) return null;
 
   let actualUsd = 0;
   let baselineUsd = 0;
-  let matchedServices = 0;
   const seenModels = new Set<string>();
 
   for (const row of rows) {
     if (!row.actualModel) continue;
-    const ref = referenceMap[canonicalModelKey(row.actualModel)];
-    if (!ref || (ref.input === null && ref.output === null)) continue;
+    const baseline = row.baselinePrices?.[baselineModel];
+    // Absent, not zero -- the baseline model wasn't offered as a ranked
+    // candidate at the moment of this specific decision, so there is no
+    // real AntSeed price to compare against for this row.
+    if (!baseline) continue;
 
     const freshInput = Math.max(0, row.actualPromptTokens - row.actualCachedTokens);
     const cached = row.actualCachedTokens;
     const output = row.actualCompletionTokens;
     if (freshInput === 0 && cached === 0 && output === 0) continue;
 
-    const inputPrice = ref.input ?? 0;
-    const cachedPrice = ref.cachedInput ?? inputPrice;
-    const outputPrice = ref.output ?? 0;
-    const rowBaseline = (freshInput * inputPrice + cached * cachedPrice + output * outputPrice) / 1_000_000;
+    const cachedPrice = baseline.cachedInUsdPerM ?? baseline.inUsdPerM;
+    const rowBaseline = (freshInput * baseline.inUsdPerM + cached * cachedPrice + output * baseline.outUsdPerM) / 1_000_000;
     if (rowBaseline <= 0) continue;
 
     baselineUsd += rowBaseline;
     actualUsd += row.actualUsdcPaid;
     seenModels.add(row.actualModel);
   }
-  matchedServices = seenModels.size;
 
+  const matchedServices = seenModels.size;
   if (matchedServices === 0 || baselineUsd <= 0) return null;
   const pct = Math.round(Math.max(0, Math.min(1, 1 - actualUsd / baselineUsd)) * 100);
   return { pct, actualUsd, baselineUsd, matchedServices };

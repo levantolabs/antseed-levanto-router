@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Moon02Icon, Sun02Icon, Tick02Icon } from '@hugeicons/core-free-icons';
 import { routesForSelectedModel } from '../../../modules/catalog/view-models';
+import { isLevantoAutoSelected } from '../../../modules/routing/levanto-auto';
 import { peerAccessSummaryLabel } from '../../../modules/routing/peer-access';
 import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
@@ -34,6 +35,10 @@ export function VprPreferencesView({ onSelectView }: Props) {
   );
   const { allowedPeerIds, blockedPeerIds } = snap.preferences;
   const accessSummary = peerAccessSummaryLabel(allowedPeerIds.length, blockedPeerIds.length);
+  // CQT dial only applies to "Levanto Auto" requests (decisions doc SS8.1,
+  // SS13 item 21) -- gate visibility on Auto being the currently selected
+  // model rather than showing it unconditionally regardless of selection.
+  const isAutoSelected = isLevantoAutoSelected(snap.selection.model);
 
   const selectTheme = (mode: ThemeMode) => {
     applyThemeMode(mode);
@@ -66,25 +71,27 @@ export function VprPreferencesView({ onSelectView }: Props) {
             )}
           />
 
-          <div className={styles.sliderGroup}>
-            <div className={styles.sliderHead}>
-              <span className={styles.sliderTitle}>Cost / quality tradeoff</span>
-              <span className={styles.sliderReadingSmall}>
-                {CQT_LABELS[cqtToPositionIndex(snap.preferences.cqt)]}
-              </span>
+          {isAutoSelected ? (
+            <div className={styles.sliderGroup}>
+              <div className={styles.sliderHead}>
+                <span className={styles.sliderTitle}>Cost / quality tradeoff</span>
+                <span className={styles.sliderReadingSmall}>
+                  {CQT_LABELS[cqtToPositionIndex(snap.preferences.cqt)]}
+                </span>
+              </div>
+              <VprSlider
+                min={0}
+                max={CQT_LABELS.length - 1}
+                step={1}
+                value={cqtToPositionIndex(snap.preferences.cqt)}
+                onChange={(next) => actions.updateVprRoutingPreferences({ cqt: positionIndexToCqt(next) })}
+                ariaLabel="Cost / quality tradeoff"
+              />
+              <div className={styles.sliderHint}>
+                Only affects "Levanto Auto" model requests. A relative dial, not a spend target.
+              </div>
             </div>
-            <VprSlider
-              min={0}
-              max={CQT_LABELS.length - 1}
-              step={1}
-              value={cqtToPositionIndex(snap.preferences.cqt)}
-              onChange={(next) => actions.updateVprRoutingPreferences({ cqt: positionIndexToCqt(next) })}
-              ariaLabel="Cost / quality tradeoff"
-            />
-            <div className={styles.sliderHint}>
-              Only affects "Levanto Auto" model requests. A relative dial, not a spend target.
-            </div>
-          </div>
+          ) : null}
 
           <VprSettingRow
             title="Prefer free peers when available"

@@ -128,8 +128,8 @@ export function VprActivityView({ onSelectView }: Props) {
   // Auto, same reasoning as VprHomeView's tile.
   const routingDecisions = useCachedResource(routingDecisionsResource, true).data;
   const routerSavings = useMemo(
-    () => computeRouterSavings(routingDecisions ?? undefined, referencePrices),
-    [routingDecisions, referencePrices],
+    () => computeRouterSavings(routingDecisions ?? undefined),
+    [routingDecisions],
   );
 
   const openOnChainClose = (channelId: string) => {

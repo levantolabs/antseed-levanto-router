@@ -6,6 +6,7 @@ import {
   LEVANTO_AUTO_PROVIDER,
   LEVANTO_AUTO_SERVICE_ID,
   isLevantoAutoEntry,
+  isLevantoAutoSelected,
   withLevantoAutoCatalogEntry,
 } from './levanto-auto.js';
 
@@ -59,4 +60,16 @@ test('withLevantoAutoCatalogEntry works on an empty catalog (no discovered selle
 
 test('isLevantoAutoEntry rejects a real model entry', () => {
   assert.equal(isLevantoAutoEntry(realEntry()), false);
+});
+
+test('isLevantoAutoSelected is false when no model is selected (null)', () => {
+  assert.equal(isLevantoAutoSelected(null), false);
+});
+
+test('isLevantoAutoSelected is false for a real, concretely-selected model', () => {
+  assert.equal(isLevantoAutoSelected(realEntry()), false);
+});
+
+test('isLevantoAutoSelected is true when Levanto Auto is the selected model', () => {
+  assert.equal(isLevantoAutoSelected(LEVANTO_AUTO_CATALOG_ENTRY), true);
 });

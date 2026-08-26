@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import type { RoutingDecisionRow } from '@antseed/node';
-import { computeRouterSavings } from './router-savings.js';
-import type { OpenRouterReferenceMap } from '../catalog/openrouter-baseline.js';
-import { canonicalModelKey } from '../catalog/model-identity.js';
+import { computeRouterSavings, DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL } from './router-savings.js';
+
+const BASELINE_PRICE = { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 };
 
 function row(overrides: Partial<RoutingDecisionRow> = {}): RoutingDecisionRow {
   return {
@@ -20,61 +20,72 @@ function row(overrides: Partial<RoutingDecisionRow> = {}): RoutingDecisionRow {
     predictedOutputTokens: 200,
     cqt: 5,
     routingLatencyMs: 50,
+    baselinePrices: { [DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL]: BASELINE_PRICE },
     ...overrides,
   };
 }
 
-const REFERENCE_MAP: OpenRouterReferenceMap = {
-  [canonicalModelKey('kimi-k3')]: { input: 5, output: 20, cachedInput: null },
-};
-
 test('returns null with no rows', () => {
-  assert.equal(computeRouterSavings([], REFERENCE_MAP), null);
+  assert.equal(computeRouterSavings([]), null);
 });
 
-test('returns null with no reference map', () => {
-  assert.equal(computeRouterSavings([row()], null), null);
-});
-
-test('computes real savings for a routed model with a retail match', () => {
-  const result = computeRouterSavings([row()], REFERENCE_MAP);
+test('computes real savings against the row-level baselinePrices snapshot', () => {
+  const result = computeRouterSavings([row()]);
   assert.ok(result);
-  // baseline: 1000*5/1e6 + 200*20/1e6 = 0.005 + 0.004 = 0.009
-  assert.ok(Math.abs(result!.baselineUsd - 0.009) < 1e-9);
+  // baseline: 1000*15/1e6 + 200*75/1e6 = 0.015 + 0.015 = 0.03
+  assert.ok(Math.abs(result!.baselineUsd - 0.03) < 1e-9);
   assert.equal(result!.actualUsd, 0.0005);
   assert.equal(result!.matchedServices, 1);
-  assert.ok(result!.pct > 90); // paid far below retail
+  assert.ok(result!.pct > 90); // paid far below the baseline model's price
 });
 
-test('excludes rows whose model has no retail match', () => {
-  const result = computeRouterSavings([row({ actualModel: 'unknown-model-xyz' })], REFERENCE_MAP);
+test('excludes a row whose baselinePrices has no entry for the reference model (not offered at that decision)', () => {
+  const result = computeRouterSavings([row({ baselinePrices: {} })]);
   assert.equal(result, null);
 });
 
-test('splits fresh vs cached tokens from the combined actualPromptTokens field', () => {
-  const cachedMap: OpenRouterReferenceMap = {
-    [canonicalModelKey('kimi-k3')]: { input: 10, output: 0, cachedInput: 1 },
-  };
-  const result = computeRouterSavings(
-    [row({ actualPromptTokens: 1000, actualCachedTokens: 400, actualCompletionTokens: 0 })],
-    cachedMap,
-  );
-  // fresh 600 * 10/1e6 + cached 400 * 1/1e6 = 0.006 + 0.0004 = 0.0064
+test('respects an explicit baselineModel argument, not just the default', () => {
+  const withOther = row({
+    baselinePrices: { 'gpt-5.6-sol': { inUsdPerM: 1.1, outUsdPerM: 8.9, cachedInUsdPerM: null } },
+  });
+  assert.equal(computeRouterSavings([withOther]), null); // default baseline model absent
+  const result = computeRouterSavings([withOther], 'gpt-5.6-sol');
   assert.ok(result);
-  assert.ok(Math.abs(result!.baselineUsd - 0.0064) < 1e-9);
+  // baseline: 1000*1.1/1e6 + 200*8.9/1e6 = 0.0011 + 0.00178 = 0.00288
+  assert.ok(Math.abs(result!.baselineUsd - 0.00288) < 1e-9);
+});
+
+test('splits fresh vs cached tokens from the combined actualPromptTokens field', () => {
+  const result = computeRouterSavings([
+    row({ actualPromptTokens: 1000, actualCachedTokens: 400, actualCompletionTokens: 0 }),
+  ]);
+  // fresh 600 * 15/1e6 + cached 400 * 1.5/1e6 = 0.009 + 0.0006 = 0.0096
+  assert.ok(result);
+  assert.ok(Math.abs(result!.baselineUsd - 0.0096) < 1e-9);
+});
+
+test('falls back to the input price when cachedInUsdPerM is null', () => {
+  const result = computeRouterSavings([
+    row({
+      actualPromptTokens: 1000,
+      actualCachedTokens: 400,
+      actualCompletionTokens: 0,
+      baselinePrices: { [DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL]: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: null } },
+    }),
+  ]);
+  // fresh 600 * 15/1e6 + cached 400 * 15/1e6 (falls back to inUsdPerM) = 0.009 + 0.006 = 0.015
+  assert.ok(result);
+  assert.ok(Math.abs(result!.baselineUsd - 0.015) < 1e-9);
 });
 
 test('counts distinct matched models, not rows', () => {
-  const result = computeRouterSavings([row(), row(), row({ actualModel: 'kimi-k3' })], REFERENCE_MAP);
+  const result = computeRouterSavings([row(), row(), row({ actualModel: 'kimi-k3' })]);
   assert.ok(result);
   assert.equal(result!.matchedServices, 1);
 });
 
-test('clamps a paid-above-retail scenario to 0%, never negative', () => {
-  const result = computeRouterSavings(
-    [row({ actualUsdcPaid: 1 })], // way above the 0.009 baseline
-    REFERENCE_MAP,
-  );
+test('clamps a paid-above-baseline scenario to 0%, never negative', () => {
+  const result = computeRouterSavings([row({ actualUsdcPaid: 1 })]); // way above the 0.03 baseline
   assert.ok(result);
   assert.equal(result!.pct, 0);
 });

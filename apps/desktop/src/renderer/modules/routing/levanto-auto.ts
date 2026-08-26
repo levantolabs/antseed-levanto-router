@@ -48,6 +48,17 @@ export function isLevantoAutoEntry(entry: Pick<VprModelCatalogEntry, 'provider' 
 }
 
 /**
+ * Null-safe wrapper around `isLevantoAutoEntry` for `vprRouteSelection.model`
+ * (which is `null` before any model is chosen) -- the exact check the CQT
+ * dial's visibility gates on (decisions doc SS13 item 21): the dial only
+ * applies to "Levanto Auto" requests, so it should render only when Auto is
+ * the currently selected model, not unconditionally.
+ */
+export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'> | null): boolean {
+  return model !== null && isLevantoAutoEntry(model);
+}
+
+/**
  * Idempotently prepends the Auto entry to a freshly-derived catalog. Safe to
  * call on every catalog recompute -- `projectRowsToVprModelCatalog` never
  * produces a `(levanto, levanto-auto)` pair from real network discovery
