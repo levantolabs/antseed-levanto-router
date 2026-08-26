@@ -430,4 +430,71 @@ describe('PeerLookup', () => {
     expect(results[0]?.port).toBe(6882);
     expect(results[0]?.metadata.publicAddress).toBe('34.27.100.162:6882');
   });
+
+  describe('resolveKnownPeer', () => {
+    // Local-development escape hatch for NAT-hairpinning scenarios (a buyer
+    // and seller on the same machine, where the DHT-observed address is
+    // that machine's own unreachable public IP): skips DHT lookup entirely
+    // and fetches metadata directly from a caller-supplied endpoint.
+    const targetId = 'c'.repeat(40);
+
+    it('fetches metadata directly from the given endpoint, never touching the DHT', async () => {
+      const lookup = vi.fn();
+      const dht = { lookup } as unknown as DHTNode;
+      const resolve = vi.fn(async () => buildMetadata({ peerId: targetId as any }));
+      const metadataResolver: MetadataResolver = { resolve };
+      const peerLookup = new PeerLookup({
+        dht,
+        metadataResolver,
+        requireValidSignature: false,
+        allowStaleMetadata: true,
+        maxAnnouncementAgeMs: 60_000,
+        maxResults: 50,
+      });
+
+      const result = await peerLookup.resolveKnownPeer(targetId, { host: '127.0.0.1', port: 6892 });
+
+      expect(lookup).not.toHaveBeenCalled();
+      expect(resolve).toHaveBeenCalledWith({ host: '127.0.0.1', port: 6892 });
+      expect(result?.metadata.peerId).toBe(targetId);
+      expect(result?.host).toBe('127.0.0.1');
+      expect(result?.port).toBe(6892);
+    });
+
+    it('refuses to substitute a peer if the endpoint answers as someone else', async () => {
+      const dht = { lookup: vi.fn() } as unknown as DHTNode;
+      const resolve = vi.fn(async () => buildMetadata({ peerId: 'd'.repeat(40) as any }));
+      const metadataResolver: MetadataResolver = { resolve };
+      const peerLookup = new PeerLookup({
+        dht,
+        metadataResolver,
+        requireValidSignature: false,
+        allowStaleMetadata: true,
+        maxAnnouncementAgeMs: 60_000,
+        maxResults: 50,
+      });
+
+      const result = await peerLookup.resolveKnownPeer(targetId, { host: '127.0.0.1', port: 6892 });
+
+      expect(result).toBeNull();
+    });
+
+    it('returns null when the endpoint is unreachable, same as a normal DHT-resolved failure', async () => {
+      const dht = { lookup: vi.fn() } as unknown as DHTNode;
+      const resolve = vi.fn(async () => null);
+      const metadataResolver: MetadataResolver = { resolve };
+      const peerLookup = new PeerLookup({
+        dht,
+        metadataResolver,
+        requireValidSignature: false,
+        allowStaleMetadata: true,
+        maxAnnouncementAgeMs: 60_000,
+        maxResults: 50,
+      });
+
+      const result = await peerLookup.resolveKnownPeer(targetId, { host: '127.0.0.1', port: 6892 });
+
+      expect(result).toBeNull();
+    });
+  });
 });

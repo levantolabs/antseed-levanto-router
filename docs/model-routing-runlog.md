@@ -19,6 +19,67 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] NAT hairpinning blocks a same-machine buyer/seller P2P demo: root cause confirmed, a scoped local-dev workaround built and proven
+
+Confirms and closes the P2P discovery blocker logged in an earlier entry today. Reproduced
+directly with debug logging against the live routing-peer daemon, not just read from code:
+`findPeer`'s per-peer DHT topic lookup for the routing peer returns exactly one endpoint,
+`<this machine's real public WAN IP>:6892` — not `127.0.0.1:6892`, even though
+`local-peer-daemon.ts` explicitly self-announces `publicAddress: '127.0.0.1:6892'` in its own
+signed metadata. That self-declared field never gets a chance to matter: the DHT records a
+peer by the *observed source address* of its announce traffic, and the very next step —
+fetching the peer's metadata document via `http://<that observed address>/metadata` — fails
+outright (`network error`) before `PeerLookup._resolveSinglePeer` ever gets to read the
+metadata body and its `publicAddress` field. This machine cannot connect to its own public IP
+(NAT hairpinning, near-universal under WSL2's extra NAT layer). `_resolvePublicAddress`
+(node.ts) already correctly *prefers* a valid self-declared metadata address over the
+DHT-observed one — that logic was never reached, not broken.
+
+An earlier attempt (not this entry's author) to force local-only discovery by restricting the
+buyer's DHT bootstrap list to just the routing peer's local port didn't fully work and wasn't
+re-attempted here — a wildcard scan across the wider public swarm is a working fallback path
+for the *general* discovery problem and isn't itself broken; it correctly never finds this
+specific, brand-new local-only identity among hundreds of real internet peers, because that
+identity genuinely isn't announced anywhere the wildcard scan would see it succeed.
+
+**Built:** `PeerLookup.resolveKnownPeer(peerId, endpoint)` (`packages/node/src/discovery/peer-lookup.ts`)
+— fetches metadata directly from a caller-supplied endpoint, skipping DHT address discovery
+entirely for that one peer, while keeping every other guarantee identical to the DHT path
+(schema validation, signature verification, and a hard check that the endpoint actually answers
+as the requested peerId — refuses to substitute a different peer). `AntseedNode` gained a new
+optional `directPeerAddresses?: Record<string, string>` config field (`packages/node/src/node.ts`);
+`findPeer` checks it before ever touching the DHT, falling back to the normal DHT path if the
+direct fetch fails. Wired through to the real CLI: `apps/cli/src/cli/commands/buyer/start.ts`
+reads a new `ANTSEED_DIRECT_PEER_ADDRESSES_JSON` env var (JSON peerId -> "host:port" map) via a
+new `resolveDirectPeerAddresses` helper, malformed/absent input being a silent no-op rather than
+an error.
+
+This is explicitly a local-development escape hatch, not a NAT-traversal mechanism — it requires
+the caller to already know a real, reachable address for the peer; it does nothing for two
+genuinely separate machines behind real NATs. Documented as such directly in both new pieces of
+code so it doesn't get mistaken for more than it is.
+
+**Proven for real, not just unit-tested:** a standalone script constructing a real `AntseedNode`
+with `directPeerAddresses` set to the live routing peer's real identity + `127.0.0.1:6892`
+successfully fetched real signed metadata (`displayName="Levanto Routing Peer (local)"`), and
+`connectToPeer` genuinely succeeded — a real transport-level connection to the real, live
+routing-peer daemon, where the unmodified DHT path fails every time on this machine.
+
+**Not wired into the desktop app itself** (`apps/desktop/src/main/main.ts`, where
+`LEVANTO_ROUTING_PEER_URL`/`LEVANTO_SELLER_PEER_ID` are already set as similar demo env vars) —
+deliberately left alone to avoid colliding with a different, concurrently-running task's edits
+to that same file. Setting `ANTSEED_DIRECT_PEER_ADDRESSES_JSON` there too (same pattern, one more
+env var: `{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892"}`) is the one remaining
+step to unblock a real Auto routing round trip through the actual desktop UI.
+
+**Tests:** `packages/node/tests/peer-lookup.test.ts` — 3 new tests for `resolveKnownPeer`
+(fetches directly without touching the DHT, refuses a peerId mismatch, propagates a normal
+resolve failure). `apps/cli/src/cli/commands/buyer/start.test.ts` — 2 new tests for
+`resolveDirectPeerAddresses` (no-op on absent/malformed input, parses and normalizes a valid
+map). Full suites rerun clean: `packages/node` 1021/1021, `apps/cli` 455/455.
+
+---
+
 ## [2026-08-26] Root cause and fix for the "buyer daemon not running current code" blocker below: not staleness, a race between two independent auto-starters
 
 The entry directly below this one left the root cause as an unconfirmed "leading theory" (stale

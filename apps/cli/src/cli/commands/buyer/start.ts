@@ -57,6 +57,32 @@ export function resolveBuyerRouterName(options: { router?: string }): string {
   return (options.router as string | undefined) ?? 'local'
 }
 
+/**
+ * Local-development escape hatch (see `Node.directPeerAddresses` doc in
+ * packages/node/src/node.ts): known peerId -> "host:port" endpoints to
+ * fetch metadata from directly, bypassing DHT-based address discovery for
+ * exactly those peers. Set via `ANTSEED_DIRECT_PEER_ADDRESSES_JSON`, a JSON
+ * object mapping peerId to "host:port". Malformed/absent input is a no-op
+ * (undefined), not an error -- this is a niche debugging aid, not something
+ * that should ever break a normal `buyer start`.
+ */
+export function resolveDirectPeerAddresses(rawJson: string | undefined): Record<string, string> | undefined {
+  if (!rawJson || rawJson.trim().length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(rawJson)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const out: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        out[key.trim().toLowerCase()] = value.trim()
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function buildBuyerBootstrapEntries(
   configuredBootstrapNodes: string[] | undefined,
   localSeederDhtPort?: number,
@@ -391,6 +417,8 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       }
       console.log('')
 
+      const directPeerAddresses = resolveDirectPeerAddresses(process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON'])
+
       const node = new AntseedNode({
         role: 'buyer',
         bootstrapNodes,
@@ -402,6 +430,7 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         maxStreamDurationMs: effectiveBuyerConfig.maxStreamDurationMs,
         payments: paymentsConfig,
         verification: effectiveBuyerConfig.verification,
+        ...(directPeerAddresses ? { directPeerAddresses } : {}),
       })
 
       node.setRouter(router)

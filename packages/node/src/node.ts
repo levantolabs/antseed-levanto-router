@@ -222,6 +222,19 @@ export interface NodeConfig {
   displayName?: string;
   /** Publicly reachable seller address override ("host:port") announced in metadata. */
   publicAddress?: string;
+  /**
+   * Local-development escape hatch: known peerId -> "host:port" endpoints to
+   * fetch metadata from directly, bypassing DHT-based address discovery for
+   * exactly those peers. DHT announce/lookup records a peer's *observed*
+   * source address; a buyer and seller on the same machine are recorded
+   * under that machine's own public-facing address, which is unreachable
+   * from itself under NAT hairpinning (near-universal under WSL2's extra
+   * NAT layer). Every other guarantee (schema validation, signature
+   * verification, peerId match) is unchanged -- this only replaces how the
+   * endpoint is found, not how the fetched metadata is trusted. NOT a
+   * production NAT-traversal mechanism; undefined/empty is a no-op.
+   */
+  directPeerAddresses?: Record<string, string>;
   /** External ownership claims announced in signed peer metadata. */
   verifications?: PeerVerifications;
   /** Extra peer capability strings to advertise (e.g. supported verifier SDKs). */
@@ -985,6 +998,21 @@ export class AntseedNode extends EventEmitter {
     const normalized = peerId.trim().toLowerCase().replace(/^0x/, "");
     if (!/^[0-9a-f]{40}$/.test(normalized)) {
       return null;
+    }
+
+    const directAddress = this._config.directPeerAddresses?.[normalized];
+    if (directAddress) {
+      debugLog(`[Node] findPeer(${normalized.slice(0, 12)}...) via configured direct address ${directAddress}`);
+      const { host, port } = parsePeerAddress(directAddress);
+      const direct = await this._peerLookup.resolveKnownPeer(normalized, { host, port });
+      if (direct) {
+        const peer = this._lookupResultToPeerInfo(direct);
+        this._attachCachedExternalVerificationResults([peer]);
+        this._queueExternalVerification([peer]);
+        await this._enrichPeersWithOnChainStats([peer]);
+        return peer;
+      }
+      debugWarn(`[Node]   direct address ${directAddress} for ${normalized.slice(0, 12)}... did not resolve; falling back to DHT`);
     }
 
     debugLog(`[Node] findPeer(${normalized.slice(0, 12)}...) via per-peer DHT topic`);
