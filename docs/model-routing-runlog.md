@@ -19,6 +19,16 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] General peer catalog never included directPeerAddresses peers — fixed, verified live
+
+The `directPeerAddresses` local-dev NAT-hairpinning escape hatch (added earlier today) only ever fed `AntseedNode.findPeer`'s single-peer connection resolution (used for e.g. signing the daily SpendingAuth). It was never wired into the general peer-discovery path (`buyer-proxy.ts`'s `_getPeers`/`_discoverPeersFromNetwork`) that the Discover page, chat model-picker, and routing all read from — that path is pure DHT crawl. Since the same NAT-hairpinning root cause blocks DHT crawl from finding a local-only peer on this machine, the general catalog stayed empty even with a fully up, staked, correctly-dispatching routing peer: confirmed live, `curl http://127.0.0.1:8787/_antseed/route` returned a real `402 not_subscribed_today` while the buyer's own `curl http://127.0.0.1:8377/v1/models` returned `{"object":"list","data":[]}` after a full minute of polling. This wasn't a regression from tonight's other fixes (bootstrap isolation, stale-cache clearing) — those fixes removed the fallback data (stale cache, real public-network peers) that had been masking this gap all along.
+
+Fixed: `AntseedNode` (`packages/node/src/node.ts`) gained `resolveDirectPeers(): Promise<PeerInfo[]>`, resolving every entry in `directPeerAddresses` the same way `findPeer`'s direct-address branch already does (`PeerLookup.resolveKnownPeer`, on-chain enrichment, verification queueing) — a no-op returning `[]` when `directPeerAddresses` is unset, so real production buyers see zero behavior change. `buyer-proxy.ts`'s `_discoverPeersFromNetwork` now calls both `node.discoverPeers()` (DHT) and `node.resolveDirectPeers()` in parallel and merges by `peerId`, direct-address results winning on conflict (they're the "known good" source). Designed generically for multiple entries, since more mock-seller peers configured this same way are expected soon (separate, concurrent work).
+
+Verified live, not simulated: an isolated standalone buyer (`ANTSEED_DIRECT_PEER_ADDRESSES_JSON` set the same way the desktop demo sets it, pointed at the real live routing peer) returned all 3 of the routing peer's real advertised models (`glm-5.2`, `gpt-5.6-luna`, `kimi-k3`) on its very first `/v1/models` poll — previously empty. `packages/node` 93/93 files, 1021/1021 tests; `apps/cli` 459/459 tests (4 new, covering the merge/dedup/fallback behavior) — both suites green, no regressions. The live routing peer and anvil were left running untouched throughout (same PIDs before and after).
+
+---
+
 ## [2026-08-26] Mock-marketplace seeding harness: a real state-drift bug found and fixed; a real, only-partially-understood slowdown documented honestly
 
 Continues the mock-marketplace reputation-seeding harness (`levanto-routing-server/scripts/run-mock-marketplace.sh`, `src/mock-marketplace-{seed,sellers}.ts`, `src/mock-sellers-daemon.ts`) from where an earlier pass left off, with real, reproducible findings — not guesses.

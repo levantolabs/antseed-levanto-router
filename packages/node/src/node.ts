@@ -1042,6 +1042,54 @@ export class AntseedNode extends EventEmitter {
   }
 
   /**
+   * Resolve every peer configured via `directPeerAddresses` (the local-dev
+   * NAT-hairpinning escape hatch — see that field's own doc comment) without
+   * touching the DHT at all, the same way `findPeer`'s direct-address branch
+   * does for a single known peer. Used to seed the general peer catalog
+   * (buyer-proxy's `_getPeers`) with peers a DHT crawl genuinely cannot find
+   * on this machine, so Discover/model-picker aren't empty just because
+   * local-only discovery doesn't work here.
+   *
+   * A no-op returning `[]` when `directPeerAddresses` is unset/empty — real
+   * production buyers never configure this, so this method costs them
+   * nothing. Failures resolve individual entries to nothing rather than
+   * rejecting the whole batch; one misconfigured/unreachable direct peer
+   * must not blank out the others.
+   */
+  async resolveDirectPeers(): Promise<PeerInfo[]> {
+    const entries = Object.entries(this._config.directPeerAddresses ?? {});
+    if (entries.length === 0) return [];
+    if (!this._peerLookup) {
+      throw buyerFault("Node not started or not in buyer mode", "node-not-started");
+    }
+
+    const resolved = await Promise.all(entries.map(async ([peerId, address]) => {
+      const normalized = peerId.trim().toLowerCase().replace(/^0x/, "");
+      if (!/^[0-9a-f]{40}$/.test(normalized)) return null;
+      try {
+        const { host, port } = parsePeerAddress(address);
+        const direct = await this._peerLookup!.resolveKnownPeer(normalized, { host, port });
+        if (!direct) {
+          debugWarn(`[Node] resolveDirectPeers: direct address ${address} for ${normalized.slice(0, 12)}... did not resolve`);
+          return null;
+        }
+        return this._lookupResultToPeerInfo(direct);
+      } catch (err) {
+        debugWarn(`[Node] resolveDirectPeers: failed to resolve ${normalized.slice(0, 12)}... at ${address}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    }));
+
+    const peers = resolved.filter((p): p is PeerInfo => p !== null);
+    if (peers.length > 0) {
+      this._attachCachedExternalVerificationResults(peers);
+      this._queueExternalVerification(peers);
+      await this._enrichPeersWithOnChainStats(peers);
+    }
+    return peers;
+  }
+
+  /**
    * Verify claimed on-chain stats against actual contract data, and
    * populate volume / last-settled which are never announced by sellers.
    *

@@ -1455,9 +1455,27 @@ export class BuyerProxy {
 
   private async _discoverPeersFromNetwork(): Promise<PeerInfo[]> {
     log('Discovering peers via DHT...')
-    const peers = await this._node.discoverPeers()
+    const [dhtPeers, directPeers] = await Promise.all([
+      this._node.discoverPeers(),
+      // Local-dev NAT-hairpinning escape hatch (directPeerAddresses, see
+      // AntseedNode.resolveDirectPeers' own doc comment): a no-op returning
+      // [] for any buyer that hasn't configured it. Merged here so the
+      // general catalog (Discover, model-picker, routing) includes peers a
+      // DHT crawl genuinely cannot find on this machine, not just the one
+      // connection findPeer resolves on demand.
+      this._node.resolveDirectPeers().catch((err) => {
+        log(`resolveDirectPeers failed, continuing with DHT results only: ${err instanceof Error ? err.message : String(err)}`)
+        return [] as PeerInfo[]
+      }),
+    ])
+    const byId = new Map<string, PeerInfo>()
+    for (const peer of dhtPeers) byId.set(peer.peerId.toLowerCase(), peer)
+    // Direct-address peers are the "known good" source for this one peer —
+    // prefer them over whatever the DHT crawl found for the same id.
+    for (const peer of directPeers) byId.set(peer.peerId.toLowerCase(), peer)
+    const peers = Array.from(byId.values())
     if (peers.length > 0) {
-      log(`Found ${peers.length} peer(s)`)
+      log(`Found ${peers.length} peer(s)${directPeers.length > 0 ? ` (${directPeers.length} via direct address)` : ''}`)
     }
     return peers
   }
