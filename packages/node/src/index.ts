@@ -211,10 +211,12 @@ export type {
   FreeUsageMetadata,
   FreeUsageServiceMetadata,
 } from './payments/evm/signatures.js';
+export type { SpendingAuthPayload, AuthAckPayload } from '@antseed/protocol/messages';
 export { NatTraversal, type NatMapping, type NatTraversalResult } from './p2p/nat-traversal.js';
 export { BuyerPaymentManager } from './payments/buyer-payment-manager.js';
 export type { BuyerSpendEvent, BuyerSpendListener } from './payments/buyer-payment-manager.js';
 export type { BuyerPaymentConfig } from './payments/buyer-payment-manager.js';
+export type { FlatFeeSigningConfig, PerRequestAuthResult } from './payments/buyer-payment-manager.js';
 export { BuyerFreeUsageManager } from './payments/buyer-free-usage-manager.js';
 export type { BuyerFreeUsageConfig } from './payments/buyer-free-usage-manager.js';
 export { SellerFreeUsageManager } from './payments/seller-free-usage-manager.js';
@@ -227,6 +229,7 @@ export { getChainConfig, resolveChainConfig, DEFAULT_CHAIN_ID, CHAIN_CONFIGS } f
 export type { ChainConfig } from './payments/chain-config.js';
 export { formatUsdc, parseUsdc } from './payments/usdc-utils.js';
 export { ProxyMux } from './proxy/proxy-mux.js';
+export { PaymentMux } from './p2p/payment-mux.js';
 export { SweepMux, type SweepMessageHandler } from './p2p/sweep-mux.js';
 export { encodeSweepRequest, decodeSweepRequest, encodeSweepReceipt, decodeSweepReceipt } from './p2p/sweep-codec.js';
 export {
@@ -274,7 +277,7 @@ export {
 } from './routing/model-route-ranking.js';
 
 export type { AntseedPlugin, AntseedProviderPlugin, AntseedRouterPlugin, AntseedVerifierPlugin, Prover, RoutingServerHandler, VerifyContext, VerifyResult, ClaimResult, SellerRequest, SellerResponse, PluginConfigKey, ConfigField } from './interfaces/plugin.js'
-export { ANTSEED_ATTEST_PATH, ANTSEED_ROUTE_PATH } from './interfaces/plugin.js'
+export { ANTSEED_ATTEST_PATH, ANTSEED_ROUTE_DIGEST_PATH, ANTSEED_ROUTE_PATH } from './interfaces/plugin.js'
 
 // Reputation
 export { UptimeTracker } from './reputation/uptime-tracker.js';

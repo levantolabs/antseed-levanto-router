@@ -85,6 +85,17 @@ export interface Prover extends AntseedPluginBase {
 export const ANTSEED_ROUTE_PATH = '/_antseed/route'
 
 /**
+ * Digest submissions (decisions doc SS6.9) get their own suffix path under
+ * the reserved routing path (decisions doc SS13 item 20, resolved) -- the
+ * caller states its intent explicitly via the URL, no shape-based
+ * body-sniffing to distinguish a digest from a routing request. Both paths
+ * delegate to the same `RoutingServerHandler.handleRoute` -- `req.path` is
+ * already part of `SellerRequest`, so the handler implementation can
+ * distinguish them itself; no new interface method or dispatch contract.
+ */
+export const ANTSEED_ROUTE_DIGEST_PATH = '/_antseed/route/digest'
+
+/**
  * A seller-side handler for the reserved model-routing-decision path
  * (single instance per node, unlike Prover which is looked up by name --
  * there's only one routing peer identity per seller). Registered the same

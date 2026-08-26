@@ -47,6 +47,17 @@ export type RoutingDecisionRow = {
   predictedOutputTokens: number | null;
   cqt: number;
   routingLatencyMs: number | null;
+  /**
+   * A price snapshot for each fixed, curated baseline/dropdown model
+   * (model-routing decisions doc §8.4) that was actually present in this
+   * decision's ranked response -- collapsed across peers to the best
+   * available offer per model, keyed by model name. Absent entirely for a
+   * baseline model that wasn't offered at the moment of this decision.
+   * Lets a savings dashboard compare "actual paid" against one fixed
+   * reference model's real AntSeed price at the time of THIS decision,
+   * without needing to hold a live price table or re-fetch anything.
+   */
+  baselinePrices: Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
 };
 
 /**
@@ -76,6 +87,17 @@ export interface Router {
     cachedInputTokens?: number;
     outputTokens?: number;
     estimatedCostUsd?: number | null;
+    /**
+     * The originating client request's id (`SerializedHttpRequest.requestId`,
+     * stable across a peer walk for one client request) -- decisions doc
+     * SS13 item 13. `selectRoute` receives the same id via its own `req`
+     * param, so a router that keys its pending-decision bookkeeping by
+     * requestId instead of peerId alone can correctly pair this result with
+     * the decision that produced it, even when two different conversations
+     * are concurrently routed to the same peer. Optional/additive -- older
+     * callers or routers that don't implement `selectRoute` can ignore it.
+     */
+    requestId?: string;
   }): void;
 
   /**
@@ -93,6 +115,17 @@ export interface Router {
     peers: PeerInfo[],
     conversation: ConversationIdentity | null,
     routingPreferences: ModelRoutingPreferences | null,
+    /**
+     * The pre-existing "antseed" alias's currently-resolved target
+     * (`buyer.state.json`'s `defaultRoutedModel`, `apps/cli/src/proxy/request-utils.ts`'s
+     * `ROUTED_MODEL_ALIAS`) -- host-owned state, passed in the same way
+     * `conversation` is, so a router never needs a direct dependency on
+     * `apps/cli`'s state file to read it (decisions doc SS13 item 8). `null`
+     * when no default route is set, or for a host that doesn't have this
+     * concept at all. Optional param -- existing callers/implementers that
+     * don't pass or read a 5th argument are unaffected.
+     */
+    defaultRoutedModel?: string | null,
   ): Promise<RouteCandidate[] | null>;
 
   /**
@@ -104,6 +137,34 @@ export interface Router {
    * has no reason to implement this either.
    */
   getRoutingDecisions?(): RoutingDecisionRow[];
+
+  /**
+   * Optional, additive: a router that needs daily/periodic payment-signing
+   * capability (e.g. a subscription-priced routing peer, model-routing
+   * decisions doc SS6.2/SS13 item 11) implements this to receive a
+   * host-provided signing function, called once by the host after loading
+   * and after payments are configured. Generic across any router that needs
+   * this, not specific to any one router package -- the router never holds
+   * a BuyerPaymentManager or PaymentMux reference directly (software-arch
+   * doc SS2.6: that would let plugin code, including third-party routers
+   * per SSG3, sign arbitrary messages); the host builds and owns the actual
+   * signing closure.
+   */
+  configureDailySigning?(signDailyIfNeeded: (sellerPeerId: string) => Promise<void>): void;
+
+  /**
+   * Optional, additive: host-callable, independent of any chat request
+   * (model-routing decisions doc SS13 item 9) -- a router that implements
+   * `configureDailySigning` should also implement this so a background
+   * timer can keep billing continuous even on a day the buyer never sends
+   * a routable chat message at all. Calls the exact same gated logic
+   * `selectRoute` calls internally before routing (a router's own
+   * "at most once per calendar day" bookkeeping is shared, not
+   * duplicated) -- a no-op if daily signing isn't configured, or if today
+   * was already signed by an earlier call this same day, whether from a
+   * real chat request or from this same background trigger.
+   */
+  triggerDailySigningCheck?(): Promise<void>;
 }
 
 // Duck-typed, not formally part of `Router`, but probed for by buyer-proxy

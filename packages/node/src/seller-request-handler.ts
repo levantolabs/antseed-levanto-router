@@ -3,7 +3,7 @@ import type {
   Provider,
   ProviderStreamCallbacks,
 } from './interfaces/seller-provider.js';
-import { ANTSEED_ATTEST_PATH, ANTSEED_ROUTE_PATH, type Prover, type RoutingServerHandler } from './interfaces/plugin.js';
+import { ANTSEED_ATTEST_PATH, ANTSEED_ROUTE_DIGEST_PATH, ANTSEED_ROUTE_PATH, type Prover, type RoutingServerHandler } from './interfaces/plugin.js';
 import type { SellerSessionTracker } from './metering/seller-session-tracker.js';
 import type { PaymentMux } from './p2p/payment-mux.js';
 import type { Identity } from './p2p/identity.js';
@@ -141,7 +141,7 @@ export class SellerRequestHandler {
       // whatever RoutingServerHandler the host registered (if any). No
       // routing/ranking logic lives in this package; a 404 here just means
       // this seller isn't a routing peer.
-      if (request.method === 'POST' && pathOnly === ANTSEED_ROUTE_PATH) {
+      if (request.method === 'POST' && (pathOnly === ANTSEED_ROUTE_PATH || pathOnly === ANTSEED_ROUTE_DIGEST_PATH)) {
         const handler = this._deps.routingServerHandler;
         if (!handler) {
           mux.sendProxyResponse({

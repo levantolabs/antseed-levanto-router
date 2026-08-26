@@ -476,6 +476,19 @@ export class AntseedNode extends EventEmitter {
   }
 
   /**
+   * Real on-chain channels client (null if payments not configured). Exposed
+   * for buyer-side code outside this class that needs a genuine on-chain
+   * read after a `topUpReserve()` call -- `topUpReserve`'s own AuthAck
+   * doesn't update the buyer's cached reserve ceiling for anything but the
+   * very first reserve (confirmed by reading `BuyerPaymentManager.handleAuthAck`);
+   * `reconcileReserveAmount(sellerPeerId, onChainAmount)` is the documented
+   * way to resync from here (model-routing decisions doc SS13 item 11).
+   */
+  get channelsClient(): ChannelsClient | null {
+    return this._channelsClient;
+  }
+
+  /**
    * Live payments status for control planes and UIs. Payments stay enabled
    * while the chain RPC is unreachable — buyer authorization is signed
    * off-chain — so `rpc.state` is a health signal, not an on/off switch.
@@ -1119,6 +1132,31 @@ export class AntseedNode extends EventEmitter {
     if (negotiator) {
       this._paymentMuxes.set(peer.peerId, negotiator.getOrCreatePaymentMux(peer.peerId, conn));
     }
+  }
+
+  /**
+   * Get (connecting first if needed) a real `PaymentMux` for a specific
+   * peer, for buyer-side code outside this class that needs to sign and
+   * send payment messages to a peer it isn't necessarily chatting through
+   * (model-routing decisions doc SS13 item 11) -- e.g. a routing-client
+   * host paying a flat daily subscription fee to a routing peer, as opposed
+   * to per-request billing to a chat-completion seller. `_paymentMuxes` has
+   * no public getter otherwise; mirrors `requestChannelClose`'s own
+   * find-then-`connectToPeer` pattern.
+   */
+  async getOrConnectPaymentMux(peerId: string): Promise<PaymentMux> {
+    const existing = this._paymentMuxes.get(peerId as PeerId);
+    if (existing) return existing;
+    const peer = await this.findPeer(peerId);
+    if (!peer) {
+      throw new Error(`Peer ${peerId.slice(0, 12)}... could not be found on the network.`);
+    }
+    await this.connectToPeer(peer);
+    const mux = this._paymentMuxes.get(peerId as PeerId);
+    if (!mux) {
+      throw new Error(`Failed to establish a payment channel with peer ${peerId.slice(0, 12)}...`);
+    }
+    return mux;
   }
 
   /**
