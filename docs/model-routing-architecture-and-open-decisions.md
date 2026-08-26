@@ -566,10 +566,199 @@ Everything else in this document is decided. What's left:
 **From Levanto:**
 
 3. Measure `topUp` gas on Base before locking in daily over monthly, or vice versa (§6.4).
-4. Daily (default, §6.4) vs. monthly reserve cadence — not locked either way. Daily needs measured `topUp` gas near $0.006/tx to hold the same 1%-of-revenue bar monthly holds at $0.18/tx (item 3); if real Base gas lands meaningfully higher, monthly (or something between the two) is the better trade despite losing daily's simplicity, lowest average blocked capital, and same-day seller revenue. If monthly is chosen instead, its own sizing question resurfaces: should the first `topUp()` after the one-day bootstrap ramp jump straight to a full month's ceiling, or raise it by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost.
+4. Daily (default, §6.4) vs. monthly reserve cadence — not locked either way. Daily needs measured `topUp` gas near $0.006/tx to hold the same 1%-of-revenue bar monthly holds at $0.18/tx (item 3); if real Base gas lands meaningfully higher, monthly (or something between the two) is the better trade despite losing daily's simplicity, lowest average blocked capital, and same-day seller revenue. If monthly is chosen instead, its own sizing question resurfaces: should the first `topUp()` after the one-day bootstrap ramp jump straight to a full month's ceiling, or raise it by less (e.g. a week) and grow only once a subscriber shows they'll stick around? §6.4's table only weighs gas cost against average blocked capital — it doesn't weigh the risk of locking $18.55 of ceiling on a brand-new subscriber's very first successful day. Not a loss-of-funds risk — the ceiling is a maximum, not spent money, and `requestClose()`/`withdraw()` recovers it within 15 minutes — but blocked capital sitting unused until a subscriber notices and cancels is still a real cost. **A further, independent point in daily's favor, from `AntseedDeposits.sol`'s real credit-limit math (not previously weighed here): a brand-new buyer starts at exactly the $10 `BASE_CREDIT_LIMIT`, zero bonuses. Monthly's own bootstrap jump to ~$18.55 exceeds that limit outright — a brand-new buyer literally cannot complete monthly's bootstrap ramp until they've accrued credit-limit bonuses first. Daily's $0.59–$1.18 initial ceiling fits comfortably under $10 for any buyer, day one.**
 5. How does versioning work for `routing-client`/`routing-server` in general, beyond the wire-protocol `"v": 1` field (§4.4), which only covers the request/response schema? Does `routing-server`'s own code version (distinct from Sage's `artifactVersion`) need tracking; does `routing-client`'s version matter given it's potentially third-party code (§G3) talking to a peer that might be a different version; how are `routing-server`/Sage deployments and rollouts sequenced without breaking in-flight requests? (The digest sub-question this originally raised is resolved: `artifactVersion`/`lambdaVersion` are dropped from the digest's field list — the routing peer stores its own λ/price calibration history directly, since it isn't user-related data, and correlates against `predictedCostUsd`/`observedCostUsd` by `period` instead.)
+6. How does the buyer learn the correct daily subscription price? Nothing in §6 specifies discovery — `dailyAmountUsdc` (§6.2/§6.3) is a bare constant the buyer side is configured with, and the subscription gate (software-architecture doc §3.3) accepts whatever cumulative was signed each day without checking the amount, so the seller doesn't enforce or publish a canonical figure either. Contrast with ordinary per-token model pricing, which sellers advertise via peer metadata and the routing peer surfaces on every ranked candidate (§4.4) — the buyer can see what it will be charged before committing. The subscription fee has no equivalent: no field in the `/_antseed/route` response carries a current price, so a routing peer changing its price has no wire mechanism to communicate that, and buyer/seller configuration of the same number can silently drift out of sync with no way for either side to detect it. Genuinely unresolved — no direction chosen.
+7. The cached-token estimator's exact formula (§4.3) is invented, not validated: an exponentially-weighted moving average of the observed cache-hit ratio per (conversation, model, peer) with `alpha=0.5`, plus a flat 3-minute decay window standing in for real provider prompt-cache TTL behavior. Neither the smoothing factor nor the decay window is grounded in measured cache-expiry data from any real provider — both were picked as reasonable defaults, not derived. Needs validation (or at least provider-specific tuning) against real cache-hit telemetry before the estimate can be trusted to meaningfully affect routing decisions.
+8. `sagePrompt` (§4.4's wire schema) is currently sent as literal, raw last-user-turn text (head+tail trimmed for size) — not a feature vector or embedding. But the real Sage integration's own ranking entry point (`rank_candidates_from_vector` in `sage_model_router`) expects a **precomputed vector**, not raw text — its own name says so. Nothing built so far performs that conversion anywhere; the mock sidecar sidesteps the question entirely by faking quality scores mostly from the model name, barely touching `sagePrompt`'s actual content. Open question, genuinely unresolved: should feature extraction happen client-side (the buyer computes a vector locally and sends *that* instead of raw text — meaningfully more private, since prompt content would never leave the device) or server-side (the routing peer receives raw text and vectorizes it before calling Sage)? Whichever is chosen changes what actually crosses the wire in §4.4's `sagePrompt` field.
+9. The toggle-on-gap catch-up burst's worst-case backlog happens to always fit within a buyer's `AntseedDeposits` credit limit under today's constants, but this isn't a structurally guaranteed relationship — worked through the actual numbers: credit limit at `K` days since first channel is `$10 + $0.50×K` (ignoring the seller-diversity bonus, worst case); worst-case catch-up backlog is `min(K, 30) × $0.59` (capped at $17.70 by `catchUpCapDays`). Checking both branches (K≤30 and K>30), the credit limit covers the worst-case backlog for every K under the current constants — so the catch-up mechanism never actually hits the credit-limit wall as things stand today. But `BASE_CREDIT_LIMIT`/`TIME_BONUS`/`MAX_CREDIT_LIMIT` are generic, protocol-wide AntSeed constants, set independently of Levanto's $0.59/day rate or 30-day catch-up cap — nothing structurally ties them together. If either side's constants ever change on their own (AntSeed lowers `TIME_BONUS`, Levanto raises its daily rate or `catchUpCapDays`), this safe margin isn't protected and needs re-checking, not assumed to still hold.
+
+**Implemented since the list above was written:** the `allowedPeerIds` fallback model source, the usage-independent daily signing trigger, `baselinePrices` population, the real host-side `signDailyIfNeeded` wiring, `routing_decisions` ledger persistence, `Router.onResult` requestId correlation, pinned-continuation ledger rows, the subscription gate's `authMax` check, routing-peer-unreachable error handling, the sidecar-down generic error revert, the durable digest payment-history store, the digest's `/_antseed/route/digest` path suffix, and the CQT dial's Auto-selected visibility gate — see §14 and the runlog for what each one actually does and why.
 
 **Before any savings number goes public:** state which baseline the percentage is measured against, and keep it visually separate from AntSeed's own savings-versus-retail figure (§9.5).
+
+---
+
+## 14. Decisions confirmed during implementation
+
+The sections above left the following mechanisms unspecified. Each was filled in during
+implementation and reviewed; they're additive to, not a replacement for, the rest of this
+document.
+
+1. **The ranking model's local call is a private implementation detail, not part of the
+   `/_antseed/route` contract.** The routing peer talks to its ranking model (Sage, or a
+   stand-in for it) over a single local endpoint, `POST /rank`, taking `{models: string[],
+   contextTokens: number, cqt: number}` and returning `{qualities: Record<model, number>}` — a
+   flat per-model quality score in [0, 1]. This lives entirely inside the routing-server's own
+   process boundary and has no bearing on the public `/_antseed/route` schema (§4.4).
+
+2. **`ConversationIdentity` lives in `packages/node`, not `apps/cli`.** `Router.selectRoute` —
+   part of the public `Router` interface any router plugin, including third-party ones,
+   implements — takes `conversation: ConversationIdentity | null`. The type has to live
+   alongside `Router` in `packages/node` for that signature to typecheck without `packages/node`
+   depending on the CLI app; `apps/cli` re-exports it from `@antseed/node` for its own call
+   sites.
+
+3. **`/_antseed/route` registration mirrors the existing `Prover`/`/_antseed/attest` pattern.**
+   A seller-side plugin claims the reserved routing path the way a `Prover` claims the attest
+   path: a generic `RoutingServerHandler` interface, a `registerRoutingServerHandler()` method
+   on `AntseedNode` (a single slot, not a list — a seller runs at most one routing-server), and
+   a dispatch branch in the seller request handler that 404s if nothing is registered and
+   otherwise delegates entirely, forwarding the response as-is. `packages/node` carries none of
+   the actual routing/ranking logic — only this generic registration and dispatch. The real
+   handler (subscription gating, calling the ranking model, computing the ranked response) is
+   instantiated and registered by the routing-server implementation itself, before the node
+   starts.
+
+4. **The new-user-message gate is keyed `${tool}:${sessionKey}`, not `parentSessionKey`.** A
+   tool-loop continuation (the same last user message repeating through a tool-call/tool-result
+   round trip) reuses the last routing decision with no network call; a genuinely new user
+   message re-routes.
+
+5. **A conversation with no `ConversationIdentity` to key on always routes — no content-hash
+   fallback.** The gate can only pin a decision when it has something to key on; without a
+   `ConversationIdentity` at all, it can't tell a tool-loop continuation apart from a genuinely
+   new message, so every call routes fresh. A content-hash-based key (keying by a hash of the
+   message text instead of session identity) was considered and rejected: even where it could
+   pin correctly, a decision reached that way has no real conversation to attribute it to,
+   which means the `routing_decisions` ledger row for it would need different handling than an
+   identity-backed row — added complexity not justified just to save one network round trip on
+   an edge case, versus the current behavior's simplicity and its one real cost (never silently
+   skipping billing-relevant routing).
+
+6. **A digest submission is distinguished from a routing request by an explicit
+   `/_antseed/route/digest` path suffix, not body shape.** The caller states its intent via the
+   URL; there is no shape-based guessing, and no ambiguity for a genuinely malformed routing
+   request that happens to be missing `sagePrompt`. `packages/node`'s dispatch
+   (`ANTSEED_ROUTE_PATH`) also matches `ANTSEED_ROUTE_DIGEST_PATH`, both delegating to the same
+   `RoutingServerHandler.handleRoute` — no new interface method, no new plugin type, no new
+   `PaymentMux` message type, no new codec; the private routing-server handler distinguishes the
+   two via `req.path`, which was already part of every call. The subscription gate runs before the
+   body is parsed at all for a routing request, since telling a digest apart from a routing
+   request no longer requires reading the body first.
+
+7. **The daily digest reports the day that just closed (yesterday), not a running today-so-far
+   tally.** §2.7 says the digest fires on the same daily cadence as signing but doesn't say
+   which day's numbers it should carry. At the moment it fires (the first routing call of a
+   new calendar day), today's own ledger rows don't exist yet — and §3.6's retention model
+   treats each day's digest as a permanent, accumulating record, which only makes sense as a
+   closed day's tally rather than a partial one that would look different depending on when
+   during the day it happened to send.
+
+8. **A failed digest send is caught and swallowed, never surfaced or allowed to block the
+   routing call it rides alongside.** Directly implements §2.7's own principle ("not required
+   for correct routing to work") as code: a send failure just gets retried on the next
+   `selectRoute` call rather than erroring or getting permanently stuck, and never delays or
+   breaks the user's actual chat request.
+
+9. **CQT dial position labels: "Cheapest," "Cheaper," "Balanced," "Higher quality," "Best
+   quality."** §8.1 only names the middle, default position ("Balanced") — the other four
+   needed some label for the UI to be usable. Kept plain and literal, respecting §8.1's own
+   copy constraint that the dial is relative, not a spend target (no "save X%" language).
+
+10. **Model disclosure's streaming-path gap (§4.6/§8.3) is fixed.** `attachStreamingAntseedHeaders`
+    now attaches `x-antseed-provider`/`x-antseed-service`, resolved the same way the
+    non-streaming path already does — closing the exact gap the software-architecture doc
+    itself names ("a real gap... in the streaming path specifically"). The desktop UI already
+    read `provider`/`service` into its per-message metadata; it just never had real streaming
+    data to read, and never rendered it even when present. One line added to the existing
+    per-message meta row, no new UI component.
+
+11. **`actionSelectVprModel` special-cases `"levanto-auto"` and dispatches through
+    `handleServiceChange` with no explicit peer id, instead of going through the normal
+    `resolveVprChatOption` peer-scoring path.** That normal path would always return null for
+    the sentinel, since no real seller advertises `"levanto-auto"` as a model. Confirmed by
+    tracing the real code — not assumed — that `handleServiceChange` already treats an absent
+    peer id as "no pin," falling to `'auto'` route mode with the conversation's peer left
+    unset, which is exactly the "no fixed peer, buyer-proxy's `selectRoute` picks both"
+    behavior Auto needs. This already existed for an unrelated reason (peer-less dropdown
+    picks on other models) — no new peer-resolution or IPC machinery was actually required,
+    contrary to an earlier assumption.
+
+12. **"Levanto Auto" is pulled out of `VprModelDropdown`'s normal favoriting/recommending
+    computation and rendered by its own bespoke row, in its own slot above Favorites/
+    Recommended.** §4.3 explicitly asks for a dedicated slot and its own component, since
+    Auto is a flat subscription with no per-token price — mixing it into the shared
+    ranked/favorited list would need special-casing inside logic built for real catalog
+    entries, or show a broken-looking blank price line. Reuses the dropdown's existing CSS
+    classes rather than new markup.
+
+13. **The savings dashboard's data reaches the desktop UI over the existing localhost-HTTP
+    pattern (`resolveProxyPort` + `fetch` against buyer-proxy's own reserved-path admin API),
+    not new IPC.** The desktop main process already talks to the buyer daemon this way for
+    other data (discover-rows, metering) — added `/_antseed/routing-decisions` (GET)
+    alongside those existing handlers, reading `router.getRoutingDecisions?.() ?? []`. An
+    earlier pass had assumed this needed genuinely new IPC machinery; tracing how the
+    existing data already reaches the desktop found the transport already there.
+
+14. **New optional `Router.getRoutingDecisions?(): RoutingDecisionRow[]` on the shared `Router`
+    interface (`packages/node`).** A router implements it if it keeps a local
+    `routing_decisions` ledger; `RoutingDecisionRow` itself moved to `packages/node` too
+    (previously duplicated inside `router-levanto`) so any router package can reference the
+    same type without depending on Levanto's specifically. Optional and additive — a router
+    that doesn't implement `selectRoute` has no reason to implement this either, so no existing
+    router plugin changes. Without it, the host's savings-dashboard endpoint would have no
+    generic way to read a router's ledger without hardcoding a dependency on one specific
+    router package.
+
+15. **`computeRouterSavings` implements §4.6's middle savings tier literally: actual paid vs.
+    one fixed reference model's real AntSeed price at the time of each decision.** Reads
+    `RoutingDecisionRow.baselinePrices` (populated per §7 in the list below) directly, keyed by
+    an explicit `baselineModel` parameter that defaults to `DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL`
+    (`'claude-opus-5'`) until the §8.4 dropdown exists to let a buyer choose a different one. An
+    earlier pass of this computation compared each row's own actual model against today's retail
+    price instead, as a stand-in for this exact field not existing yet — see the runlog for that
+    history; this description covers current behavior only.
+
+16. **"Router savings" renders as its own `VprStatTile`, separate from and never combined with
+    the existing "Saving"/"Saved" tile, on both `VprHomeView.tsx` and `VprActivityView.tsx`.**
+    Both are actual-paid-vs-retail-reference savings by the same underlying math — Router
+    savings is just scoped to the requests Auto actually routed, not all buyer usage. §4.6's
+    own diagram requires them shown together, never netted into one combined number, "otherwise
+    the router looks responsible for savings that actually come from AntSeed's marketplace."
+    Renders only when `computeRouterSavings` returns non-null — nothing shown (not a zero or
+    dash) for a buyer who's never used Auto, rather than implying the feature applies to them.
+
+17. **`allowedPeerIds`'s re-filter fallback model is `defaultRoutedModel`** (the pre-existing
+    "antseed" alias's currently-resolved target, `buyer.state.json`), passed to `selectRoute` as
+    a host-owned parameter the same way `conversation` already is — not `baselineSuggestion`,
+    which has no real connection to a buyer's allowlist.
+18. **A routing peer that's unreachable, timed out, or responded with a non-OK status throws a
+    `RoutingPeerError` from `selectRoute` instead of returning `null`.** `null` is reserved for
+    exactly one case: the request's model isn't the Auto sentinel at all.
+19. **The ranking-sidecar failure path returns a generic error, not a distinguishable status.**
+    `/_antseed/route`'s caller is never told which internal component failed.
+20. **The subscription gate additionally requires the channel's currently-signed cumulative
+    (`StoredChannel.authMax`) to be nonzero**, closing the window where `reserve()`'s
+    zero-amount "reserve proof" alone let a channel pass the gate.
+21. **The digest submission path is an explicit `/_antseed/route/digest` URL suffix**, not
+    body-shape sniffing — `packages/node`'s dispatch matches either path, both delegating to the
+    same `RoutingServerHandler.handleRoute`.
+22. **The routing peer keeps a durable payment-history record, separate from live
+    `SellerPaymentManager` session state, so a buyer can still submit a final digest after
+    closing their channel.** Recorded whenever a routing request clears the subscription gate;
+    no anonymization (unlike the digest itself — decisions doc §6.8 permits retaining
+    subscription status with raw peer identity).
+23. **`RoutingDecisionRow.baselinePrices` is populated from a hardcoded curated model list**
+    (`DEFAULT_BASELINE_MODELS = ['claude-opus-5', 'gpt-5.6-sol']` — placeholder names, pending
+    the real model hull), collapsed across peers to the cheapest input-price offer per model.
+24. **The `routing_decisions` ledger persists to disk as an append-only JSON-lines file** when a
+    data directory is configured, surviving a buyer process restart.
+25. **`Router.onResult` correlates by requestId, not peer**, so two concurrent requests routed
+    to the same peer can no longer mis-pair predicted vs. actual outcomes.
+26. **A pinned tool-loop continuation writes its own `routing_decisions` row**, reusing the
+    predicted fields of the real decision it was pinned to, with `routingLatencyMs: null`.
+27. **Daily signing has a real host-side implementation in `apps/cli`, wired via
+    `Router.configureDailySigning`, and a usage-independent trigger via
+    `Router.triggerDailySigningCheck`** on a background interval — both new, generic, optional
+    `Router` capabilities, not specific to `router-levanto`. Handles bootstrap, ordinary days,
+    and the toggle-on-gap catch-up burst (including the two-call top-up-then-settle sequence);
+    full mechanics and the two design corrections this surfaced are in the runlog, not repeated
+    here.
+28. **The CQT dial is visible only when "Levanto Auto" is the currently selected model.**
+
+See the runlog for the full implementation history behind items 17–28 above — what each one
+actually does, why, and what alternatives were considered.
 
 ---
 

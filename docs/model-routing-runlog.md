@@ -19,6 +19,529 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] Final verification pass: full test suites, decisions doc cleanup, real on-chain suite reconfirmed
+
+Closing pass after implementing everything with a decided direction from the runlog walkthrough
+(§13 items 8, 9, 10, 11, 12, 13, 14, 15a, 16, 17, 19, 20, 21 -- items 6 and 18 stay open, no decided
+direction to implement against).
+
+**Full test suites, run clean:** `antseed-fork/plugins/router-levanto` 56/56, `antseed-fork/apps/desktop`
+renderer 354/354, `antseed-fork/apps/cli` 453/453 (`node --test`, real build), `antseed-fork/packages/node`
+1013/1013 across 92 files, `levanto-routing-server` 35/35 including the real on-chain e2e suite
+(2/2, genuinely re-run against a fresh anvil chain + freshly deployed contracts, not just previously
+cached). Also fixed one unrelated pre-existing test gone stale against an earlier segment's CQT dial
+work (`apps/cli/src/config/loader.test.ts`), found only by running the full suite rather than
+targeted subsets.
+
+**Did not extend the real on-chain e2e suite with a new test specific to task #26's host-side
+wiring**, despite that being the original ask, for two concrete reasons rather than time pressure
+alone: (1) `apps/cli` has no `exports`/`main` field and isn't designed to be imported as a library,
+so `createSignDailyIfNeeded` can't be pulled into `levanto-routing-server`'s test without adding a
+cross-repo dependency that inverts the existing architecture (levanto-routing-server is the
+seller-side implementation; apps/cli is the buyer-side CLI application, not a shared library); (2)
+the anvil instance this suite already spawns has no `--block-time` flag, i.e. it auto-mines
+instantly, so a new test wrapping the same `BuyerPaymentManager` calls in `createSignDailyIfNeeded`'s
+exact sequence would exercise the polling/retry logic no differently than task #26's own scripted-mock
+test already does (both would confirm on the first read) -- it would prove the sequence type-checks
+against real `BuyerPaymentManager` types, which the existing two on-chain tests plus task #26's nine
+scripted tests already jointly establish. The existing on-chain suite was re-run and reconfirmed
+clean after every change in this implementation pass, including the two changes that touch
+`LevantoRoutingServerHandler.handleRoute` directly (items 19's payment-history recording and item
+20's path-based dispatch, both exercised for real by this suite's own `handler.handleRoute` calls).
+
+**Decisions doc cleanup:** removed the now-implemented items from §13's "what's left" list (it had
+grown to include items whose direction was decided and then actually built, which would mislead a
+reader into thinking they were still open) and added summary entries 17-28 to §14, each pointing to
+this runlog for full detail rather than re-explaining what's already written here. Rewrote §14 item
+15 (`computeRouterSavings`) to describe current behavior plainly rather than as a forward-looking
+"once item 10 lands" note, per this project's own rule that spec prose states the design as it is,
+not as a change log. §13 now keeps only: items 1-5 (original AntSeed/Levanto asks, still open),
+item 6 (subscription price discovery -- no decided direction), item 7 (cached-token estimator
+formula, needs real telemetry to validate -- not something "decided" so much as flagged as
+unvalidated), item 8 (`sagePrompt` raw-text-vs-vector -- no decided direction), and item 9 (the
+credit-limit/catch-up-backlog coincidence, a standing observation rather than an actionable item).
+
+Both repos committed locally after this pass (see commit messages for the exact file lists) -- no
+push, per standing instruction.
+
+---
+
+## [2026-08-26] Implemented: usage-independent daily signing trigger (decisions doc §13 item 9)
+
+Before this, daily signing only ever fired from inside `selectRoute()` -- a buyer who leaves the
+Auto toggle on but stops chatting would silently stop accruing real signed days (and the digest
+gate would eventually 402 them) even though the toggle itself was never switched off, contradicting
+SS6.2's "billing tracks the toggle, not activity."
+
+**New `Router.triggerDailySigningCheck?(): Promise<void>`** (`packages/node/src/interfaces/buyer-router.ts`),
+same additive/generic pattern as `configureDailySigning`/`getRoutingDecisions`. `LevantoRouter`
+implements it as a one-line call into the same private `ensureSignedToday()` `selectRoute()` already
+calls internally -- the "at most one real signature per calendar day" bookkeeping (`lastSignedDayKey`)
+is genuinely shared, not duplicated, so a background tick and a real chat request on the same day
+correctly defer to whichever ran first, in either order.
+
+**New `scheduleDailySigningChecks(router, intervalMs, onError)`** (`apps/cli/src/proxy/daily-subscription-signing.ts`,
+alongside task #26's signing closure -- same file, same concern) -- fires once immediately (so a
+buyer who opts in but never chats that day doesn't wait a full interval for the first signature),
+then on `intervalMs`; returns a cleanup function. Errors are caught and handed to `onError`, never
+thrown -- a failed background tick must never crash the host process, and the next tick retries.
+Extracted as its own small, directly-testable pure function (taking a narrow `DailySigningTrigger`
+interface, not the concrete router) specifically so this piece has real test coverage without
+needing a live P2P node -- `apps/cli/src/cli/commands/buyer/start.ts`'s own `.action()` callback is
+otherwise established (by `start.test.ts`'s existing scope, confirmed by reading it) as
+too-imperative-to-unit-test plumbing; this logic was worth pulling out rather than leaving inline
+and untested there.
+
+Wired into `start.ts` right alongside `configureDailySigning`, at a 15-minute interval (`.unref()`'d
+so it never keeps the process alive on its own), with cleanup registered via the existing
+`setupShutdownHandler`. 15 minutes is arbitrary and not from any doc -- the router's own
+once-per-day gate makes the exact interval a tradeoff between "how promptly a new calendar day gets
+noticed" and "how often a needless call happens on an already-signed day," not a correctness
+question; a background tick against an unconfigured/no-op router costs one cheap function call.
+
+**Tests**: five new `node:test` cases in `daily-subscription-signing.test.ts` for
+`scheduleDailySigningChecks` (immediate fire, repeated ticking, cleanup actually stops ticking,
+errors reach `onError` instead of throwing, safe no-op for a router without the capability) using
+real short intervals rather than faked timers -- this piece is pure scheduling/error-handling logic,
+not calendar-day-sensitive like task #26's signing closure, so real short intervals are simpler and
+sufficient. Four new tests in `plugins/router-levanto/src/router.test.ts` for
+`configureDailySigning`/`triggerDailySigningCheck`, including both orderings of "a background tick
+and a real chat request land on the same day" to directly prove the shared-gate claim above, not
+just assert it in a comment. Full suites re-run clean: `apps/cli` (453/453), `router-levanto`
+(35/35), `packages/node`, `levanto-routing-server`, and `apps/desktop`'s renderer typecheck all
+unaffected.
+
+---
+
+## [2026-08-26] Implemented: real host-side daily signing wired into apps/cli (decisions doc §13 item 11)
+
+The single biggest remaining gap: `signDailyIfNeeded` had a real implementation on
+`BuyerPaymentManager` (`signCumulativeAuth`, `configureFlatFeeSigning`, `topUpReserve`,
+`reconcileReserveAmount` — all built and proven on real anvil in an earlier segment) but nothing in
+a real running buyer process ever called any of it. It's wired now, end to end.
+
+**New `Router.configureDailySigning?(signDailyIfNeeded)` optional interface method**
+(`packages/node/src/interfaces/buyer-router.ts`), same additive pattern as `getRoutingDecisions?()`
+— generic across any router that needs subscription-style signing, not specific to
+`router-levanto`. `LevantoRouter` implements it by mutating `config.signDailyIfNeeded` in place
+(construction happens before the node starts; the real closure needs `node.buyerPaymentManager`,
+which only exists once payments are configured, so it has to arrive later via this setter).
+
+**Two small additions to `AntseedNode`** (`packages/node/src/node.ts`): `getOrConnectPaymentMux(peerId)`
+(connects if needed, mirroring `requestChannelClose`'s own find-then-`connectToPeer` pattern; there
+was no public way to get a `PaymentMux` for an arbitrary peer otherwise) and a `channelsClient`
+getter (needed to read real on-chain state after a top-up — see below). Also added `LEVANTO_SELLER_PEER_ID`
+to `router-levanto`'s configSchema (the routing peer's P2P identity is distinct from its HTTP URL;
+neither existed as a configured value before this, so `signDailyIfNeeded`'s `sellerPeerId` guard in
+`ensureSignedToday()` was unconditionally a no-op even before today). Added several previously-missing
+exports to `packages/node/src/index.ts` (`PaymentMux`, `FlatFeeSigningConfig`, `PerRequestAuthResult`,
+`SpendingAuthPayload`, `AuthAckPayload`) — discovered because `apps/cli`'s tsconfig does NOT exclude
+`*.test.ts` from typecheck (unlike `router-levanto`/`levanto-routing-server`, which do), so writing a
+real, typechecked test for this surfaced several types that existing e2e tests elsewhere import from
+`@antseed/node` without ever actually being typechecked against it.
+
+**New `apps/cli/src/proxy/daily-subscription-signing.ts`** — `createSignDailyIfNeeded(node, options)`
+builds the actual closure. Takes a narrow `DailySigningNode` interface (`buyerPaymentManager`,
+`channelsClient`, `getOrConnectPaymentMux`) rather than the concrete `AntseedNode` class, specifically
+for testability; `AntseedNode` satisfies it structurally, no adapter needed at the real call site
+(`apps/cli/src/cli/commands/buyer/start.ts`, wired in right after `node.start()` succeeds, gated on
+`router.configureDailySigning && paymentsConfig?.enabled`). Handles three cases:
+
+- **Bootstrap** (no existing session): `authorizeSpending` reserves exactly one day's charge (SS6.3,
+  not `FIRST_SIGN_CAP`), signs day 1, then one top-up prepares tomorrow's ceiling (SS6.5's Day-1 row)
+  — a top-up, not a second signature.
+- **Ordinary day**: one `signCumulativeAuth` call, requesting `dailyAmountUsdc × catchUpCapDays`
+  ("everything owed") every time — `signCumulativeAuth` internally clamps to what's actually allowed
+  (real elapsed days since its own private last-sign timestamp, `catchUpCapDays`, and the current
+  ceiling), so the caller never computes the real target itself. A top-up fires afterward only to
+  prepare for next time, gated on the post-sign 65%-threshold flag `signCumulativeAuth` already
+  returns.
+- **Catch-up after a toggle-on gap** (SS6.7): the ceiling may already be exhausted from the gap.
+  Hardest part, and where two real design corrections happened during implementation (both caught by
+  writing real tests against a real `BuyerPaymentManager`, not assumed correct from reading code):
+  1. **Whether to top up before or after signing genuinely matters, and can't be decided from
+     `topUpNeeded` alone.** `topUpNeeded` is only available *after* a sign call, but signing first
+     when the ceiling is already exhausted doesn't fail — it silently succeeds as a same-tick no-op
+     (nothing new fits under the exhausted ceiling) that still touches
+     `BuyerPaymentManager`'s private last-sign timestamp, permanently losing the real backlog depth
+     for every subsequent call. So the module predicts, from public state only
+     (`session.updatedAt`, which mirrors that private timestamp — both are set together,
+     unconditionally, at the end of every real `signCumulativeAuth` call), whether the upcoming sign
+     would be ceiling-clamped below what's genuinely owed, and tops up first when it would be.
+  2. **A top-up gets no wire acknowledgement at all**, confirmed by reading
+     `BuyerPaymentManager.handleAuthAck`'s own comment ("top-ups remain pending until an on-chain
+     session read observes their ceiling"). Reading `channelsClient.getSession()` immediately after
+     sending a top-up would very likely observe the pre-top-up deposit and reconcile to a stale
+     value — worse than not reconciling at all, since it looks like a real resync. The module polls
+     (500ms interval, 30s timeout, mirroring `BuyerPaymentNegotiator._waitForLockConfirmation`'s
+     shape for the same underlying concern — waiting for a seller-side on-chain action to land —
+     though that one polls a local ack flag and this one has no ack to poll) until the real deposit
+     increase is observed before reconciling. A timeout isn't fatal: the next signing cycle sees the
+     ceiling still exhausted and retries the whole sequence.
+
+**$0.59/day, 30-day catch-up cap hardcoded in `start.ts`**, not configurable per-router yet — no wire
+mechanism exists for a buyer to learn the correct price from the routing peer itself (decisions doc
+SS13 item 6, explicitly out of scope for this pass, no decided direction).
+
+**Tests**: `apps/cli/src/proxy/daily-subscription-signing.test.ts` (new, real `node:test`, genuinely
+typechecked) uses a real `BuyerPaymentManager` throughout — all the clamping/elapsed-day/ceiling logic
+under test is genuine — with an unreachable RPC URL (deposit checks degrade to a logged warning,
+confirmed by reading `topUpReserve`'s own try/catch, never blocks) and a scripted `PaymentMux`/
+`ChannelsClient` standing in for the network edges. Four tests cover bootstrap, an ordinary day (real
+fake-clock time advance via `node:test`'s built-in `t.mock.timers`, not a hand-rolled substitute —
+an earlier version of this test mutated `session.updatedAt` directly, which doesn't work: that field
+is a fresh read from the channel store each call, not something mutating one returned object
+round-trips through, and doesn't touch `BuyerPaymentManager`'s own private last-sign timestamp
+either — the resulting false-pass is exactly why real fake-clock control replaced it), the catch-up
+scenario (this is what caught design correction #1 above), and the top-up polling/retry behavior
+(caught #2 above). Full suites re-run clean after every change in this entry: `apps/cli` (448/448),
+`packages/node` (1013/1013 across 92 files), `levanto-routing-server` (33/33 + the real on-chain e2e
+suite, unaffected by anything in this entry). Also fixed one unrelated pre-existing test
+(`apps/cli/src/config/loader.test.ts`) that had gone stale against the CQT dial's default routing
+preferences from an earlier segment of this project, found only because this entry's work was the
+first time the full `apps/cli` suite was run end to end during this implementation pass.
+
+---
+
+## [2026-08-26] Implemented: digest wire mechanics switched to an explicit path suffix (decisions doc §13 item 20)
+
+Added `ANTSEED_ROUTE_DIGEST_PATH = '/_antseed/route/digest'` alongside the existing
+`ANTSEED_ROUTE_PATH` (`packages/node/src/interfaces/plugin.ts`). `seller-request-handler.ts`'s
+dispatch now matches either path, both delegating to the same `RoutingServerHandler.handleRoute` --
+no new interface method, no new plugin type, no new `PaymentMux` message type: `req.path` was
+already part of every `SellerRequest`, so the handler distinguishes the two itself.
+`LevantoRoutingServerHandler.handleRoute` (`levanto-routing-server`) now checks `req.path` first and
+routes to `handleDigest` directly, instead of parsing the body and checking for an absent
+`sagePrompt` field. `router.ts`'s `sendDailyDigestIfNeeded` now POSTs to `${routingPeerUrl}/_antseed/route/digest`
+instead of the shared routing path.
+
+**Gate-ordering side effect eliminated, as anticipated by item 20's own text:** since telling a
+digest apart from a routing request no longer requires parsing the body first, the subscription
+gate for a routing request now runs *before* any JSON parsing happens again -- restoring the
+original intended order (§14 item 6's body-sniffing choice had forced body-parsing first, which
+meant a malformed body from an unsubscribed buyer returned 400 instead of 402; that's fixed as a
+direct consequence of this change, not a separate fix).
+
+Updated `docs/model-routing-architecture-and-open-decisions.md` §14 item 6 in place to describe the
+current mechanism plainly (per this project's own rule: the decisions doc states the design as it
+is, never as a change log -- that rule is for spec prose in general, not just this one file).
+Deliberately left §13 item 20 itself (and the other now-resolved §13 items from this pass) as
+written for now rather than renumbering/pruning the open-items list piecemeal after every task --
+that cleanup happens once, coherently, in the final verification pass (task #27) rather than
+repeatedly across many small edits that risk breaking cross-references between items.
+
+Also widened `levanto-routing-server/src/http-server.ts`'s thin test-only HTTP harness (used by
+`thin-loop.test.ts`'s real-HTTP e2e coverage) to accept both paths, matching production dispatch.
+Updated `routing-server-handler.test.ts`'s digest-related tests to send to the new suffix path via
+a new `digestReq()` helper (distinct from the existing `req()`, which stays on the routing path),
+and added a dedicated test asserting the digest send actually hits `/_antseed/route/digest` in
+`router.test.ts`.
+
+**Left as a pre-existing gap, not introduced by this change:** `packages/node`'s
+`seller-request-handler.ts` dispatch logic has no dedicated unit test anywhere in either repo --
+the widened `if` condition is covered only indirectly, through `levanto-routing-server`'s thin HTTP
+harness (which reimplements a simplified version of the same dispatch, not the real
+`SellerRequestHandler` class). Building real test scaffolding for `SellerRequestHandler` (a large
+class with `PeerConnection`/`PaymentMux`/`ProxyMux` dependencies) was judged disproportionate to
+this one-line dispatch change; flagged here rather than silently skipped.
+
+---
+
+## [2026-08-26] Implemented: durable payment-history store for the digest gate (decisions doc §13 item 19)
+
+New `levanto-routing-server/src/payment-history-store.ts`: a `PaymentHistoryStore` interface
+(`recordPaidDay(buyerPeerId, day)` / `hasEverPaid(buyerPeerId)`), an `InMemoryPaymentHistoryStore`
+for tests, and a real file-backed `FilePaymentHistoryStore` for production -- a single JSON object
+keyed by buyer peer id, written atomically (tmp + rename), mirroring `ConversationStore`'s
+established pattern (`antseed-fork/apps/cli/src/proxy/conversation-store.ts`) rather than
+`RoutingLedger`'s append-only JSONL log (task #19): this is a small, upsert-heavy keyed record --
+one entry per distinct buyer, updated in place -- not an ever-growing append log, so the whole-file
+rewrite pattern fits better here.
+
+`LevantoRoutingServerHandler.handleRoute` now calls `paymentHistory.recordPaidDay(buyerPeerId,
+todayKey())` immediately after `isSubscribedToday` passes -- serving a routing request IS proof
+this buyer had a real, non-bootstrap signed cumulative on file today (task #14's `authMax > 0`
+check already verified that), so this needs no new signal, just recording one that already exists.
+`handleDigest`'s gate changed from `hasSession(buyerPeerId)` alone to `hasSession(buyerPeerId) ||
+paymentHistory.hasEverPaid(buyerPeerId)`: `SellerPaymentManager.hasSession()`/`getChannelByPeer()`
+only ever see the buyer's currently-ACTIVE channel, so a buyer who closed their channel after
+genuinely paying and using the service could never submit a final digest for that last real period
+-- exactly the gap item 19 describes. The "not an open write endpoint for an arbitrary
+never-subscribed peer id" guarantee is preserved: a peer with neither an active session nor any
+recorded payment history is still rejected with 402.
+
+**No anonymization/hashing here, unlike the digest store** -- decisions doc SS6.8's own retention
+list explicitly allows "subscription status" to be retained with raw peer identity permanently; the
+hashing requirement is specific to the digest (SS6.9, usage-profile-adjacent data), not to coarse
+payment-history records.
+
+**Scope boundary respected:** stayed entirely within `levanto-routing-server`; did not add a new
+query method to `SellerPaymentManager`/`ChannelStore` in `packages/node` even though `ChannelStore`
+likely already retains closed-channel rows durably in SQLite (a query surfacing that data could
+have replaced this new store). The software-architecture doc explicitly keeps subscription-gate
+ownership inside the routing-server plugin, not `packages/node` ("kept here... per that doc's
+explicit ownership" -- `subscription-gate.ts`'s own header comment); adding a new public query
+surface to a shared, foundational package for one plugin's need would cut against that established
+boundary, so a self-contained store scoped to this plugin was the better-fitting choice even though
+it duplicates data `ChannelStore` may already hold.
+
+Added `payment-history-store.test.ts` (new file, real filesystem tests, no mocking -- proves
+persistence survives a simulated process restart) and four new tests in
+`routing-server-handler.test.ts` covering: a served routing request records payment history, a
+gate-failed request does not, a digest is accepted for a closed-channel buyer with payment history,
+and a digest is still rejected for a peer with neither signal.
+
+---
+
+## [2026-08-26] Implemented: RoutingDecisionRow.baselinePrices populated; computeRouterSavings rewritten to use it (decisions doc §13 item 10, §14 item 15 superseded)
+
+`RoutingDecisionRow` (`packages/node/src/interfaces/buyer-router.ts`) gained `baselinePrices:
+Record<string, {inUsdPerM, outUsdPerM, cachedInUsdPerM}>`. `router.ts`'s `selectRoute` computes it
+once per ranked response via a new `computeBaselinePrices()` (`plugins/router-levanto/src/router.ts`),
+filtering to a hardcoded `DEFAULT_BASELINE_MODELS` curated list and collapsing across peers to the
+cheapest input-price offer per model. The value is duplicated onto every `PinnedDecision` built from
+that response (same pattern already used for `cqt`, since it's a per-response, not per-candidate,
+value) and threaded through the allowedPeerIds fallback branch and the pinned/reused continuation
+path (task #21) so every ledger row -- real decision or reused dispatch -- carries it.
+
+**Placeholder model names, not final:** `DEFAULT_BASELINE_MODELS = ['claude-opus-5', 'gpt-5.6-sol']`
+-- picked from this codebase's own existing catalog code (`apps/desktop/.../catalog/recommended.ts`
+already treats these as distinct "notable variant" flagship slots), not invented fresh, matching
+SS8.4's "the most expensive, most capable flagship — the top GPT or Claude model." Real names will
+follow the actual model hull (§7) once it exists, per the user's own note when this item was
+discussed.
+
+**"Best available offer" collapsing rule, not specified in the ground truth:** lowest `inUsdPerM`
+wins when a curated model has multiple sellers in one ranked response. Chosen because there's no
+fixed token mix available at this layer to combine input and output into one true total cost, and
+input price is the simplest, most defensible single-axis tiebreaker — logged as a decision, not
+treated as obviously correct.
+
+**Scope extension beyond the literal task:** also rewrote `computeRouterSavings`
+(`apps/desktop/src/renderer/modules/routing/router-savings.ts`) to consume `baselinePrices`
+directly, per §14 item 15's own forward note ("Once this lands, computeRouterSavings should be
+rewritten to sum the real, stored baselinePrices per row directly instead of approximating... that
+removes the approximation entirely"). It now implements SS4.6's middle tier literally -- actual
+paid vs. one fixed reference model's real AntSeed price *at the time of each decision* -- instead of
+the previous stand-in (actual vs. today's retail price for each row's own actual model, reusing
+`computeMeasuredSavings`'s math). Signature changed: drops the `OpenRouterReferenceMap` parameter
+entirely (no longer needed -- the row's own `baselinePrices` snapshot replaces it) and gains an
+optional `baselineModel` parameter defaulting to `DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL =
+'claude-opus-5'` (duplicated from, not imported from, `router-levanto`'s list -- that package is
+buyer/Node-side with an `fs` dependency now, no cross-boundary import into renderer UI code is
+intended). No SS8.4 dropdown UI exists yet to let a buyer choose a different reference model; the
+parameter exists so that UI, whenever built, has something to plug a selection into rather than
+needing another signature change. Updated both call sites (`VprHomeView.tsx`, `VprActivityView.tsx`)
+and rewrote `router-savings.test.ts` for the new semantics.
+
+---
+
+## [2026-08-26] Implemented: pinned tool-loop continuations get their own ledger row (decisions doc §13 item 14)
+
+`PinnedDecision` (`plugins/router-levanto/src/conversation-state.ts`) gained the predicted fields
+(`predictedCostUsd`, `predictedInputTokens`, `predictedCachedInputTokens`, `predictedOutputTokens`,
+`cqt`) alongside the routing/pricing fields it already carried. `selectRoute`'s new-user-message
+gate's pinned-reuse branch now calls `ledger.recordPending(req.requestId, {...})` before returning
+the reused candidate, reading those fields straight off the pinned decision (same model, same
+predicted cost/tokens/cqt as the real decision it's pinned to) with `routingLatencyMs: null` --
+matching `RoutingDecisionRow.routingLatencyMs`'s own field doc ("null when the gate skipped the
+call entirely"). Each reused dispatch still gets its own `requestId` (a real HTTP request, just one
+that skipped the network call to the routing peer), so it still resolves through the normal
+`onResult` -> `recordResult` flow (task #20's requestId-keyed correlation) and produces its own row
+with its own real actual outcome, joined against the reused predicted fields.
+
+Simplified `selectRoute`'s real-decision path as a side effect: since each ranked candidate now
+carries its own predicted fields directly, the separate `predictedByPeer` lookup map (built once,
+read once, right before the final `recordPending` call) became redundant and was removed --
+`winner.predictedCostUsd` etc. read directly instead.
+
+Added a new test in `router.test.ts`'s ledger describe block that drives a real decision followed
+by a real pinned continuation on the same conversation, and asserts the second dispatch's row
+carries the first decision's predicted fields but its own distinct actual outcome and a null
+`routingLatencyMs`.
+
+---
+
+## [2026-08-26] Implemented: routing_decisions ledger persists to disk (decisions doc §13 item 12)
+
+`RoutingLedger` (`plugins/router-levanto/src/ledger.ts`) now optionally persists as
+`routing-decisions.jsonl` in a buyer data directory -- one JSON row appended per line, per resolved
+decision -- and reloads them synchronously on construction so a fresh `LevantoRouter` instance
+continues where a prior process left off. Chosen format/pattern: mirrors `ConversationStore`'s
+established local-state convention (`apps/cli/src/proxy/conversation-store.ts` -- sync load in the
+constructor, corrupt-input tolerance, a serialized write queue with a `flush()` for tests) but as an
+append-only JSON-lines log rather than a whole-file rewrite: `ConversationStore`'s pattern fits a
+small, bounded, frequently-*mutated* set of records; `routing_decisions` is the opposite shape --
+unbounded, write-once-per-row, read-mostly -- so rewriting the entire file on every new decision
+would get slower over time for no benefit. No new dependency: plain `node:fs`, not SQLite (unlike
+`ChannelStore`) -- `router-levanto` had zero runtime dependencies before this pass, and the access
+pattern here (append a row, read all rows back, no querying) doesn't need a real database.
+
+`LevantoRouterConfig` gained an optional `dataDir` field; omitting it keeps the ledger exactly as
+in-memory-only as before this pass (no regression for existing callers/tests). The generic plugin
+loader path (`index.ts`'s `createRouter`) also gained an optional `LEVANTO_DATA_DIR` config key
+for the same purpose, though the real host wiring (task #26) will likely construct `LevantoRouter`
+directly rather than through that generic string-config path.
+
+**Left open, not decided here:** no retention/pruning policy exists for this ledger -- the file
+grows indefinitely. Nothing in the decisions or software-architecture docs specifies a retention
+window for `routing_decisions` (unlike the daily digest's fixed daily cadence), so inventing a cap
+would be guessing rather than implementing something decided. Whoever builds the real savings
+dashboard against this data should either confirm unbounded retention is fine at expected scale, or
+this needs its own explicit decision.
+
+Added `plugins/router-levanto/src/ledger.test.ts` (new file) -- real filesystem tests (temp
+directories, no mocking) covering: persists and reloads across a simulated process restart,
+accumulates multiple rows via real appends, tolerates a corrupt trailing line on reload without
+losing the rows around it, and the no-`dataDir` in-memory-only path still works unchanged.
+
+---
+
+## [2026-08-26] Implemented: Router.onResult correlates by requestId, not peer (decisions doc §13 item 13)
+
+`Router.onResult` (`packages/node/src/interfaces/buyer-router.ts`) gained an optional
+`requestId?: string` field on its result object -- the same id `selectRoute` already receives via
+`req.requestId` (`SerializedHttpRequest`, stable across a peer walk for one client request). Both
+`buyer-proxy.ts` call sites now pass `requestId: requestForPeer.requestId` through. Only
+`LevantoRouter` implements `onResult` meaningfully (checked -- `router-local` doesn't implement
+`selectRoute`/`onResult`'s ledger-correlation path at all), so this is the only router affected in
+practice.
+
+`RoutingLedger`'s pending-decision map (`plugins/router-levanto/src/ledger.ts`) is now keyed by
+requestId instead of peerId -- `recordPending`/`recordResult` renamed their parameter accordingly;
+`recordResult` gained a separate `peerId` parameter since the ledger row still needs `actualPeer`
+independent of the correlation key. `LevantoRouter.onResult` silently drops (no ledger write, no
+throw) a result carrying no `requestId` at all -- an honest "nothing to correlate against," not a
+guess, matching how the project has handled other no-signal cases (e.g. the unkeyable-conversation
+gate). Added a new regression test in `router.test.ts` that reproduces item 13's exact scenario --
+two different conversations both routed to peer `0xAAA` before either resolves, results arriving
+out of order -- and asserts each one's actual outcome pairs with its own request's predicted
+fields, not the other's; this would have failed under the old peerId-only keying.
+
+---
+
+## [2026-08-26] Implemented: selectRoute throws a clear RoutingPeerError instead of returning null (decisions doc §13 item 16)
+
+`LevantoRouter.selectRoute` no longer returns `null` when the routing peer is unreachable, times
+out, or responds with a non-OK status (including 402 "not subscribed today") — all three now throw
+a new exported `RoutingPeerError` (`kind: 'unreachable' | 'rejected'`, plus `statusCode` for the
+rejected case, with the message read from the peer's own JSON error body when present). `null` is
+now reserved for exactly one case: the request's model isn't the Auto sentinel at all.
+
+Scope note: decisions doc item 16's own text is framed around "unreachable/timeout," but its
+justification explicitly treats the 402 "not subscribed" case as already sharing the same intended
+behavior — the software-architecture doc (§2.2's note) independently already asserts the
+not-subscribed branch "is meant to reject cleanly," which the implementation had never actually
+matched (it silently returned `null` same as everything else in the `!res.ok` branch). Fixing both
+failure classes together, rather than only the literally-named one, closes a real inconsistency
+between that doc and the code instead of leaving a documented-but-false claim about current
+behavior in place.
+
+Investigated whether it's safe to let this throw propagate up through `buyer-proxy.ts`'s
+`selectRoute` call site (the task's own instruction): confirmed yes — `_handleRequest`'s caller
+already wraps the whole method in a catch-all that turns any uncaught error into a 502 with the
+error's own message (`buyer-proxy.ts`, around the `createServer` callback), so no new plumbing was
+needed there. Deliberately did **not** add a `RoutingPeerError`-specific catch in `buyer-proxy.ts`
+to render a nicer JSON error shape for this one plugin's error type — the exact same code block
+already carries the comment "Host code carries no knowledge of any sentinel string; that's entirely
+the plugin's business" (decisions doc §G3, open ecosystem), and special-casing one plugin's error
+class by name in host code would contradict that. The generic 502 fallback is host-agnostic and
+already works uniformly for any third-party router plugin that throws, not just this one.
+
+---
+
+## [2026-08-26] Implemented: allowedPeerIds fallback uses defaultRoutedModel (decisions doc §13 item 8)
+
+`Router.selectRoute` (`packages/node/src/interfaces/buyer-router.ts`) gained an optional 5th
+parameter, `defaultRoutedModel?: string | null` — the pre-existing "antseed" alias's currently
+resolved target, host-owned state (`buyer.state.json`'s `defaultRoutedModel`, already tracked
+in-memory by `buyer-proxy.ts` as `this._defaultRoutedModel`), passed the same way `conversation`
+already is. No filesystem access needed in the plugin — the host was already holding this value in
+memory at the one real `selectRoute` call site (`buyer-proxy.ts`'s fixed-model peer-narrowing
+replacement), so it's threaded straight through as a new argument. `LevantoRouter.selectRoute`'s
+`allowedPeerIds` re-filter fallback (§4.4) now synthesizes candidates using `defaultRoutedModel`
+instead of Sage's `baselineSuggestion.model` — the two have no real connection; `baselineSuggestion`
+is Sage's own cheap/simple pick, not necessarily a model this buyer has actually allowlisted a
+peer for. Synthesized candidates carry `null` for `inputUsdPerMillion`/`outputUsdPerMillion` (no
+real price data exists for an arbitrary defaultRoutedModel/peer pair), and the fallback now
+correctly gives up (returns `null` from `selectRoute`, matching the existing empty-ranked-list
+path) when `defaultRoutedModel` isn't set, rather than silently using an unrelated model. Updated
+existing fallback tests in `router.test.ts` and added a new one for the no-default-route case.
+
+---
+
+## [2026-08-26] Implemented: CQT dial gated on Auto being the selected model (decisions doc §13 item 21)
+
+`VprPreferencesView.tsx`'s cost/quality slider now renders only when `vprRouteSelection.model` is the
+"Levanto Auto" entry — previously unconditional regardless of selection. Added a null-safe
+`isLevantoAutoSelected(model)` helper next to the existing `isLevantoAutoEntry` in
+`apps/desktop/src/renderer/modules/routing/levanto-auto.ts` (the raw entry check doesn't accept
+`null`, and `vprRouteSelection.model` is `null` before any model is chosen). Unit-tested the pure
+helper directly rather than full-rendering the connected view component: this repo's view tests
+(`ImageGenerationPlaceholder.test.tsx`) use `renderToStaticMarkup` with no jsdom dependency, but
+`VprPreferencesView` calls `document.body` at render time via `activeThemeMode()`, which throws
+under Vitest's default node environment — adding a jsdom dependency for one small gate wasn't
+justified, so the gating logic moved to a plain, directly-testable function instead, following the
+same pattern `isLevantoAutoEntry` already established in this exact module.
+
+---
+
+## [2026-08-26] Implemented: sidecar-down error reverted to generic (decisions doc §13 item 17)
+
+`LevantoRoutingServerHandler.handleRoute`'s try/catch around `sidecar.rank()` — which returned a
+distinguishable `503 sidecar_unavailable` — is removed. The failure now propagates as a thrown
+error, caught generically by `seller-request-handler.ts`'s routing dispatch branch (production) or
+`http-server.ts`'s catch-all (the thin test harness), both already returning a generic 500. Matches
+the user's explicit call: a third-party `routing-client` caller shouldn't be handed which internal
+component failed. Replaced the old 503-specific test with one asserting `handleRoute` rejects rather
+than returning a distinguishable status.
+
+---
+
+## [2026-08-26] Implemented: subscription gate now requires authMax > 0 (decisions doc §13 item 15a)
+
+`isSubscribedToday` (`levanto-routing-server/src/subscription-gate.ts`) closed the bootstrap-reserve
+loophole: `reserve()`'s zero-amount "reserve proof" SpendingAuth bumped `updatedAt` to today without
+any real day ever being paid for, and the gate didn't check the signed amount at all. Added
+`authMax: string` to `SubscriptionSource.getChannelByPeer`'s return type (real `StoredChannel` already
+carries this field, so the production `SellerPaymentManager`-backed source needed no changes) and a
+`BigInt(channel.authMax || '0') > 0n` check alongside the existing `updatedAt is today` check. Item
+15b (checking the signed amount actually matches what's owed) remains unimplemented — still blocked
+on item 6's price-discovery gap, which is out of scope for this pass (no decided direction).
+
+Updated `routing-server-handler.test.ts` (new `RESERVED_BUT_UNPAID` fixture + regression test),
+`thin-loop.test.ts`'s inline fixtures, and `full-lifecycle.test.ts`'s real end-to-end bootstrap test —
+that last one now asserts, with a real `SellerPaymentManager`, that routing stays blocked immediately
+after `reserve()` and only unblocks once day 1's real cumulative is actually signed and accepted.
+
+---
+
+## [2026-08-26] Correction: `topUpReserve()`'s fixed-step ceiling raise is client-side, not on-chain
+
+**Type:** Correction to the entry directly below ("Real on-chain e2e"), not an edit to it — that
+entry stays as originally written; this appends the fix instead of rewriting history.
+
+**What was wrong:** that entry's "Two real on-chain constraints discovered" heading mislabeled
+both findings as on-chain. Only the second one (`AntseedDeposits`'s `BASE_CREDIT_LIMIT`) actually
+is. The first — `topUpReserve()`'s ceiling raise being a fixed step
+(`prevCeiling + config.maxReserveAmountUsdc` per call, not a target amount) — is a client-side
+JS implementation detail of that one `BuyerPaymentManager` method. The on-chain `topUp()`
+function itself accepts whatever `newMaxAmount` it's given; nothing about the contract enforces
+a fixed step. Confirmed by reading `packages/contracts/payments/AntseedChannels.sol`'s `topUp()`
+directly.
+
+**Why it matters beyond correcting the record:** whoever eventually builds the real host-side
+catch-up wiring (this file's "routing-client remaining pieces" entry; decisions doc §13 item 11)
+needs to account for this specifically as a *client method* limitation — either size
+`maxReserveAmountUsdc` generously enough that one `topUpReserve()` call always covers the
+worst-case backlog, or call it more than once for a very long gap. That's a real constraint on
+future work regardless of the mislabeling; only the "on-chain" framing was wrong.
+
+**Ground truth reference:** none — this corrects an inaccuracy in this runlog's own prior entry,
+not a deviation from or new decision about the ground-truth docs.
+
+---
+
 ## [2026-08-26] Real on-chain e2e: the subscription lifecycle proven against a genuinely live anvil chain
 
 **Type:** New test coverage, not a design change — but it surfaced one real gap in the
