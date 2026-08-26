@@ -19,6 +19,77 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] Real on-chain e2e: the subscription lifecycle proven against a genuinely live anvil chain
+
+**Type:** New test coverage, not a design change — but it surfaced one real gap in the
+existing mocked coverage and two real on-chain constraints worth recording for whoever writes
+the next payment-related test against a live chain.
+
+**What's new.** `levanto-routing-server/src/e2e/full-lifecycle-onchain.test.ts` runs the same
+subscription lifecycle `full-lifecycle.test.ts` already covers, but for real: a real `anvil`
+node, the real protocol contract set deployed via `antseed-fork/packages/contracts/script/Deploy.s.sol`
+(the same script `setup-local-test.sh` uses), a real staked seller identity, and
+`BuyerPaymentManager`/`SellerPaymentManager` with **no `channelsClient` mocking** — every
+`reserve()`, `topUp()`, and `settle()` in the two tests below is a genuine transaction,
+verified afterward by reading the deployed `AntseedChannels` contract's actual state back
+(`ChannelsClient.getSession()`), not by trusting the JS layer's own bookkeeping.
+
+**Real gap this surfaced, not previously exercised:** the existing mocked
+`full-lifecycle.test.ts` calls `authorizeSpending(sellerPeerId, buyerMux, DAILY_AMOUNT,
+undefined)` — passing `undefined` for the explicit reserve amount, which makes
+`authorizeSpending` reserve the buyer's *entire configured `maxReserveAmountUsdc`* ($10)
+upfront, not the documented $0.59 bootstrap amount (decisions doc SS6.3). Because of that,
+its catch-up-burst scenario never actually needs `topUpReserve()` — the $5.90 backlog fits
+inside the already-$10 ceiling from day one, so `seller.channelsClient.topUp` (mocked in that
+file) is never called at all despite being mocked, and the "proves the two-tx sequence" claim
+in that test's own doc comment was true only at the raw-contract level (`AntseedChannels.t.sol`'s
+Foundry tests), not through the actual `BuyerPaymentManager`/`SellerPaymentManager` JS
+integration layer. This new test bootstraps with the real, documented $0.59 amount instead,
+so its catch-up scenario genuinely needs and exercises `buyer.topUpReserve()` (raises the
+on-chain ceiling via a real `topUp()` tx) followed by `buyer.reconcileReserveAmount()` (syncs
+the client's cached ceiling from an on-chain read) before a fresh `signCumulativeAuth()` can
+sign the backlog — confirmed by first watching it fail with the backlog silently clamped to
+the *stale* pre-topUp ceiling, then fixing it, not assumed correct on the first try.
+
+**Two real on-chain constraints discovered while wiring the buyer side up, both by hitting
+real reverts and reading the contract, not by inspection alone:**
+- `topUpReserve()`'s ceiling raise is a **fixed step** (`prevCeiling + config.maxReserveAmountUsdc`
+  per call, confirmed by reading `buyer-payment-manager.ts`), not a target amount — the test's
+  buyer config sizes that step ($8) to comfortably clear the worst-case backlog in one call.
+- `AntseedDeposits.getBuyerCreditLimit()` caps a **fresh buyer's total deposit at
+  `BASE_CREDIT_LIMIT`** ($10, before any channel history exists to earn
+  `PEER_INTERACTION_BONUS`/`TIME_BONUS`) — a real `CreditLimitExceeded()` revert, not a bug in
+  this test's harness. Neither ground-truth doc mentions this limit; it's on-chain behavior
+  from `AntseedDeposits.sol`, logged here since it constrains how big a bootstrap+catch-up
+  scenario a fresh buyer identity can exercise at all without first building channel history.
+
+**Environment finding, not a code defect:** the same `forge script --broadcast` that runs in
+under 1 second standalone took 280s+ and made `anvil` drop transactions
+("Some transactions were discarded by the RPC node") when run inside this vitest suite's
+`beforeAll`, eventually crashing Foundry's broadcaster with an upstream divide-by-zero panic.
+Root cause, isolated by bisection (a minimal reproduction file, then adding pieces back one at
+a time): `anvil` was spawned with `stdio: ['ignore', 'pipe', 'pipe']` and a `.on('data', ...)`
+listener forwarding every line to `console.error` for debugging — piping and reading a
+chatty child process's stdout from inside a vitest worker measurably starved the process
+enough to make `anvil` unreliable under this sandbox's resource constraints. Fixed by spawning
+both `anvil` and the mock-Sage sidecar with `stdio: 'ignore'` — nothing in this file needs
+their console output. Confirmed the fix isn't a vitest-concurrency artifact: the suite passes
+identically under the default worker pool and constrained to a single thread. No permanent
+`vitest.config.ts` change was needed. Logged in case a future e2e file here reaches for
+verbose child-process logging again — this sandbox appears to punish it specifically for
+long-lived, chatty subprocesses.
+
+**Verification:** 4 consecutive clean runs of the new file (both default worker pool and
+single-threaded), then the full `levanto-routing-server` suite: 22/22 passing, no regressions.
+
+**Ground truth reference:** decisions doc SS6.2/SS6.3/SS6.7 (bootstrap amount, catch-up
+burst), payment-flow doc's Lifecycle section (`topUp()` then `settle()`) — now proven against
+a real chain, not just mocked RPC and a separate raw-contract Foundry suite. The credit-limit
+and fixed-step-size findings are new, undocumented on-chain behavior, not deviations from
+anything the docs specify.
+
+---
+
 ## [2026-08-26] Follow-up: Auto model-picker entry and savings dashboard actually built
 
 **Type:** Completes the two pieces the previous entry below scoped down. Revisiting after
