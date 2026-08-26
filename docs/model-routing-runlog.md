@@ -19,6 +19,58 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] P2P peer-discovery root cause found: NAT hairpinning on a same-machine devnet, not a DHT bug
+
+Investigated why a buyer on this local devnet can never discover/connect to the local routing-peer
+daemon over P2P — the blocker preventing any real end-to-end subscribe-and-route demo. Root cause,
+confirmed with direct evidence (not inferred): it is **not** a bug in AntSeed's DHT/discovery code.
+
+Reproduced twice with a real, freshly-configured `apps/cli buyer start --router levanto` process
+(`ANTSEED_DEBUG=1`, fresh data dir, correct `LEVANTO_ROUTING_PEER_URL`/`LEVANTO_SELLER_PEER_ID` env
+vars) against the live routing-peer daemon (`levanto-routing-server/src/local-peer-daemon.ts`,
+which correctly configures `publicAddress: '127.0.0.1:6892'`):
+
+- `findPeer`'s per-peer DHT topic lookup **succeeds** — it finds exactly one endpoint announcing
+  under the routing peer's topic. The DHT infohash mechanism itself works correctly.
+- But the endpoint address the DHT hands back is `86.148.105.51:6892` — this machine's real public
+  WAN IP — not `127.0.0.1`, despite the daemon's explicit local `publicAddress` config. This is
+  inherent to how Kademlia/BitTorrent-style DHT announce works: remote DHT nodes record the
+  *observed source address* of the announce packet (there's no other way for a NAT'd node's peers
+  to learn its address), not an application-supplied claim. The buyer's bootstrap list included
+  real public AntSeed bootstrap nodes, so the seller's announcement was relayed through them and
+  observed from the public internet side.
+- `MetadataResolver` then fails to fetch `http://86.148.105.51:6892/metadata: network error` —
+  the machine cannot connect back to its own public IP. This is classic NAT hairpin/loopback
+  failure, common on consumer routers and near-universal under WSL2, which adds its own additional
+  NAT layer between the Linux guest and the Windows host network.
+- Wildcard fallback (611 and 324 real endpoints across two runs) confirms the buyer genuinely
+  reached the live public AntSeed DHT swarm — this machine is not network-isolated, it's just
+  unable to hairpin back to itself.
+
+Attempted fix: restrict the buyer's bootstrap list to only the routing peer's local DHT port
+(`network.bootstrapNodes: ["127.0.0.1:6891"]` in a test config), to keep the whole discovery
+exchange on loopback and avoid the public-relay NAT-observation path entirely. This did **not**
+fully work as tried — the process still reported "3 bootstrap node(s)" instead of 1 and still
+resolved the public IP, meaning something beyond `apps/cli`'s `buildBuyerBootstrapEntries` is
+injecting additional bootstrap nodes that this pass didn't fully trace. Not fixed; flagged
+precisely rather than claimed complete.
+
+No existing direct-connect/manual-peer-address mechanism was found anywhere in the codebase that
+bypasses DHT-based address resolution (searched for `staticPeer`/`knownPeer`/`directPeer`/similar
+— nothing). Building one — "buyer knows peer X is reachable at this exact address, skip DHT
+resolution" — would be the correct general-purpose fix for same-machine/LAN devnet testing, but is
+real new plumbing and wasn't built in this pass; a real fix needs either that, or fully tracing and
+suppressing the extra bootstrap-node injection found above so a purely-local exchange never touches
+the public swarm at all.
+
+No regression test written: there is no fix yet to protect, and a test asserting "this currently
+fails" has low value. `local-peer-daemon.ts` was not modified. Test buyer processes started during
+this investigation were run from fresh temp data dirs, fully cleaned up (killed, temp dirs
+removed) — the live desktop-app-spawned buyer daemon and the routing-peer daemon were left
+untouched throughout.
+
+---
+
 ## [2026-08-26] A dedicated Preferences toggle now gates the daily subscription, not "Auto selected" — and closes a real, live consent gap it found
 
 User direction, verbatim: a completely separate toggle in Preferences to even enable the feature,
