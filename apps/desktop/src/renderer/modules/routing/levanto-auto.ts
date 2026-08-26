@@ -49,14 +49,25 @@ export function isLevantoAutoEntry(entry: Pick<VprModelCatalogEntry, 'provider' 
 
 /**
  * Null-safe wrapper around `isLevantoAutoEntry` for `vprRouteSelection.model`
- * (which is `null` before any model is chosen) -- the exact check the CQT
- * dial's visibility gates on (decisions doc SS13 item 21): the dial only
- * applies to "Levanto Auto" requests, so it should render only when Auto is
- * the currently selected model, not unconditionally.
+ * (which is `null` before any model is chosen). No longer what the CQT
+ * dial's visibility gates on -- decisions doc SS14 item 29 supersedes item
+ * 21's "gate on Auto being selected" with a dedicated Preferences toggle
+ * (`VprRoutingPreferences.autoSubscriptionEnabled`) instead, since a
+ * momentary model selection was never a real substitute for explicit,
+ * standing consent to a daily subscription charge. Kept for any other
+ * "is Auto the current selection" check that isn't a consent gate.
  */
 export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'> | null): boolean {
   return model !== null && isLevantoAutoEntry(model);
 }
+
+/**
+ * Minimum trust score enforced while `autoSubscriptionEnabled` is on
+ * (decisions doc SS14 item 29) -- on the *stored* 0-100 scale.
+ * `reputationScaleLabel` (modules/catalog/seller-format.ts) displays this
+ * scale as 0.0-10.0 (`score / 10`), so this constant is display "7.0".
+ */
+export const AUTO_SUBSCRIPTION_MIN_TRUST_SCORE = 70;
 
 /**
  * Idempotently prepends the Auto entry to a freshly-derived catalog. Safe to

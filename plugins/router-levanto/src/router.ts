@@ -210,6 +210,16 @@ export class LevantoRouter {
   private readonly ledger: RoutingLedger;
   private lastSignedDayKey: string | null = null;
   private lastDigestSentDayKey: string | null = null;
+  /**
+   * Most recently seen `routingPreferences` -- kept fresh from two paths:
+   * the host's `updateRoutingPreferences` push (fires on config-file change,
+   * including once at startup) and every `selectRoute` call. Needed because
+   * `ensureSignedToday`/`triggerDailySigningCheck` (the background-timer
+   * path, decisions doc SS13 item 9) have no `selectRoute` request to read a
+   * fresh `routingPreferences` parameter from -- without this cache they'd
+   * have no way to see the subscription-enable toggle at all.
+   */
+  private cachedRoutingPreferences: ModelRoutingPreferences | null = null;
 
   constructor(private readonly config: LevantoRouterConfig) {
     this.ledger = new RoutingLedger(config.dataDir);
@@ -252,6 +262,17 @@ export class LevantoRouter {
   }
 
   /**
+   * `Router.updateRoutingPreferences` (packages/node/src/interfaces/buyer-router.ts,
+   * decisions doc SS14 item 29) -- keeps `cachedRoutingPreferences` fresh
+   * outside of `selectRoute` calls, so the background daily-signing trigger
+   * below can see the subscription-enable toggle even on a day the buyer
+   * never sends a chat message at all.
+   */
+  updateRoutingPreferences(preferences: ModelRoutingPreferences): void {
+    this.cachedRoutingPreferences = preferences;
+  }
+
+  /**
    * `Router.triggerDailySigningCheck` (packages/node/src/interfaces/buyer-router.ts,
    * decisions doc SS13 item 9) -- lets a host-side background timer keep
    * billing continuous even on a day the buyer never sends a routable chat
@@ -269,8 +290,17 @@ export class LevantoRouter {
    * "before making any routing calls that day" ordering. At most one call
    * to signDailyIfNeeded per calendar day, however many times selectRoute
    * fires that day.
+   *
+   * Gated on `routingPreferences.autoSubscriptionEnabled` (decisions doc
+   * SS14 item 29) -- real money moves here (a signed SpendingAuth is a
+   * genuine payment authorization), so an explicit, current "yes" is
+   * required. "Unknown" (no preferences ever pushed -- `configureDailySigning`
+   * wired but `updateRoutingPreferences` never called, or a CLI-only caller
+   * with no preferences UI at all) is treated the same as "no": this must
+   * never default to signing.
    */
   private async ensureSignedToday(): Promise<void> {
+    if (!this.cachedRoutingPreferences?.autoSubscriptionEnabled) return;
     if (!this.config.signDailyIfNeeded || !this.config.sellerPeerId) return;
     const todayKey = calendarDayKey();
     if (this.lastSignedDayKey === todayKey) return;
@@ -375,6 +405,12 @@ export class LevantoRouter {
     routingPreferences: ModelRoutingPreferences | null,
     defaultRoutedModel?: string | null,
   ): Promise<RouteCandidate[] | null> {
+    // Kept fresh regardless of which model this particular call is for --
+    // the subscription-enable toggle is a standing preference, not tied to
+    // the model happening to be selected on this one request (decisions doc
+    // SS14 item 29).
+    if (routingPreferences) this.cachedRoutingPreferences = routingPreferences;
+
     const { model, lastUserText } = parseChatBody(req);
     // levanto-auto sentinel check is host-agnostic: any concrete model name
     // declines immediately, matching software-arch doc's "no sentinel

@@ -830,6 +830,9 @@ export class BuyerProxy {
           blockedPeerIds: [...config.routingPreferences.blockedPeerIds],
         }
       : null
+    if (this._routingPreferences) {
+      this._node.router?.updateRoutingPreferences?.(this._routingPreferences)
+    }
     this._now = config.now ?? (() => Date.now())
     this._server = createServer((req, res) => {
       this._handleRequest(req, res).catch((err) => {
@@ -1082,9 +1085,11 @@ export class BuyerProxy {
         allowedPeerIds: [...next.allowedPeerIds],
         blockedPeerIds: [...next.blockedPeerIds],
       }
+      this._node.router?.updateRoutingPreferences?.(this._routingPreferences)
       log(
         `Routing preferences reloaded: minTrust=${next.minTrustScore} maxInput=${next.maxInputUsdPerMillion} `
-        + `preferFree=${next.preferFreePeers} allow=${next.allowedPeerIds.length} block=${next.blockedPeerIds.length}`,
+        + `preferFree=${next.preferFreePeers} allow=${next.allowedPeerIds.length} block=${next.blockedPeerIds.length} `
+        + `autoSubscriptionEnabled=${next.autoSubscriptionEnabled ?? false}`,
       )
     } catch (err) {
       log(`Routing preferences reload ignored: ${err instanceof Error ? err.message : String(err)}`)

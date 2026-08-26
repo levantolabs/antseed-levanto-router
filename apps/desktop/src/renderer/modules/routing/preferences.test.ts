@@ -22,6 +22,7 @@ const fallbackPreferences: VprRoutingPreferences = {
   allowedPeerIds: [],
   blockedPeerIds: [],
   cqt: 5,
+  autoSubscriptionEnabled: false,
 };
 
 test('migrates the previous zero default to the new 6.0 minimum', () => {
@@ -80,6 +81,7 @@ test('valid VPR preferences and route selection save and load', () => {
     allowedPeerIds: ['peer-1'],
     blockedPeerIds: ['peer-2', 'peer-3'],
     cqt: 7,
+    autoSubscriptionEnabled: true,
   };
   const routeSelection: VprRouteSelection = {
     model: {
@@ -107,7 +109,13 @@ test('buyer config projection excludes the Desktop-only auto-routing toggle', ()
     allowedPeerIds: fallbackPreferences.allowedPeerIds,
     blockedPeerIds: fallbackPreferences.blockedPeerIds,
     cqt: fallbackPreferences.cqt,
+    autoSubscriptionEnabled: fallbackPreferences.autoSubscriptionEnabled,
   });
+});
+
+test('buyer config projection forwards the subscription-enable toggle (decisions doc SS14 item 29) -- real money gate, must not drop silently', () => {
+  const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, autoSubscriptionEnabled: true });
+  assert.equal(projected.autoSubscriptionEnabled, true);
 });
 
 test('cqt dial value (decisions doc SS8.1) round-trips through save/load', () => {

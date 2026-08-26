@@ -1,6 +1,25 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ConversationIdentity, PeerInfo, SerializedHttpRequest } from '@antseed/node';
+import type { ConversationIdentity, ModelRoutingPreferences, PeerInfo, SerializedHttpRequest } from '@antseed/node';
 import { LevantoRouter } from './router.js';
+
+/**
+ * Explicit consent to the daily subscription (decisions doc SS14 item 29) --
+ * `ensureSignedToday` requires this to be true before it will ever call
+ * `signDailyIfNeeded`. Most pre-existing signing tests below pass this where
+ * they previously passed `null`, since `null`/absent must mean "no consent
+ * seen yet," not "assume yes."
+ */
+function enabledPreferences(): ModelRoutingPreferences {
+  return {
+    preferFreePeers: false,
+    maxInputUsdPerMillion: 25,
+    minTrustScore: 60,
+    allowedPeerIds: [],
+    blockedPeerIds: [],
+    cqt: 5,
+    autoSubscriptionEnabled: true,
+  };
+}
 
 function conversation(sessionKey = 'sess-1'): ConversationIdentity {
   return { tool: 'claude-code', sessionKey, parentSessionKey: null, isUserThread: true };
@@ -200,8 +219,8 @@ describe('LevantoRouter.selectRoute', () => {
         fetchImpl: fetchImpl as unknown as typeof fetch,
       });
 
-      await router.selectRoute(req('levanto-auto', 'first'), [peer('0xAAA')], conversation('a'), null);
-      await router.selectRoute(req('levanto-auto', 'second'), [peer('0xAAA')], conversation('b'), null);
+      await router.selectRoute(req('levanto-auto', 'first'), [peer('0xAAA')], conversation('a'), enabledPreferences());
+      await router.selectRoute(req('levanto-auto', 'second'), [peer('0xAAA')], conversation('b'), enabledPreferences());
 
       expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
       expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
@@ -222,7 +241,7 @@ describe('LevantoRouter.selectRoute', () => {
         fetchImpl: fetchImpl as unknown as typeof fetch,
       });
 
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences());
 
       expect(order).toEqual(['sign', 'fetch']);
     });
@@ -236,9 +255,9 @@ describe('LevantoRouter.selectRoute', () => {
       });
       const conv = conversation();
 
-      await router.selectRoute(req('levanto-auto', 'hello'), [peer('0xAAA')], conv, null);
+      await router.selectRoute(req('levanto-auto', 'hello'), [peer('0xAAA')], conv, enabledPreferences());
       signDailyIfNeeded.mockClear();
-      await router.selectRoute(req('levanto-auto', 'hello'), [peer('0xAAA')], conv, null); // same message -- pinned
+      await router.selectRoute(req('levanto-auto', 'hello'), [peer('0xAAA')], conv, enabledPreferences()); // same message -- pinned
 
       expect(signDailyIfNeeded).not.toHaveBeenCalled();
     });
@@ -259,17 +278,18 @@ describe('LevantoRouter.selectRoute', () => {
         routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
       });
 
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences());
       expect(signDailyIfNeeded).not.toHaveBeenCalled(); // not wired yet
 
       router.configureDailySigning(signDailyIfNeeded);
-      await router.selectRoute(req('levanto-auto', 'a new message'), [peer('0xAAA')], null, null);
+      await router.selectRoute(req('levanto-auto', 'a new message'), [peer('0xAAA')], null, enabledPreferences());
       expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
     });
 
     it('triggerDailySigningCheck signs today independent of any chat request (decisions doc SS13 item 9)', async () => {
       const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+      router.updateRoutingPreferences(enabledPreferences());
 
       await router.triggerDailySigningCheck();
 
@@ -285,7 +305,7 @@ describe('LevantoRouter.selectRoute', () => {
         fetchImpl: fetchImpl as unknown as typeof fetch,
       });
 
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null); // real chat signs today
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences()); // real chat signs today
       expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
 
       await router.triggerDailySigningCheck(); // background tick, same day
@@ -299,12 +319,78 @@ describe('LevantoRouter.selectRoute', () => {
         routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
         fetchImpl: fetchImpl as unknown as typeof fetch,
       });
+      router.updateRoutingPreferences(enabledPreferences());
 
       await router.triggerDailySigningCheck(); // background tick signs first
       expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
 
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null); // real chat, same day
+      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences()); // real chat, same day
       expect(signDailyIfNeeded).toHaveBeenCalledTimes(1); // still just once
+    });
+
+    describe('subscription-enable gate (decisions doc SS14 item 29)', () => {
+      it('selectRoute never signs when autoSubscriptionEnabled is false', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
+
+        const result = await router.selectRoute(
+          req('levanto-auto'), [peer('0xAAA')], null,
+          { ...enabledPreferences(), autoSubscriptionEnabled: false },
+        );
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+        expect(result).not.toBeNull(); // routing itself is unaffected, only signing is gated
+      });
+
+      it('selectRoute never signs when routingPreferences is null (no consent ever seen -- must not default to "yes")', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
+
+        await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('triggerDailySigningCheck never signs when autoSubscriptionEnabled is false', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: false });
+
+        await router.triggerDailySigningCheck();
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('triggerDailySigningCheck never signs before any preferences have been pushed at all', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+
+        await router.triggerDailySigningCheck();
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('turning the toggle on via updateRoutingPreferences unblocks signing for a subsequent background trigger', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: false });
+        await router.triggerDailySigningCheck();
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: true });
+        await router.triggerDailySigningCheck();
+        expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+        expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
+      });
     });
 
     it('triggerDailySigningCheck does nothing when signDailyIfNeeded is not configured', async () => {

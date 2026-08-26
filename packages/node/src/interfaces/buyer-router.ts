@@ -165,6 +165,20 @@ export interface Router {
    * real chat request or from this same background trigger.
    */
   triggerDailySigningCheck?(): Promise<void>;
+
+  /**
+   * Optional, additive: pushed by the host whenever live `buyer.routingPreferences`
+   * changes (buyer-proxy's config-file watcher), including once at startup if
+   * preferences were supplied at construction. `selectRoute` already receives
+   * a fresh `routingPreferences` on every call, but `triggerDailySigningCheck`
+   * fires from a background timer with no request in flight and therefore no
+   * such parameter -- a router that needs live preference state outside of
+   * `selectRoute` (e.g. gating background signing on an explicit
+   * subscription-enable toggle, decisions doc SS14 item 29) implements this
+   * to receive it. A router that only ever needs `routingPreferences` inside
+   * `selectRoute` has no reason to implement this.
+   */
+  updateRoutingPreferences?(preferences: ModelRoutingPreferences): void;
 }
 
 // Duck-typed, not formally part of `Router`, but probed for by buyer-proxy

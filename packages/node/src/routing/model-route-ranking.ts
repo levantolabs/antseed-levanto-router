@@ -14,6 +14,15 @@ export type ModelRoutingPreferences = {
    * routers (e.g. router-local) that don't read it are unaffected.
    */
   cqt?: number;
+  /**
+   * Explicit opt-in to Auto model-routing's daily flat-fee subscription
+   * (decisions doc SS14 item 29, superseding item 28's "gate on Auto being
+   * selected") -- off by default. A router that gates real signing on this
+   * (e.g. router-levanto's `ensureSignedToday`) must treat "unknown"
+   * (preferences not yet supplied) the same as `false`, never as implicit
+   * consent. Optional so existing routers that don't read it are unaffected.
+   */
+  autoSubscriptionEnabled?: boolean;
 };
 
 export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
@@ -23,6 +32,7 @@ export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
   allowedPeerIds: [],
   blockedPeerIds: [],
   cqt: 5,
+  autoSubscriptionEnabled: false,
 };
 
 export type ModelRouteCandidate = {

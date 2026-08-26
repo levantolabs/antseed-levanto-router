@@ -759,6 +759,9 @@ document.
     full mechanics and the two design corrections this surfaced are in the runlog, not repeated
     here.
 28. **The CQT dial is visible only when "Levanto Auto" is the currently selected model.**
+    **Superseded by item 30 below** — a momentary model selection was never real, standing consent
+    to a recurring charge; kept here rather than rewritten, per this doc's own "state the design
+    plainly, don't rewrite history" discipline.
 29. **`sagePrompt` (§4.4's wire schema) stays raw, trimmed last-user-turn text — the client makes
     no change.** Feature extraction (turning that text into the vector `rank_candidates_from_vector`
     expects) happens **server-side, inside the routing peer**, matching `sage_model_router`'s own
@@ -769,9 +772,26 @@ document.
     proxy. Wiring a real Sage call into the mock sidecar's `ranking.ts` (which today ignores
     `sagePrompt`'s content entirely) is separate, later work — this only settles what crosses the
     wire, not the sidecar's internals.
+30. **A dedicated Preferences toggle, "Levanto Auto model routing," is the real enable switch for
+    the daily subscription — supersedes item 28.** Off by default. Its hint states plainly that
+    turning it on starts a real daily USDC charge. While it's on: the CQT dial renders (replacing
+    item 28's "gate on Auto being selected"), and the minimum-trust-score slider's floor locks to
+    70 on the stored 0–100 scale (displayed "7.0", `reputationScaleLabel` divides by 10) — snapped
+    up immediately if the buyer's current setting was lower, un-clamped (not lowered) if the toggle
+    is turned back off. The toggle is `VprRoutingPreferences.autoSubscriptionEnabled`, carried to
+    `router-levanto` through the same live config-file-watched `buyer.routingPreferences` bridge
+    `cqt`/`minTrustScore` already use (`packages/node`'s new optional `Router.updateRoutingPreferences`
+    hook, called by `buyer-proxy.ts` on every reload and once at startup, plus on every `selectRoute`
+    call). `LevantoRouter.ensureSignedToday` — the method that actually triggers a real signed daily
+    SpendingAuth, called from both `selectRoute` and the background `triggerDailySigningCheck` timer
+    — now refuses to sign unless this is explicitly `true`; an absent/unknown value is treated as
+    `false`, never as implicit consent. This closes a real, previously-live gap found while building
+    this: before this item, `ensureSignedToday` only checked that a routing-peer identity was
+    configured at all, so once `router-levanto` was the active router and a `sellerPeerId` was set,
+    the background signing timer would attempt to fire with zero consent gating — see the runlog.
 
-See the runlog for the full implementation history behind items 17–28 above, and for item 29's
-discussion — what each one actually does, why, and what alternatives were considered.
+See the runlog for the full implementation history behind items 17–30 above — what each one
+actually does, why, and what alternatives were considered.
 
 ---
 

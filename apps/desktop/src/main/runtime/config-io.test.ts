@@ -54,6 +54,8 @@ test('ensureConfig creates config with desktop buyer max pricing defaults', asyn
     minTrustScore: 60,
     allowedPeerIds: [],
     blockedPeerIds: [],
+    cqt: 5,
+    autoSubscriptionEnabled: false,
   });
   assert.equal(
     (config.seller as { maxConcurrentBuyers?: number }).maxConcurrentBuyers,

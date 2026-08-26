@@ -19,6 +19,65 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-26] A dedicated Preferences toggle now gates the daily subscription, not "Auto selected" — and closes a real, live consent gap it found
+
+User direction, verbatim: a completely separate toggle in Preferences to even enable the feature,
+clearly stating it starts a daily subscription; the CQT slider shows only when it's on; enabling it
+locks minimum reputation to 7.0+. Supersedes decisions doc §14 item 28 ("CQT dial visible only when
+Levanto Auto is the currently selected model") — see §14 item 30 for the corrected description;
+item 28's own text is left as originally written, not rewritten.
+
+**The reputation-scale mapping**, needed to get "7 or higher" right: `VprPreferencesView.tsx`'s
+minimum-trust-score slider stores 0–100 but displays it through `reputationScaleLabel()`
+(`modules/catalog/seller-format.ts`, `score / 10`) as 0.0–10.0. "7" on the display scale is
+`minTrustScore: 70` on the stored scale — the new `AUTO_SUBSCRIPTION_MIN_TRUST_SCORE` constant in
+`modules/routing/levanto-auto.ts`. While the toggle is on, the slider's `min` prop becomes 70
+(snapped up immediately on enable if the buyer's current value was lower); turning the toggle back
+off un-clamps the slider without lowering whatever value was left, since nothing asked for a
+"restore the prior value" feature and inventing one wasn't worth the extra state.
+
+**A real, pre-existing gap this closed, not just a UI addition**: before this change,
+`LevantoRouter.ensureSignedToday()` (the method that actually produces a real signed daily
+SpendingAuth) only checked that `signDailyIfNeeded` and `sellerPeerId` were configured — nothing
+checked any user consent state at all. Once `router-levanto` became the active router and a
+routing-peer identity was configured (both true in this session's own local demo setup, see the
+"real, running local routing-peer daemon" entry below), the host's background
+`triggerDailySigningCheck()` timer would have attempted to sign — and therefore genuinely spend —
+on an interval, with zero gating, regardless of whether "Levanto Auto" had ever actually been
+selected as a model. Verified this hadn't yet cost anything only because of the unrelated P2P
+peer-discovery bug logged in that same entry, not because of any consent check; that bug is not a
+gate this design is allowed to depend on.
+
+**The wiring**, since `ensureSignedToday`/`triggerDailySigningCheck` are called from a background
+timer with no per-request `routingPreferences` parameter to read: the desktop renderer already has
+a live bridge carrying `cqt`/`minTrustScore`/etc. from persisted preferences into the running buyer
+daemon process — `buyerModelRoutingPreferences()` writes into `buyer.routingPreferences` in
+`config.json` via IPC (`bridge.updateConfig`), and `apps/cli`'s `buyer-proxy.ts` watches that file
+and reloads `this._routingPreferences` on change. Extended that same bridge rather than inventing a
+new transport: added `autoSubscriptionEnabled?: boolean` to the shared `ModelRoutingPreferences`
+type (`packages/node/src/routing/model-route-ranking.ts`, default `false`), and a new optional
+`Router.updateRoutingPreferences(preferences)` hook (`packages/node/src/interfaces/buyer-router.ts`)
+that `buyer-proxy.ts` now calls on every config reload and once at construction, alongside the
+existing per-`selectRoute`-call parameter. `LevantoRouter` caches whichever arrives most recently
+(`cachedRoutingPreferences`) so the background-timer path always has a real, current answer instead
+of stale or absent state; `ensureSignedToday()` now refuses to sign unless that cache says
+`autoSubscriptionEnabled === true` — absent/unknown is treated as `false`, never as consent by
+default. New tests in `router.test.ts` prove both directions (blocks when off or unset, unblocks
+once explicitly turned on via either `selectRoute`'s parameter or `updateRoutingPreferences`).
+
+Existing tests asserting on `ModelRoutingPreferences`/`VprRoutingPreferences` object shapes needed
+the new field added to their fixtures (`router.test.ts`, `preferences.test.ts`, `loader.test.ts`);
+one of those (`config-io.test.ts`) was already stale before this change (missing `cqt` too, a
+leftover from an earlier pass) — fixed alongside rather than left half-broken next to a fix for the
+same root cause.
+
+Full test suites, run clean after: `router-levanto` 61/61 (was 56, +5 new gate tests),
+`apps/desktop` renderer 355/355 (was 354, +1), `apps/desktop` main 253/253 (was 252/253 — the
+stale `config-io.test.ts` fix), `apps/cli` 453/453. `packages/node`, `router-levanto`, `apps/cli`,
+and `apps/desktop`'s renderer and main process all typecheck clean.
+
+---
+
 ## [2026-08-26] New infrastructure: a real, running local routing-peer daemon
 
 Nobody had ever built the process that actually runs a Levanto routing peer.

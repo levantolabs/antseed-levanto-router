@@ -110,6 +110,11 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
       ? normalizePeerIdList(parsed.blockedPeerIds)
       : fallback.blockedPeerIds,
     cqt: readCqt(parsed.cqt, fallback.cqt ?? 5),
+    // Real-money consent (decisions doc SS14 item 29): defaults to off on
+    // any unrecognized/missing stored value, never on -- readBoolean's
+    // `fallback` here must itself be `false` (see DEFAULT_MODEL_ROUTING_PREFERENCES),
+    // not inherited from some other truthy default.
+    autoSubscriptionEnabled: readBoolean(parsed.autoSubscriptionEnabled, fallback.autoSubscriptionEnabled ?? false),
   };
 }
 
@@ -135,6 +140,7 @@ export function buyerModelRoutingPreferences(
     allowedPeerIds: validPeerIds(value.allowedPeerIds),
     blockedPeerIds: validPeerIds(value.blockedPeerIds),
     cqt: value.cqt,
+    autoSubscriptionEnabled: value.autoSubscriptionEnabled,
   };
 }
 

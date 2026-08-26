@@ -2,11 +2,11 @@ import { useMemo, useState } from 'react';
 import { HugeiconsIcon } from '@hugeicons/react';
 import { Moon02Icon, Sun02Icon, Tick02Icon } from '@hugeicons/core-free-icons';
 import { routesForSelectedModel } from '../../../modules/catalog/view-models';
-import { isLevantoAutoSelected } from '../../../modules/routing/levanto-auto';
 import { peerAccessSummaryLabel } from '../../../modules/routing/peer-access';
 import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
 import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
+import { AUTO_SUBSCRIPTION_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
@@ -35,10 +35,10 @@ export function VprPreferencesView({ onSelectView }: Props) {
   );
   const { allowedPeerIds, blockedPeerIds } = snap.preferences;
   const accessSummary = peerAccessSummaryLabel(allowedPeerIds.length, blockedPeerIds.length);
-  // CQT dial only applies to "Levanto Auto" requests (decisions doc SS8.1,
-  // SS13 item 21) -- gate visibility on Auto being the currently selected
-  // model rather than showing it unconditionally regardless of selection.
-  const isAutoSelected = isLevantoAutoSelected(snap.selection.model);
+  // Real gate on the daily subscription and the CQT dial (decisions doc
+  // SS14 item 29) -- a standing, explicit toggle, not a proxy for whatever
+  // model happens to be selected at this moment.
+  const autoSubscriptionEnabled = snap.preferences.autoSubscriptionEnabled ?? false;
 
   const selectTheme = (mode: ThemeMode) => {
     applyThemeMode(mode);
@@ -71,7 +71,25 @@ export function VprPreferencesView({ onSelectView }: Props) {
             )}
           />
 
-          {isAutoSelected ? (
+          <VprSettingRow
+            title="Levanto Auto model routing"
+            caption="(Daily subscription)"
+            hint="Turns on Auto model routing across all your chats. This starts a real daily USDC subscription charge — you're billed every day it's on, separate from any per-request model cost."
+            control={(
+              <VprToggle
+                checked={autoSubscriptionEnabled}
+                onChange={(next) => actions.updateVprRoutingPreferences({
+                  autoSubscriptionEnabled: next,
+                  ...(next && snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
+                    ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
+                    : {}),
+                })}
+                ariaLabel="Enable Levanto Auto model routing (starts a daily subscription)"
+              />
+            )}
+          />
+
+          {autoSubscriptionEnabled ? (
             <div className={styles.sliderGroup}>
               <div className={styles.sliderHead}>
                 <span className={styles.sliderTitle}>Cost / quality tradeoff</span>
@@ -114,14 +132,17 @@ export function VprPreferencesView({ onSelectView }: Props) {
               </span>
             </div>
             <VprSlider
-              min={0}
+              min={autoSubscriptionEnabled ? AUTO_SUBSCRIPTION_MIN_TRUST_SCORE : 0}
               max={100}
               step={5}
               value={snap.preferences.minTrustScore}
               onChange={(next) => actions.updateVprRoutingPreferences({ minTrustScore: next })}
               ariaLabel="Minimum trust score"
             />
-            <div className={styles.sliderHint}>Providers rated below this are never used</div>
+            <div className={styles.sliderHint}>
+              Providers rated below this are never used
+              {autoSubscriptionEnabled ? ' — locked to 7.0+ while Levanto Auto is on' : ''}
+            </div>
           </div>
 
           <div className={styles.sliderGroup}>
