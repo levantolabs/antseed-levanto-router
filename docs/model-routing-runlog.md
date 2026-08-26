@@ -19,6 +19,16 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-27] Auto silently rebound to a real model on every catalog refresh — a sibling of the earlier stranding-reset bug, in a function that never got the same fix
+
+A second, real bug in the same family as the `applyPeerAccessRules` stranding-reset fixed earlier tonight: after a successful Auto-routed send, the model selector would silently switch to whichever real model actually served the request (e.g. "glm-5.2"), and the next send would then fail with a real 502 `No policy-allowed peer currently serves model "glm-5.2"` — that model's peer has near-zero on-chain reputation (a mock provider with no real stake/channel history), and the subscription toggle locks the standard fixed-model routing pipeline's `minTrustScore` to 70, a floor Auto's own internal ranking doesn't enforce.
+
+Root cause: `apps/desktop/src/renderer/modules/chat/controller.ts`'s `applyChatServiceOptions` (fires on every discover-catalog refresh, not just once) resolves a "preferred" service value by matching the current selection against `optionCandidates` — built purely from real discovered rows (`projectRowsToChatServiceOptions`), which structurally never include the Auto sentinel (no real seller ever advertises `levanto-auto`). The match always misses for Auto, and the fallback chain (`findMatchingChatServiceOptionValue` twice, then `firstOptionFallback`) had no exemption for it — unlike `applyPeerAccessRules`'s equivalent reset, which was patched with an `isLevantoAutoSelected` guard earlier this session. `firstOptionFallback` is gated on `!hasActiveConversation`, so this fires most reliably during the timing window before a brand-new conversation is registered as active, silently and permanently rebinding `chatSelectedServiceValue` to whatever real model sorts first.
+
+Fixed by adding the same `isLevantoAutoSelected` exemption to `applyChatServiceOptions`: when the current selection is the Auto sentinel, `preferred` short-circuits to the existing `chatSelectedServiceValue` (a no-op reassignment), bypassing the real-options-only lookup/fallback chain entirely. Verified as a real regression, not a guess: wrote a test reproducing the exact scenario (Auto selected, a discover refresh resolving only real rows), confirmed it fails without the fix (`chatSelectedServiceValue` corrupted to `"unknownmodel-apeer-a"`, exactly the observed symptom) and passes with it. Full renderer suite 359/359 (358 + 1 new), no regressions.
+
+---
+
 ## [2026-08-27] Real signing succeeded, but the subscription still 402'd — three stacked disconnect/session bugs, all fixed and verified live
 
 A real, repeatable bug: `createSignDailyIfNeeded`'s `signDailyIfNeeded(sellerPeerId)` — the exact function `apps/cli`'s buyer wires into `router.configureDailySigning` — completed successfully (a real `AuthAck` received from the seller), yet the very next `/_antseed/route` request from the same buyer still 402'd as `not_subscribed_today`. Reproduced with a real throwaway buyer identity, real on-chain funding, and the live routing peer, not simulated. Root-caused with real evidence (`ANTSEED_DEBUG=1` on both sides, correlated logs), not guessed — three separate, stacked bugs, found and fixed one at a time as each was uncovered:

@@ -1315,8 +1315,23 @@ export function initChatModule({
     // chat into a chaotic-pm chat when the original peer's metadata briefly
     // dropped its service on re-hydration.
     const firstOptionFallback = hasActiveConversation ? null : (optionCandidates[0]?.value ?? null);
-    const preferred =
-      findMatchingChatServiceOptionValue(
+    // The Auto sentinel is exempt from the whole lookup/fallback chain below:
+    // no real seller ever advertises "levanto-auto", so `optionCandidates`
+    // (built purely from real discovered rows) can never contain it, and
+    // `findMatchingChatServiceOptionValue` always misses. Before this guard,
+    // that permanent miss fell through to `firstOptionFallback` — most
+    // dangerously during the timing window before a brand-new conversation
+    // is registered as active (`hasActiveConversation` false), silently and
+    // permanently rebinding a fresh Auto chat to whatever real model sorted
+    // first (e.g. "glm-5.2"), exactly the applyPeerAccessRules stranding bug
+    // fixed earlier, in this sibling function which lacked the same fix.
+    const currentIsLevantoAuto = isLevantoAutoSelected({
+      provider: currentSelection.provider ?? '',
+      serviceId: currentSelection.id,
+    });
+    const preferred = currentIsLevantoAuto
+      ? uiState.chatSelectedServiceValue
+      : findMatchingChatServiceOptionValue(
         optionCandidates,
         currentSelection.id,
         currentSelection.provider,

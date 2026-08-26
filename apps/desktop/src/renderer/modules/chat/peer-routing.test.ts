@@ -1436,6 +1436,39 @@ test('explicit dropdown pick overrides the VPR auto-selected model for a new cha
   assert.equal(uiState.vprModelPins['modelb'], 'peer-b');
 });
 
+test('a discover refresh with only real models never silently rebinds an active Auto selection', async () => {
+  installDomTimers();
+  const uiState = createInitialUiState();
+  const autoValue = `levanto${SEP}levanto-auto`;
+  uiState.chatSelectedServiceValue = autoValue;
+  uiState.vprRouteSelection = {
+    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    mode: 'auto',
+    peerId: null,
+  };
+  const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
+  const rows: DiscoverRow[] = [{ peerId: 'peer-a', serviceId: 'model-a' } as unknown as DiscoverRow];
+  const bridge: DesktopBridge = {
+    ...makeChatBridge(sends),
+    chatAiListDiscoverRows: async () => ({ ok: true, data: rows }),
+  };
+  const api = initChatModule({ bridge, uiState, appendSystemLog: () => undefined });
+
+  await waitFor(() => uiState.chatDiscoverRowsLoaded);
+  // The catalog now has exactly one real, sortable model ("model-a") and no
+  // entry for the Auto sentinel (no real seller ever advertises it) — this
+  // is precisely the shape that, before the fix, made
+  // findMatchingChatServiceOptionValue miss and fall through to whatever
+  // sorted first, silently rebinding chatSelectedServiceValue away from Auto.
+  assert.ok(uiState.chatServiceOptions.some((option) => option.id === 'model-a'));
+  assert.equal(uiState.chatSelectedServiceValue, autoValue);
+
+  api.sendMessage('still auto after refresh');
+  await waitFor(() => sends.length === 1);
+  assert.equal(sends[0]?.service, 'levanto-auto');
+  assert.equal(sends[0]?.provider, 'levanto');
+});
+
 test('active legacy conversation keeps its model without treating its saved peer as a pin', async () => {
   installDomTimers();
   const uiState = createInitialUiState();
