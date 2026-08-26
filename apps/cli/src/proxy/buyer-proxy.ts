@@ -2404,6 +2404,7 @@ export class BuyerProxy {
         peers,
         conversationIdentity,
         this._routingPreferences,
+        this._defaultRoutedModel,
       ) ?? null
 
       let candidates: Array<{
@@ -3119,6 +3120,7 @@ export class BuyerProxy {
             cachedInputTokens: telemetry.usage.cachedInputTokens,
             outputTokens: telemetry.usage.outputTokens,
             estimatedCostUsd: telemetry.estimatedCostUsd,
+            requestId: requestForPeer.requestId,
           })
         }
 
@@ -3212,6 +3214,7 @@ export class BuyerProxy {
             cachedInputTokens: telemetry.usage.cachedInputTokens,
             outputTokens: telemetry.usage.outputTokens,
             estimatedCostUsd: telemetry.estimatedCostUsd,
+            requestId: requestForPeer.requestId,
           })
         }
 

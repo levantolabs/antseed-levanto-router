@@ -55,6 +55,7 @@ test('createDefaultConfig includes shared model routing preferences', () => {
     minTrustScore: 60,
     allowedPeerIds: [],
     blockedPeerIds: [],
+    cqt: 5,
   });
 });
 

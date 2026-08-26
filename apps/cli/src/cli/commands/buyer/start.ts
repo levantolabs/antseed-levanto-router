@@ -16,6 +16,8 @@ import { ensurePluginsUpToDate } from '../../../plugins/drift.js'
 import { resolvePluginPackage } from '../../../plugins/registry.js'
 import { BuyerProxy, type DepositWatcherAbsenceReason } from '../../../proxy/buyer-proxy.js'
 import { DepositWatcher } from '../../../proxy/deposit-watcher.js'
+import { createSignDailyIfNeeded, scheduleDailySigningChecks } from '../../../proxy/daily-subscription-signing.js'
+import { log } from '../../../proxy/request-utils.js'
 import { curatedVerifierIds, resolveVerifierPolicy, type VerifierPolicy } from '../../../plugins/verifier.js'
 import { resolveEffectiveBuyerConfig, type BuyerRuntimeOverrides } from '../../../config/effective.js'
 import type { BuyerCLIConfig } from '../../../config/types.js'
@@ -398,6 +400,36 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       } catch (err) {
         nodeSpinner.fail(chalk.red(`Failed to connect: ${(err as Error).message}`))
         process.exit(1)
+      }
+
+      // Optional Router capability (model-routing decisions doc SS13 item
+      // 11) -- a router that needs daily/periodic payment signing (e.g. a
+      // subscription-priced routing peer) implements configureDailySigning
+      // to receive a real signing closure. Built here, after node.start(),
+      // because it needs node.buyerPaymentManager, which only exists once
+      // payments are configured -- constructing the router itself (above)
+      // happens before the node has started.
+      if (router.configureDailySigning && paymentsConfig?.enabled) {
+        // $0.59/day, 30-day catch-up cap -- decisions doc SS1/SS6.2/SS6.7.
+        // Hardcoded: no wire mechanism exists yet for a buyer to learn the
+        // correct price from the routing peer itself (decisions doc SS13
+        // item 6, out of scope for this pass -- no decided direction).
+        const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+          dailyAmountUsdc: 590_000n,
+          catchUpCapDays: 30,
+        })
+        router.configureDailySigning(signDailyIfNeeded)
+
+        // Usage-independent trigger (model-routing decisions doc SS13 item 9).
+        if (router.triggerDailySigningCheck) {
+          const DAILY_SIGNING_CHECK_INTERVAL_MS = 15 * 60 * 1000
+          const stopDailySigningChecks = scheduleDailySigningChecks(router, DAILY_SIGNING_CHECK_INTERVAL_MS, (err) => {
+            log(`Background daily signing check failed: ${err instanceof Error ? err.message : String(err)}`)
+          })
+          setupShutdownHandler(async () => {
+            stopDailySigningChecks()
+          })
+        }
       }
 
       if (paymentsConfig?.enabled) {
