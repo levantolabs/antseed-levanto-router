@@ -1412,7 +1412,7 @@ export function initChatModule({
     uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
       projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
       getCachedOpenRouterPrices(),
-    ));
+    ), uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false);
 
     // The selected model may only have been offered by a seller the new rules
     // exclude — leaving it selected would strand every send with no route.
@@ -1514,14 +1514,17 @@ export function initChatModule({
         uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
           projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
           getCachedOpenRouterPrices(),
-        ));
+        ), uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false);
       }
       // Warm the OpenRouter reference-price cache in the background; once it
       // resolves, re-stamp baselines onto the current catalog so the Home
       // "Popular" list can show the struck-through retail price.
       void ensureOpenRouterPrices().then((map) => {
         if (!map) return;
-        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(uiState.vprModelCatalog, map));
+        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(
+          applyOpenRouterBaselines(uiState.vprModelCatalog, map),
+          uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+        );
         notifyUiStateChanged();
       });
       // Only auto-fill an empty selection. A user-chosen model that is briefly

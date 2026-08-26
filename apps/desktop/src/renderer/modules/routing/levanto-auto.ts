@@ -70,13 +70,27 @@ export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provide
 export const AUTO_SUBSCRIPTION_MIN_TRUST_SCORE = 70;
 
 /**
- * Idempotently prepends the Auto entry to a freshly-derived catalog. Safe to
- * call on every catalog recompute -- `projectRowsToVprModelCatalog` never
- * produces a `(levanto, levanto-auto)` pair from real network discovery
+ * Idempotently prepends the Auto entry to a freshly-derived catalog, but only
+ * when `enabled` is true (`VprRoutingPreferences.autoSubscriptionEnabled`) --
+ * the entry starts a real daily USDC charge, so it must not be offered as a
+ * pickable model until the buyer has explicitly consented via the Preferences
+ * toggle (decisions doc SS14 item 29). When `enabled` is false the entry is
+ * dropped even if a stale catalog already contained it (defensive; in
+ * practice every caller passes a freshly-derived catalog that never has it
+ * unless this same function already added it).
+ *
+ * Safe to call on every catalog recompute when enabled -- `projectRowsToVprModelCatalog`
+ * never produces a `(levanto, levanto-auto)` pair from real network discovery
  * (no seller advertises that serviceId), so there is nothing to deduplicate
  * against beyond a previous call of this same function.
  */
-export function withLevantoAutoCatalogEntry(catalog: VprModelCatalogEntry[]): VprModelCatalogEntry[] {
+export function withLevantoAutoCatalogEntry(
+  catalog: VprModelCatalogEntry[],
+  enabled: boolean,
+): VprModelCatalogEntry[] {
+  if (!enabled) {
+    return catalog.some(isLevantoAutoEntry) ? catalog.filter((entry) => !isLevantoAutoEntry(entry)) : catalog;
+  }
   if (catalog.some(isLevantoAutoEntry)) return catalog;
   return [LEVANTO_AUTO_CATALOG_ENTRY, ...catalog];
 }

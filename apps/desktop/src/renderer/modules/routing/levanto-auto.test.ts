@@ -40,22 +40,40 @@ test('LEVANTO_AUTO_CATALOG_ENTRY matches the router-levanto plugin sentinel', ()
   assert.equal(LEVANTO_AUTO_SERVICE_ID, 'levanto-auto');
 });
 
-test('withLevantoAutoCatalogEntry prepends the Auto entry to a real catalog', () => {
-  const catalog = withLevantoAutoCatalogEntry([realEntry()]);
+test('withLevantoAutoCatalogEntry prepends the Auto entry to a real catalog when enabled', () => {
+  const catalog = withLevantoAutoCatalogEntry([realEntry()], true);
   assert.equal(catalog.length, 2);
   assert.ok(isLevantoAutoEntry(catalog[0]!));
 });
 
 test('withLevantoAutoCatalogEntry is idempotent -- never duplicates the entry on repeated calls', () => {
-  const once = withLevantoAutoCatalogEntry([realEntry()]);
-  const twice = withLevantoAutoCatalogEntry(once);
+  const once = withLevantoAutoCatalogEntry([realEntry()], true);
+  const twice = withLevantoAutoCatalogEntry(once, true);
   assert.equal(twice.filter(isLevantoAutoEntry).length, 1);
 });
 
 test('withLevantoAutoCatalogEntry works on an empty catalog (no discovered sellers yet)', () => {
-  const catalog = withLevantoAutoCatalogEntry([]);
+  const catalog = withLevantoAutoCatalogEntry([], true);
   assert.equal(catalog.length, 1);
   assert.ok(isLevantoAutoEntry(catalog[0]!));
+});
+
+test('withLevantoAutoCatalogEntry omits the Auto entry when disabled', () => {
+  const catalog = withLevantoAutoCatalogEntry([realEntry()], false);
+  assert.equal(catalog.length, 1);
+  assert.equal(catalog.some(isLevantoAutoEntry), false);
+});
+
+test('withLevantoAutoCatalogEntry drops a stale Auto entry when disabled, even if the catalog already had one', () => {
+  const withEntry = withLevantoAutoCatalogEntry([realEntry()], true);
+  const afterToggleOff = withLevantoAutoCatalogEntry(withEntry, false);
+  assert.equal(afterToggleOff.length, 1);
+  assert.equal(afterToggleOff.some(isLevantoAutoEntry), false);
+});
+
+test('withLevantoAutoCatalogEntry on an empty catalog when disabled stays empty', () => {
+  const catalog = withLevantoAutoCatalogEntry([], false);
+  assert.equal(catalog.length, 0);
 });
 
 test('isLevantoAutoEntry rejects a real model entry', () => {

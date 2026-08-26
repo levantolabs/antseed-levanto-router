@@ -677,8 +677,13 @@ registerActions({
     saveVprRoutingPreferences(uiState.vprRoutingPreferences);
     syncBuyerRoutingPreferences();
     // Peer rules gate which sellers and models are visible at all, so a patch
-    // touching them has to re-derive the catalog, not just repaint.
-    if (patch.allowedPeerIds || patch.blockedPeerIds) {
+    // touching them has to re-derive the catalog, not just repaint. Same for
+    // autoSubscriptionEnabled: it gates whether "Levanto Auto" is even
+    // present in the catalog (levanto-auto.ts's withLevantoAutoCatalogEntry),
+    // so flipping it has to take effect immediately, not wait for the next
+    // unrelated recompute. `!== undefined` (not truthy) because turning the
+    // toggle off is `patch.autoSubscriptionEnabled === false`.
+    if (patch.allowedPeerIds || patch.blockedPeerIds || patch.autoSubscriptionEnabled !== undefined) {
       chatApi.applyPeerAccessRules();
     }
     notifyUiStateChanged();
