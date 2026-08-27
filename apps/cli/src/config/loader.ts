@@ -408,6 +408,8 @@ function mergeBuyerRoutingPreferences(
   const preferFreePeers = value['preferFreePeers'];
   const maxInputUsdPerMillion = value['maxInputUsdPerMillion'];
   const minTrustScore = value['minTrustScore'];
+  const cqt = value['cqt'];
+  const autoSubscriptionEnabled = value['autoSubscriptionEnabled'];
   return {
     preferFreePeers: preferFreePeers === undefined
       ? fallback.preferFreePeers
@@ -420,6 +422,10 @@ function mergeBuyerRoutingPreferences(
       : toFiniteOrNaN(minTrustScore),
     allowedPeerIds: normalizeRoutingPeerIds(value['allowedPeerIds'], fallback.allowedPeerIds),
     blockedPeerIds: normalizeRoutingPeerIds(value['blockedPeerIds'], fallback.blockedPeerIds),
+    cqt: cqt === undefined ? fallback.cqt : toFiniteOrNaN(cqt),
+    autoSubscriptionEnabled: autoSubscriptionEnabled === undefined
+      ? fallback.autoSubscriptionEnabled
+      : autoSubscriptionEnabled as boolean,
   };
 }
 
