@@ -24,6 +24,28 @@
 import type { BuyerPaymentManager, ChannelsClient, FlatFeeSigningConfig, PaymentMux } from '@antseed/node'
 import { log } from './request-utils.js'
 
+/**
+ * Bootstrap fires three PaymentMux SpendingAuth sends back-to-back with no
+ * gap (authorizeSpending, then signCumulativeAuth's day-1 signature, then
+ * topUpReserve's day-1 prepare-tomorrow top-up). sendSpendingAuth() is
+ * fire-and-forget -- no ack is awaited -- and there is no seller->buyer
+ * rejection signal on the wire at all (payment:auth-rejected is a
+ * seller-local event only, per node.ts), so a corrupted/dropped frame here
+ * fails silent: the seller later logs "Invalid ReserveAuth signature:
+ * recovered=<garbage> expected=<real address>" and the buyer has no idea
+ * anything went wrong until a later request 402s with "Not subscribed".
+ * Reproduced live: three back-to-back sends over pure localhost never hit
+ * this; the identical sequence over a higher-latency hop (observed: a
+ * Windows client through WSL2's forwarded localhost) corrupted a signature
+ * on the very first bootstrap. A short flush gap between sends is a real,
+ * bounded mitigation for a one-time, per-seller operation -- not a fix for
+ * whatever the underlying transport race actually is, which still needs a
+ * real seller->buyer rejection signal and retry to be handled properly.
+ */
+async function flushGap(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 250))
+}
+
 export interface DailySubscriptionSigningOptions {
   /** e.g. 590_000n for $0.59/day (6-decimal USDC) -- decisions doc SS1. */
   dailyAmountUsdc: bigint
@@ -139,9 +161,11 @@ export function createSignDailyIfNeeded(
       // clears the 85% top-up gate after a single day instead of two.
       log(`opening subscription channel with routing peer ${sellerPeerId.slice(0, 12)}...`)
       await buyer.authorizeSpending(sellerPeerId, paymentMux, 0n, options.dailyAmountUsdc)
+      await flushGap()
       buyer.configureFlatFeeSigning(sellerPeerId, flatFeeConfig)
       const { payload } = await buyer.signCumulativeAuth(sellerPeerId, options.dailyAmountUsdc)
       paymentMux.sendSpendingAuth(payload)
+      await flushGap()
       // Prepare tomorrow's ceiling now (SS6.5's Day-1 row) -- nothing more
       // is owed today, so this is a top-up only, not a second signature.
       await topUpAndReconcile(node, sellerPeerId)
