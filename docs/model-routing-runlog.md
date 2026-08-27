@@ -1981,3 +1981,36 @@ just Levanto Auto.
 **Ground truth reference:** none — inference realism wasn't a decided design question in any of
 the four model-routing docs; this is test-infrastructure work at explicit user request, using a
 real external provider (OpenRouter) that predates and is unrelated to Sage/AntSeed's own design.
+
+## [2026-08-27] Correction: a real, trained Sage router already exists — the previous entry's "no public API for real Sage" claim was wrong
+
+**Type:** Correction to the immediately preceding entry, per this runlog's own append-only
+convention — not editing that entry, recording what was actually true instead.
+
+The previous entry stated "no public API for 'real Sage' exists to call" as justification for
+`mock_sage.py` staying an editorial quality prior. That's wrong. `~/Documents/agent0/ag0-v0.5/
+levanto-pocs/sage_model_router/` (a real, separate, sibling project — not part of either repo
+this mission works in) is a genuine, previously-built and benchmarked system: real Sage feature
+extraction (`SageClient` in `sage_features.py`, a real live client for `POST https://sage.levanto.ai/
+decide/batch`, authenticated via `LEVANTO_API_KEY` — which turned out to already be sitting in
+`levanto-router/.env.local` next to the `OPENROUTER_API_KEY` used above, both real and live,
+confirmed by a direct authenticated call returning a real validation response, not an auth
+error), real per-model gradient-boosted quality heads and a ridge cost model trained on real
+outcome data (`train.py`, the `artifact_*.joblib` files), a real cost/quality Pareto-hull
+selection algorithm (`router.py`'s `prune_dominated`/`select_lagrange`), and a real, documented
+benchmark showing it beating OpenRouter Auto Beta on the same prompt set (`SAGE_ROUTER_OVERVIEW.md`:
+tied on quality-first at ~59% of OpenRouter's spend, ahead and ~25% cheaper at balanced). `Router.
+rank_candidates(prompt, cqt)` is a clean, already-built entry point matching this session's
+`/rank` sidecar contract almost exactly.
+
+Not yet wired in — surfaced mid-session by the user asking directly whether the sidecar was this
+real system, and it wasn't. Doing so properly is a real scope question, not a drop-in swap: the
+real system's trained "hull" (`gpt-5.6-luna`, `deepseek-v4-flash-0731`, `hy3`, `gpt-5.6-sol`,
+`kimi-k3`, plus alias `gpt-5.5`) only partially overlaps this session's fictional marketplace
+panel (`glm-5.2` exists in the real training panel but is *dominated*, not on its hull;
+`mistral-x2-mock`/`nova-r1-mock` don't exist in the real panel at all) — genuinely wiring this in
+means either narrowing the demo marketplace to the real trained panel or leaving some fictional
+services on the old editorial-prior fallback, a decision left to the user rather than assumed.
+
+**Ground truth reference:** none of the four model-routing docs mention this project at all —
+found by searching the filesystem after being asked directly, not from any doc pointing here.
