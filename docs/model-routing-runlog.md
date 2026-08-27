@@ -1781,3 +1781,49 @@ per-model reputation display for a model multiple peers serve.
 scoring or the two independent peer-discovery paths in `buyer-proxy.ts` — both were found by
 reading `packages/node/src/reputation/on-chain-reputation.ts` and
 `apps/cli/src/proxy/buyer-proxy.ts` directly against observed runtime behavior.
+
+## [2026-08-27] `candidateCatalog()` made real: Levanto Auto can now route to peers it didn't hardcode itself
+
+**Type:** Real feature work in `levanto-routing-server` (private repo, commit `939fb5a`), not
+just testing — found while trying to test the previous entry's diverse marketplace *through
+Levanto Auto specifically* (as opposed to through a buyer's own manual-selection catalog, which
+the previous entry already covered).
+
+**What was found.** The buyer-side diverse-marketplace catalog (previous entry) has nothing to
+do with what "Levanto Auto" actually routes to. `LevantoRoutingServerHandler.handleRoute` (the
+real `/_antseed/route` implementation) ranks candidates from `candidateCatalog()`, and that
+function was `Object.entries(FAKE_MODELS).map(...)` — the routing peer's own three hardcoded
+models, `peer: identity.peerId` always itself, on every call. Its own doc comment already said
+so: *"Thin-slice stand-in for a real DHT-discovered PriceBook... A static/injected catalog until
+that integration lands."* A second, adjacent TODO sat right next to it: `minTrustScore` was
+accepted on the wire and silently ignored — *"needs real reputation data, not available in this
+thin-slice catalog yet."* No amount of buyer-side peer discovery could ever change what Levanto
+Auto selected; the two systems didn't talk to each other.
+
+**What's new.** `local-peer-daemon.ts` now runs a second `AntseedNode`, `role: 'buyer'`, purely
+for discovery — required because `packages/node/src/node.ts` only initializes
+`PeerLookup`/`resolveDirectPeers`/`discoverPeers` on the "Starting buyer" code path; the routing
+peer's own node (`role: 'seller'`) never gets that machinery. This discovery node watches the
+same peers via the same `directPeerAddresses` local-dev mechanism the buyer side uses (env var
+`ROUTING_PEER_DISCOVERY_DIRECT_PEERS_JSON`, defaulting to the two diverse-marketplace mock
+sellers), including its own identity, refreshing every 30s. `candidateCatalog()` now merges the
+routing peer's own `FAKE_MODELS` with every real discovered peer's real advertised models,
+prices, and on-chain reputation (`RankableCandidate` gained an optional `trustScore` field, from
+the exact same `computeOnChainReputationScore` pipeline the buyer-side catalog uses).
+`handleRoute`'s eligibility filter now applies `constraints.minTrustScore` against it — a
+candidate with no verified trust data yet stays ungated (absence of evidence isn't evidence of
+untrustworthiness) rather than excluded.
+
+**Verified live**, not just typechecked: a real subscribed buyer (`signDailyIfNeeded` against the
+real routing peer, real on-chain reserve) called `/_antseed/route` and got back all 7 real
+candidates across all 3 real peers (the routing peer's 3 + one seller's 2 + the other seller's
+2, `kimi-k3` correctly appearing 3 times as a real multi-seller listing). With
+`constraints.minTrustScore: 70`, the peer seeded to ~25.6 real reputation was excluded
+entirely (both its models dropped from `ranked`) while the routing peer (~78.7) and the other
+seller (~77.0) both remained — the exact trust-gated multi-peer routing behavior the diverse
+marketplace was built to exercise, now genuinely reachable through Levanto Auto and not just
+through a buyer's own manual catalog.
+
+**Ground truth reference:** none — `routing-server-handler.ts`'s and
+`RoutingServerHandlerConfig.candidateCatalog`'s own doc comments already named both gaps this
+closes; no separate decisions-doc entry described the fix.
