@@ -486,46 +486,77 @@ export class LevantoRouter {
     };
 
     const doFetch = this.config.fetchImpl ?? fetch;
-    let res: Response;
-    const routingCallStartedAt = Date.now();
     const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
-    const timeoutController = new AbortController();
-    const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
-    try {
-      res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
-        },
-        body: JSON.stringify(body),
-        signal: timeoutController.signal,
-      });
-    } catch (err) {
-      // Routing peer unreachable OR unresponsive -- the AbortController
-      // above fires the same way for both, so both land here. Throws rather
-      // than returning null (decisions doc SS13 item 16): null would fall
-      // through to the fixed-model pipeline, which can't handle the Auto
-      // sentinel and fails a moment later with a confusing error instead of
-      // a clear one.
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new RoutingPeerError('unreachable', `Levanto routing peer at ${this.config.routingPeerUrl} is unreachable or timed out: ${reason}`);
-    } finally {
-      clearTimeout(timeoutHandle);
+    const attemptRoute = async (): Promise<Response> => {
+      const timeoutController = new AbortController();
+      const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
+      try {
+        return await doFetch(`${this.config.routingPeerUrl}/_antseed/route`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
+          },
+          body: JSON.stringify(body),
+          signal: timeoutController.signal,
+        });
+      } catch (err) {
+        // Routing peer unreachable OR unresponsive -- the AbortController
+        // above fires the same way for both, so both land here. Throws rather
+        // than returning null (decisions doc SS13 item 16): null would fall
+        // through to the fixed-model pipeline, which can't handle the Auto
+        // sentinel and fails a moment later with a confusing error instead of
+        // a clear one.
+        const reason = err instanceof Error ? err.message : String(err);
+        throw new RoutingPeerError('unreachable', `Levanto routing peer at ${this.config.routingPeerUrl} is unreachable or timed out: ${reason}`);
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
+    };
+
+    // Extracts the seller's error message exactly once per Response -- res.json()
+    // (and fetch Response bodies in general) can only be consumed a single time,
+    // so this must never be called twice on the same res.
+    const parseRejectionMessage = async (response: Response): Promise<string> => {
+      let message = `Levanto routing peer rejected the request (status ${response.status}).`;
+      try {
+        const errBody = (await response.json()) as { error?: { message?: string } };
+        if (errBody?.error?.message) message = errBody.error.message;
+      } catch {
+        // Non-JSON or empty error body -- keep the generic message.
+      }
+      return message;
+    };
+
+    const routingCallStartedAt = Date.now();
+    let res = await attemptRoute();
+    let rejectionMessage = res.ok ? null : await parseRejectionMessage(res);
+
+    // Not-subscribed self-heal (runlog: bootstrap's SpendingAuth sends can
+    // fail to durably reach the seller with zero feedback to the buyer --
+    // ensureSignedToday's own once-per-day throttle then blocks any retry
+    // until the next calendar day, stranding an Auto conversation that
+    // believes it's paid up). If the seller reports specifically "not
+    // subscribed" and the toggle is genuinely on, force one fresh signing
+    // attempt and retry the routing call once -- bounded to a single retry
+    // so a seller that's down for an unrelated reason doesn't loop here.
+    if (
+      res.status === 402
+      && rejectionMessage?.toLowerCase().includes('not subscribed')
+      && this.cachedRoutingPreferences?.autoSubscriptionEnabled
+    ) {
+      this.lastSignedDayKey = null;
+      await this.ensureSignedToday();
+      res = await attemptRoute();
+      rejectionMessage = res.ok ? null : await parseRejectionMessage(res);
     }
+
     const routingLatencyMs = Date.now() - routingCallStartedAt;
     if (!res.ok) {
       // Includes the 402 "not subscribed today" case. Same reasoning as the
       // unreachable branch above -- throws instead of falling through to a
       // pipeline that can't handle the Auto sentinel.
-      let message = `Levanto routing peer rejected the request (status ${res.status}).`;
-      try {
-        const errBody = (await res.json()) as { error?: { message?: string } };
-        if (errBody?.error?.message) message = errBody.error.message;
-      } catch {
-        // Non-JSON or empty error body -- keep the generic message.
-      }
-      throw new RoutingPeerError('rejected', message, res.status);
+      throw new RoutingPeerError('rejected', rejectionMessage!, res.status);
     }
 
     const parsed = (await res.json()) as RouteResponseBody;

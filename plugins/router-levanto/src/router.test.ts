@@ -135,6 +135,63 @@ describe('LevantoRouter.selectRoute', () => {
     });
   });
 
+  it('self-heals from a "not subscribed" 402 by forcing a fresh signature and retrying the routing call once', async () => {
+    const notSubscribed = { ok: false, status: 402, json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }) };
+    const success = { ok: true, json: async () => rankedResponse() };
+    let routingCalls = 0;
+    // /_antseed/route/digest shares the same fetchImpl (sendDailyDigestIfNeeded)
+    // -- discriminate by URL rather than call order/count, same reasoning as
+    // the sagePrompt filter in "signs before the routing call it gates" above.
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (!url.endsWith('/_antseed/route')) return { ok: true, json: async () => ({}) };
+      routingCalls += 1;
+      return routingCalls === 1 ? notSubscribed : success;
+    });
+    const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+    const router = new LevantoRouter({
+      routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences());
+
+    expect(result).toHaveLength(1);
+    expect(routingCalls).toBe(2);
+    // Once from the normal pay-first gate, once again forced by the retry --
+    // proves the once-per-day throttle was actually reset, not just skipped.
+    expect(signDailyIfNeeded).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a second time if the seller still reports "not subscribed" after the forced re-signature', async () => {
+    let routingCalls = 0;
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (!url.endsWith('/_antseed/route')) return { ok: true, json: async () => ({}) };
+      routingCalls += 1;
+      return { ok: false, status: 402, json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }) };
+    });
+    const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+    const router = new LevantoRouter({
+      routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences())).rejects.toMatchObject({
+      kind: 'rejected',
+      statusCode: 402,
+    });
+    expect(routingCalls).toBe(2); // bounded to exactly one retry, not a loop
+  });
+
+  it('does not retry a "not subscribed" 402 when the subscription toggle is off (existing behavior preserved)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false, status: 402,
+      json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }),
+    });
+    const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it('falls back to a generic message when a non-OK response has no JSON error body', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: false, status: 500, json: async () => { throw new Error('not json'); } });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
