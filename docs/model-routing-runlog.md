@@ -1827,3 +1827,81 @@ through a buyer's own manual catalog.
 **Ground truth reference:** none — `routing-server-handler.ts`'s and
 `RoutingServerHandlerConfig.candidateCatalog`'s own doc comments already named both gaps this
 closes; no separate decisions-doc entry described the fix.
+
+## [2026-08-27] Real /_antseed/route constraint battery against the now-real candidateCatalog()
+
+**Type:** Test coverage, run against the previous entry's fix, not a code change.
+
+A single real subscribed buyer (real `signDailyIfNeeded`, real on-chain reserve) sent a battery
+of real `/_antseed/route` calls varying `cqt` and `constraints` one at a time against the live
+routing peer + two real seller peers, to check the newly-real `candidateCatalog()` and
+`minTrustScore` gate under more than the one condition the previous entry verified:
+
+- **cqt=1 vs cqt=10:** at cqt=1 every diverse-marketplace candidate (real price 0.3-1.2
+  USD/M, above the routing peer's own 0.1-0.2 range) scores negative and the cheapest model
+  wins by a wide margin; at cqt=10 every candidate scores positive and the ranking reorders by
+  quality (`gpt-5.6-luna` overtakes `kimi-k3`). Real `lambdaForCqt` behavior, not asserted from
+  reading the formula.
+- **minTrustScore 0/30/70/90:** 0 and 30 both keep all-but-gamma... no — 0 keeps everyone (7),
+  30 and 70 both exclude only gamma (real ~25.6 score, both thresholds) leaving 5, and 90
+  excludes *everyone* including the routing peer's own real ~78.7 and the other seller's ~77.0
+  — a real, live `ranked: []` response. This is the exact "zero eligible candidates" case the
+  2026-08-25 "Three unformalized failure modes" entry already analyzed and left as-is
+  (`routeSelected` comes back `null`, buyer-proxy falls through to the ordinary non-Auto
+  narrowing rather than a routing-specific error) — reproduced live here, not a new gap, no
+  change made.
+- **maxInputUsdPerMillion=0.15, blockedPeerIds=[beta], and both minTrustScore+price combined:**
+  all filtered exactly as the code reads — price cap keeps only the two candidates at or under
+  0.15, blockedPeerIds removes exactly that peer's two candidates and no others, the combined
+  constraint intersects correctly (3 candidates: the price cap's set narrowed further by trust,
+  though at 0.2 the price cap alone already excludes both seller peers since they're priced at
+  0.3 flat).
+- **Three identical back-to-back calls:** byte-identical `ranked` output each time — the 30s
+  discovery-refresh cache isn't introducing nondeterminism within a single conversation's
+  repeated Auto calls.
+
+**Ground truth reference:** none — this is a test run against the previous entry's own change,
+not new design.
+
+## [2026-08-27] `cqt` and `autoSubscriptionEnabled` in config.json were silently ignored — real user-facing "not subscribed" bug, found live, root-caused, fixed
+
+**Type:** Real bug, found live in the actual desktop app while checking whether the previous two
+entries' work was reachable through it, not through a test script.
+
+**What happened.** The live desktop buyer hit `502 Proxy error: Not subscribed, or today's
+signature is not yet on file.` on every "Levanto Auto" chat send, with no automatic recovery on
+retry, restart, or waiting. First suspected a delivery race in `signDailyIfNeeded` (it does send
+its `SpendingAuth` fire-and-forget over PaymentMux, no ack awaited, and that race is real —
+reproduced once with a fresh test identity) — but that theory didn't survive a debug-logged
+reproduction of the actual failure: `ANTSEED_DEBUG=1` showed **zero** `signDailyIfNeeded` log
+lines before the 402, on every attempt, however long the wait.
+
+**Root cause**, found by reading `apps/cli/src/config/loader.ts`'s `mergeBuyerRoutingPreferences`:
+it read `preferFreePeers`, `maxInputUsdPerMillion`, `minTrustScore`, `allowedPeerIds`, and
+`blockedPeerIds` from a loaded `config.json`, but never `cqt` or `autoSubscriptionEnabled` —
+both real fields on `ModelRoutingPreferences` (`packages/node/src/routing/model-route-ranking.ts`),
+just never wired into this specific merge function. Every buyer launched via `buyer start`
+(desktop-spawned or bare CLI — same binary) silently got the compiled-in default
+`autoSubscriptionEnabled: false` regardless of what `config.json` said, and
+`LevantoRouter.ensureSignedToday()` (`plugins/router-levanto/src/router.ts`) correctly refuses
+to sign real money without an explicit, current `true` — so it never fired, ever, no matter how
+many chat messages were sent or how long the process ran. Not a race, not a stale connection —
+this buyer's `config.json` had `autoSubscriptionEnabled: true` the whole time, config-loading
+just never read it.
+
+**Fixed** by reading both fields the same way the other five already were (`apps/cli/src/config/
+loader.ts`). Verified live: rebuilt binary, same `~/.antseed/config.json`, same real desktop
+identity — startup log now shows `opening subscription channel with routing peer...`, and a real
+`levanto-auto` chat request returns a real `200` (routed to `glm-5.2`), confirmed reliable across
+two consecutive requests.
+
+**Separately confirmed, not a bug:** the fire-and-forget signing race from the first theory above
+is real and independently reproducible (a fresh identity's very first `signDailyIfNeeded` +
+immediate `/_antseed/route` call can race and 402 once), but it self-heals on the very next
+request — it was never the cause of this session's *persistent* failures, which is why waiting
+and retrying never helped. Left as-is; not the day's blocker.
+
+**Ground truth reference:** none — `ModelRoutingPreferences`'s own doc comments on `cqt` and
+`autoSubscriptionEnabled` (decisions doc SS8.1, SS14 item 29) describe what the fields mean, not
+that a specific config-loading function needed updating to read them; found by reading the merge
+function directly against the observed live failure, not from a doc gap.
