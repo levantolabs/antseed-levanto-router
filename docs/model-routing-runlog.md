@@ -19,6 +19,16 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-27] Anthropic-messages streaming through a fast local peer silently forwarded raw OpenAI SSE, unconverted
+
+Live, on the WSL devnet: `POST /v1/messages` with `stream:true` against `levanto-auto` returned `content-type: text/event-stream` with real content, but the frames were OpenAI `chat.completion.chunk` objects, not Anthropic `message_start`/`content_block_delta`/`message_stop` events. Any real Anthropic SSE client parses zero valid events from that and reports the stream as empty — this was the concrete cause behind a native client seeing "request ended without sending any chunks."
+
+The protocol-transform detection and the streaming adapter (`createStreamingAdapter` in `packages/api-adapter/src/stream-transform.ts`) were never missing or misdirected — both existed and were wired correctly for the live-chunk path. The actual gap was narrower: `_dispatchToPeer` (`apps/cli/src/proxy/buyer-proxy.ts`) only invokes `streamResponseAdapter` inside the `sendRequestStream` callbacks, gated on the P2P transport's own `metadata.streaming` flag. A peer close enough to answer before the mux's read loop yields (true of every peer on this devnet) delivers the whole response as one buffered blob instead of incremental chunks, so `metadata.streaming` is `false` and those callbacks never fire — even though the response body itself is still SSE-formatted by API contract, because the seller replies to `stream:true` with `data: ...` frames regardless of how the transport chunks it. The code then fell to the non-streaming `adaptResponse`/`transformResponse` path, which calls `parseJsonObject` on the body expecting one JSON object; against an SSE-formatted body that parse fails and `transformResponse` returns the original, untranslated response (`response-transform.ts:48-49`, `return response`).
+
+Fixed in `_dispatchToPeer`'s `!streamed` branch: detect an SSE-formatted buffered response by `content-type`, and when detected, feed the whole body through the same `streamResponseAdapter` as a single terminal chunk (`adaptStart` + one `adaptChunk` call with `done: true`, concatenating the returned chunks) instead of routing it through the JSON-only `transformResponse`. Non-SSE buffered responses (ordinary non-streaming replies, and error bodies) keep using `adaptResponse` unchanged. Live-verified on the devnet: the same `/v1/messages stream:true` request now returns correct Anthropic SSE (`message_start` → `content_block_start` → `content_block_delta` with `text_delta` → `content_block_stop` → `message_delta` → `message_stop`).
+
+---
+
 ## [2026-08-27] Client-side self-heal for a "not subscribed" routing rejection — a mitigation for the entry below, not a fix for it
 
 Requested directly: a reliability improvement for the exact failure mode the entry below documents (a signed SpendingAuth silently fails to durably reach the seller, and the once-per-day signing throttle then blocks any retry until the next calendar day). The real fix is a seller→buyer rejection signal on the wire, which the entry below explicitly declines to build under time pressure on the payment-critical path. This is a narrower, lower-risk client-side improvement that doesn't touch that path at all.

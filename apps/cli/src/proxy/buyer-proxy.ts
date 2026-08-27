@@ -3131,10 +3131,36 @@ export class BuyerProxy {
         let responseForClient = adaptBuyerFaultErrorResponse(response, requestProtocol)
         if (
           !streamed
-          && adaptResponse
           && responseForClient.headers[ANTSEED_FAULT_ATTRIBUTION_HEADER]?.toLowerCase() !== 'buyer'
         ) {
-          responseForClient = adaptResponse(response)
+          // A fast/local peer can deliver a small streaming response as one
+          // buffered blob instead of incremental chunks, so `streamed` above
+          // stays false even though the body is still SSE-formatted (the
+          // seller replies to `stream:true` with `data: ...` frames
+          // regardless of transport chunking). transformResponse() expects a
+          // single JSON object and silently no-ops on an SSE body, which let
+          // untranslated seller-protocol chunks reach clients expecting a
+          // different protocol (e.g. Anthropic Messages clients received raw
+          // OpenAI chat-completion chunks and saw an empty stream). Detect
+          // that case by content-type and run it through the same streaming
+          // adapter as a single terminal chunk instead.
+          const isSseBody = (responseForClient.headers['content-type'] ?? '')
+            .toLowerCase()
+            .includes('text/event-stream')
+          if (streamResponseAdapter && isSseBody) {
+            const startResponse = streamResponseAdapter.adaptStart(responseForClient)
+            const adaptedChunks = streamResponseAdapter.adaptChunk({
+              requestId: responseForClient.requestId,
+              data: responseForClient.body,
+              done: true,
+            })
+            responseForClient = {
+              ...startResponse,
+              body: Buffer.concat(adaptedChunks.map((adaptedChunk) => Buffer.from(adaptedChunk.data))),
+            }
+          } else if (adaptResponse) {
+            responseForClient = adaptResponse(response)
+          }
         }
         responseForClient = adaptOpenAICompatibleErrorResponse(responseForClient, requestProtocol)
         responseForClient = this._withFriendlyUploadLimitError(responseForClient, requestForPeer.body.length, requestedService)
