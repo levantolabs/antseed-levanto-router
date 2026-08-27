@@ -47,6 +47,7 @@ import { BrandIcon } from '../brand/BrandIcon';
 import { VprFilterDropdown, VprMultiFilterDropdown, type VprFilterOption } from '../vpr/VprFilterDropdown';
 import { VprModelRowList, VprSelectedModelCard } from '../vpr/VprModelRows';
 import { VprPage, VprSearch } from '../vpr/VprKit';
+import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
 import styles from './VprExploreView.module.scss';
 
 type Props = { onSelectView?: (view: ViewName) => void };
@@ -105,16 +106,28 @@ export function VprExploreView({ onSelectView }: Props) {
   // Starred on the model pages; fresh on every visit (the view remounts).
   const [favorites] = useState(loadFavoriteModels);
 
+  // "Levanto Auto" is a chat-time routing mode, not a browsable model --
+  // it has no real sellers, no price, no capabilities to filter/sort by.
+  // withLevantoAutoCatalogEntry (modules/chat/controller.ts) prepends it to
+  // the shared vprModelCatalog state specifically so chat pickers offer it;
+  // this page (nav label "Models") lists what a buyer can actually inspect
+  // and pin, so it's filtered back out here rather than removed from the
+  // shared state chat depends on.
+  const catalog = useMemo(
+    () => snap.catalog.filter((entry) => !isLevantoAutoEntry(entry)),
+    [snap.catalog],
+  );
+
   // Non-auto routing: the selected model's rows name the pinned seller.
   const pinnedSeller = useMemo(
     () => pinnedSellerLabel(snap.discoverRows, snap.selection),
     [snap.discoverRows, snap.selection],
   );
 
-  const availableFamilies = useMemo(() => availableModelFamilies(snap.catalog), [snap.catalog]);
+  const availableFamilies = useMemo(() => availableModelFamilies(catalog), [catalog]);
   const tags = useMemo(
-    () => availableModelTags(snap.catalog.map((entry) => entry.serviceId)),
-    [snap.catalog],
+    () => availableModelTags(catalog.map((entry) => entry.serviceId)),
+    [catalog],
   );
   const typeOptions = useMemo<readonly VprFilterOption<string>[]>(() => [
     { value: 'kind:text', label: 'Text', description: 'Chat and language models', icon: <FilterIconView icon={TextIcon} /> },
@@ -142,21 +155,21 @@ export function VprExploreView({ onSelectView }: Props) {
   ], []);
   const favoriteEntries = useMemo(
     () => (listInputs.tab === 'Recommended'
-      ? filterVprCatalog(selectFavoriteVprCatalog(snap.catalog, favorites), { search: listInputs.search })
+      ? filterVprCatalog(selectFavoriteVprCatalog(catalog, favorites), { search: listInputs.search })
       : []),
-    [favorites, listInputs, snap.catalog],
+    [favorites, listInputs, catalog],
   );
   const entries = useMemo(() => {
     if (listInputs.tab === 'Recommended') {
       // Curated lineup order (frontier + free) — the sort control only
       // exists on the All tab. Favorites get their own section above.
-      const curated = selectRecommendedVprCatalog(snap.catalog)
+      const curated = selectRecommendedVprCatalog(catalog)
         .filter((entry) => !favorites.has(catalogEntryKey(entry)))
         .slice(0, RECOMMENDED_LIMIT);
       return filterVprCatalog(curated, { search: listInputs.search });
     }
     return sortVprCatalog(
-      filterVprCatalog(snap.catalog, {
+      filterVprCatalog(catalog, {
         search: listInputs.search,
         kinds: listInputs.types
           .filter((value) => value.startsWith('kind:'))
@@ -168,7 +181,7 @@ export function VprExploreView({ onSelectView }: Props) {
       }),
       listInputs.sort,
     );
-  }, [favorites, listInputs, snap.catalog]);
+  }, [favorites, listInputs, catalog]);
 
   // Any listed model that remembers a pin names its seller in place of the
   // peer count — pins are per model and survive switching between them.
@@ -179,7 +192,7 @@ export function VprExploreView({ onSelectView }: Props) {
 
   const selectedModel = snap.selection.model;
   const selectedEntry = selectedModel
-    ? findCatalogEntry(snap.catalog, selectedModel.provider, selectedModel.serviceId)
+    ? findCatalogEntry(catalog, selectedModel.provider, selectedModel.serviceId)
     : null;
 
   return (
@@ -217,7 +230,7 @@ export function VprExploreView({ onSelectView }: Props) {
                 className={`${styles.tab}${tab === 'All' ? ` ${styles.tabActive}` : ''}`}
                 onClick={() => setTab('All')}
               >
-                All Models ({snap.catalog.length})
+                All Models ({catalog.length})
               </button>
             </div>
           </>
