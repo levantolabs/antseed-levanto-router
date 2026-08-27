@@ -1535,6 +1535,10 @@ export class AntseedNode extends EventEmitter {
       reannounceIntervalMs: DEFAULT_DHT_CONFIG.reannounceIntervalMs,
       operationTimeoutMs: this._config.dhtOperationTimeoutMs ?? DEFAULT_DHT_CONFIG.operationTimeoutMs,
       allowPrivateIPs: this._config.allowPrivateIPs,
+      // Isolated local testing must not be reachable from the LAN/WAN --
+      // noOfficialBootstrap already means "never dial the real network", so
+      // reuse it here to also mean "never accept a connection from it".
+      ...(this._config.noOfficialBootstrap ? { bindHost: "127.0.0.1" } : {}),
     };
   }
 
@@ -1719,26 +1723,33 @@ export class AntseedNode extends EventEmitter {
     await this._connectionManager.startListening({
       peerId: identity.peerId,
       port: signalingPort,
-      host: "0.0.0.0",
+      host: this._config.noOfficialBootstrap ? "127.0.0.1" : "0.0.0.0",
     });
 
     // Resolve actual bound port (important when port 0 is used for OS-assigned)
     const actualSignalingPort = this._connectionManager.getListeningPort() ?? signalingPort;
     const actualDhtPort = this._dht.getPort();
 
-    // NAT traversal: automatically map ports via UPnP/NAT-PMP
-    this._nat = new NatTraversal();
-    const natResult = await this._nat.mapPorts([
-      { port: actualSignalingPort, protocol: "TCP" },
-      { port: actualDhtPort, protocol: "UDP" },
-    ]);
-
-    if (natResult.success) {
-      this.emit("nat:mapped", natResult);
+    // NAT traversal: automatically map ports via UPnP/NAT-PMP. Skipped for
+    // isolated local testing (noOfficialBootstrap) -- mapping a port on the
+    // router is exactly the reachability this mode exists to prevent, and
+    // it would defeat the loopback bind above.
+    if (this._config.noOfficialBootstrap) {
+      debugLog("[NAT] Skipped — noOfficialBootstrap is set (isolated local testing)");
     } else {
-      debugWarn("[NAT] UPnP/NAT-PMP mapping failed — seller may not be reachable from the internet");
-      debugWarn("[NAT] Ensure port forwarding is configured manually, or peers on the same LAN can still connect");
-      this.emit("nat:failed");
+      this._nat = new NatTraversal();
+      const natResult = await this._nat.mapPorts([
+        { port: actualSignalingPort, protocol: "TCP" },
+        { port: actualDhtPort, protocol: "UDP" },
+      ]);
+
+      if (natResult.success) {
+        this.emit("nat:mapped", natResult);
+      } else {
+        debugWarn("[NAT] UPnP/NAT-PMP mapping failed — seller may not be reachable from the internet");
+        debugWarn("[NAT] Ensure port forwarding is configured manually, or peers on the same LAN can still connect");
+        this.emit("nat:failed");
+      }
     }
 
     // Set up announcer for providers

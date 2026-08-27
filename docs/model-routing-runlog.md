@@ -19,6 +19,18 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-27] `noOfficialBootstrap` now also binds to loopback and skips NAT traversal, closing the gap below
+
+`noOfficialBootstrap: true` on `AntseedNode` now means what the entry below wished it meant: the DHT UDP socket, and (for sellers) the signaling TCP socket, bind to `127.0.0.1` only, and NAT-PMP/UPnP port mapping is skipped entirely — `packages/node/src/node.ts`'s `_createDHTConfig()` and `_startSeller()`, plus a new `bindHost` passthrough in `packages/node/src/discovery/dht-node.ts` down to `bittorrent-dht`'s `dht.listen(port, host, cb)` (its `.d.ts` only declared the 2-arg form; added the 3-arg overload to match what the library actually accepts). No new config surface — every devnet process already had `noOfficialBootstrap: true` set for exactly this "isolated local testing" intent, so the fix is a correction to what that flag does, not a new flag to remember to set.
+
+Verified directly at the socket level (`ss -lntup` per-process) on all six devnet nodes (5 mock sellers + routing peer) and the buyer: no more bindings to the LAN-facing interface or the container-overlay IP, and no more `0.0.0.0:5350` NAT-PMP socket anywhere. Verified functionally too: a real request through the restarted buyer routed correctly to the local mock seller and got a real response — loopback-only binding doesn't break same-machine peer discovery or connections, which makes sense (both ends are on `127.0.0.1` regardless of which specific loopback address each socket binds to).
+
+One caveat worth recording: right after restarting all six devnet processes simultaneously, the buyer's first full peer-discovery sweep (wildcard + 15 subnet `dht.lookup` calls) returned zero endpoints everywhere, even though a fresh ad hoc DHT client run at the same moment found the local seller immediately. This was a one-off cold-start propagation gap, not a regression from the bind change — a second request minutes later, and a second ad hoc test, both succeeded cleanly. Don't read a single empty first sweep after a fresh multi-node restart as a sign the isolation fix broke discovery; retry before concluding that.
+
+Not addressed here: the routing peer's plain HTTP `/_antseed/route` listener still binds `*:8787` (all interfaces) — that's a REST endpoint, not part of the DHT/P2P gossip mechanism the entry below is about, so it's out of scope of this fix, but it's still broader than loopback and worth tightening for full defense-in-depth if this ever runs somewhere less trusted than a personal dev machine.
+
+---
+
 ## [2026-08-27] `noOfficialBootstrap` does not make a devnet node local-only — it never bound sockets to loopback or disabled NAT traversal
 
 Found live, jointly with a peer session testing the same devnet from a native Windows client: buyers configured with a single local bootstrap node and `ANTSEED_NO_OFFICIAL_BOOTSTRAP=1` still ended up with dozens to hundreds of real public AntSeed sellers in their discovered-peer list, on real public IPs, after enough wall-clock time passed. No prompt was confirmed to have actually reached a public seller in either session's testing (every successful completion traced back to a local devnet peer ID), but connections and metadata fetches to public hosts did happen, exposing the testing machine's IP and node identity to the production network.
