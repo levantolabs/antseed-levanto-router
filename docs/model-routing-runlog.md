@@ -1936,3 +1936,48 @@ length of time; a periodic restart is not a real fix.
 
 **Ground truth reference:** none — this is infrastructure behavior under load, not a design
 question any of the model-routing docs address.
+
+## [2026-08-27] Real inference behind the demo marketplace: mock completions replaced with real OpenRouter calls, mock_sage.py unmocked against a live catalog
+
+**Type:** Real feature work in `levanto-routing-server` (commit `beef4cb`), at the user's explicit
+request, so the diverse-marketplace demo is a genuine E2E flow — real routing decision, real
+on-chain payment (already true), real inference (new) — rather than real payment for a canned
+string.
+
+**What's new.** Every fictional marketplace service id (`glm-5.2`, `gpt-5.6-luna`, `kimi-k3`,
+`mistral-x2-mock`, `nova-r1-mock`) maps to a real, free-tier OpenRouter model
+(`src/real-inference.ts`'s `REAL_MODEL_MAP`), using an OpenRouter key from the user's own
+Switchboard project (`levanto-router/.env.local`, `OPENROUTER_API_KEY`) — not committed anywhere,
+threaded through as an env var to the routing peer and the two mock-seller processes.
+`FakeModelProvider.handleRequest` (routing peer) and the diverse-marketplace mock sellers'
+equivalent now call the real model with the buyer's real messages and return the real completion
+and real token usage; the old canned response is now purely a fallback for when no key is set,
+a service has no real mapping, or the real call itself fails — observed live and real, not
+hypothetical: `z-ai/glm-5.2:free` and `google/gemma-4-31b-it:free` both returned genuine upstream
+`429`s from OpenRouter's shared free-tier pool during testing, and the fallback degraded
+correctly rather than failing the request. `glm-5.2`'s mapping was swapped to
+`nvidia/nemotron-3.5-lightning:free` after confirming the first choice stayed persistently
+rate-limited.
+
+`mock_sage.py`'s `/rank` quality table is keyed on the same real model ids now, and the sidecar
+verifies at startup that all of them actually exist in OpenRouter's live `/models` catalog
+(warns, doesn't fail closed, on a stale mapping). Quality itself is still an editorial prior —
+OpenRouter's public API exposes pricing and context length, not benchmark scores, and no public
+API for "real Sage" exists to call — so "unmocked" here means the ranking is grounded in real,
+currently-live models instead of fabricated names, not that quality prediction itself became a
+real ML call. Said plainly in the file's own new doc comment rather than overclaiming.
+
+**Verified live**, through the actual desktop app's own buyer process (not just a test script):
+a real `levanto-auto` chat request returned `{"model":"glm-5.2","choices":[{"message":{"content":
+"Blue"}}],"usage":{"prompt_tokens":25,"completion_tokens":133,"total_tokens":158}}` — a genuine
+model response to "What color is the sky?", real token counts, routed through the same real
+`candidateCatalog()`/`minTrustScore` pipeline the two prior entries built and verified. Also
+confirmed live: gamma (seeded to real reputation ~25.6, below every tested buyer's
+`minTrustScore: 70`) correctly returns `model_not_found` for a direct pinned request to its own
+model — not a bug surfaced by this change, the same intentional trust-gating the diverse
+marketplace was built to exercise, now also proven to hold for real per-request dispatch, not
+just Levanto Auto.
+
+**Ground truth reference:** none — inference realism wasn't a decided design question in any of
+the four model-routing docs; this is test-infrastructure work at explicit user request, using a
+real external provider (OpenRouter) that predates and is unrelated to Sage/AntSeed's own design.
