@@ -18,6 +18,7 @@ import {
 } from '@hugeicons/core-free-icons';
 import { displayModelLabel } from '../../../modules/catalog/model-identity';
 import { findCatalogEntry } from '../../../modules/catalog/model-catalog';
+import { isLevantoAutoSelected, LEVANTO_AUTO_LABEL } from '../../../modules/routing/levanto-auto';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { useRetainedState } from '../../hooks/useRetainedState';
@@ -559,29 +560,49 @@ export function ChatView({ onSelectView }: ChatViewProps) {
     && !snap.discoverRows.some((row) => row.peerId === currentPeerId)
     && !snap.chatServiceOptions.some((option) => option.peerId === currentPeerId),
   );
-  // displayModelLabel keeps human text as-is and prettifies raw service keys.
-  const currentServiceLabel = displayModelLabel(openingActiveConversation
-    ? activeConversationServiceId || currentServiceOption?.label || 'Loading chat...'
-    : currentServiceOption?.label || activeConversationServiceId || 'Select a model');
-
   const selectedCatalogEntry = useMemo(
     () => findCatalogEntry(snap.vprModelCatalog, snap.chatImageRouteSelection?.model?.provider ?? '', snap.chatImageRouteSelection?.model?.serviceId ?? ''),
     [snap.chatImageRouteSelection?.model, snap.vprModelCatalog],
   );
   const imageMode = selectedCatalogEntry?.kind === 'image';
+  // A chat still following Levanto Auto has no `currentServiceOption` match
+  // (no seller ever advertises the "levanto-auto" sentinel, so it can never
+  // appear in `chatServiceOptions` -- see levanto-auto.ts's own comment on
+  // `isLevantoAutoEntry`). Once a conversation gets its first response,
+  // `activeConversationProvider`/`activeConversationServiceId` resolve to
+  // whatever peer/model actually served it (conversation-store.ts's
+  // `pinnedModel: existing.pinnedModel ?? input.lastModel` on the buyer
+  // side) -- real, useful info for the "via X" line under each message, but
+  // wrong for this header: without this guard it silently displays that
+  // resolved model instead of "Levanto Auto" the moment a conversation goes
+  // active, even though the chat is still genuinely auto-routing every
+  // subsequent send. Gated on the global selection also currently being
+  // Auto so an explicitly pinned chat (`peerSource: 'user'`) is unaffected.
+  const isAutoModeActive = !imageMode && !currentServiceOption && isLevantoAutoSelected(snap.vprRouteSelection.model);
+  // displayModelLabel keeps human text as-is and prettifies raw service keys.
+  const currentServiceLabel = isAutoModeActive
+    ? LEVANTO_AUTO_LABEL
+    : displayModelLabel(openingActiveConversation
+      ? activeConversationServiceId || currentServiceOption?.label || 'Loading chat...'
+      : currentServiceOption?.label || activeConversationServiceId || 'Select a model');
+
   // Text conversations stay bound to their text model, but an explicit image
   // selection becomes the visible composer mode until the user picks text
   // again. This makes the header accurately describe what Send will do.
   const selectedModelProvider = imageMode
     ? (snap.chatImageRouteSelection?.model?.provider || '')
-    : snap.chatActiveConversation
-      ? (activeConversationProvider || currentServiceOption?.provider || '')
-      : (snap.vprRouteSelection.model?.provider || currentServiceOption?.provider || '');
+    : isAutoModeActive
+      ? (snap.vprRouteSelection.model?.provider || '')
+      : snap.chatActiveConversation
+        ? (activeConversationProvider || currentServiceOption?.provider || '')
+        : (snap.vprRouteSelection.model?.provider || currentServiceOption?.provider || '');
   const selectedModelServiceId = imageMode
     ? (snap.chatImageRouteSelection?.model?.serviceId || '')
-    : snap.chatActiveConversation
-      ? (activeConversationServiceId || currentServiceOption?.id || '')
-      : (snap.vprRouteSelection.model?.serviceId || currentServiceOption?.id || '');
+    : isAutoModeActive
+      ? (snap.vprRouteSelection.model?.serviceId || '')
+      : snap.chatActiveConversation
+        ? (activeConversationServiceId || currentServiceOption?.id || '')
+        : (snap.vprRouteSelection.model?.serviceId || currentServiceOption?.id || '');
   const supportsMultimodal = currentServiceOption?.categories?.includes('multimodal') ?? false;
   const hasAttachedImages = useMemo(
     () => attachedFiles.some((file) => isImageAttachmentLike(file.name, file.mimeType)),
