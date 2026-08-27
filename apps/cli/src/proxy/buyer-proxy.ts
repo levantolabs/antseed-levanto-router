@@ -1079,6 +1079,7 @@ export class BuyerProxy {
   private async _reloadRoutingPreferences(): Promise<void> {
     if (!this._configPath) return
     try {
+      const wasSubscriptionEnabled = this._routingPreferences?.autoSubscriptionEnabled ?? false
       const config = await loadConfig(this._configPath)
       const next = config.buyer.routingPreferences
       this._routingPreferences = {
@@ -1092,6 +1093,18 @@ export class BuyerProxy {
         + `preferFree=${next.preferFreePeers} allow=${next.allowedPeerIds.length} block=${next.blockedPeerIds.length} `
         + `autoSubscriptionEnabled=${next.autoSubscriptionEnabled ?? false}`,
       )
+      // Sign on toggle, not just on first request (SS13 item 9's periodic
+      // check already covers "opted in, never chatted that day" -- but its
+      // interval is 15 minutes, so a buyer who just flipped the toggle would
+      // otherwise wait up to that long, or until they send a message, before
+      // the subscription actually authorizes. Firing here makes toggling on
+      // itself the trigger, with the existing per-request/periodic paths as
+      // the fallback if this attempt fails.
+      if (!wasSubscriptionEnabled && next.autoSubscriptionEnabled) {
+        void this._node.router?.triggerDailySigningCheck?.().catch((err: unknown) => {
+          log(`Toggle-time daily signing check failed (will retry via periodic check / next request): ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
     } catch (err) {
       log(`Routing preferences reload ignored: ${err instanceof Error ? err.message : String(err)}`)
     }
