@@ -639,6 +639,16 @@ function substituteModel(req: SerializedHttpRequest, model: string): SerializedH
   } catch {
     return req;
   }
+  // A peer-pinned request (`<peerId>@levanto-auto`) arrives with a `service`
+  // field the host's own rewritePeerPinnedServiceInBody already mirrored
+  // from `model` (request-utils.ts) -- extractRequestedService prefers
+  // `service` over `model`, so leaving it stale here sends the seller the
+  // sentinel this function exists to replace: real 400 "Service
+  // \"levanto-auto\" is not served by this peer", model correctly "hy3" but
+  // ignored. Mirrors overrideRoutedModelInBody's own model/service sync.
+  if (typeof parsed['service'] === 'string' && parsed['service'] === parsed['model']) {
+    parsed['service'] = model;
+  }
   parsed['model'] = model;
   return { ...req, body: new TextEncoder().encode(JSON.stringify(parsed)) };
 }

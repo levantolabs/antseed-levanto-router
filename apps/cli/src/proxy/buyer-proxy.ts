@@ -2431,23 +2431,33 @@ export class BuyerProxy {
       return
     }
 
-    if (!explicitPeerId && requestedService) {
+    // Additive, optional: a router that implements selectRoute picks both
+    // model and seller together, ahead of the fixed-model narrowing below —
+    // called here, unconditionally on explicitPeerId, so a peer hint (a soft
+    // cache-affinity preference, a stale per-conversation pin, or any other
+    // source of explicitPeerId) can never bypass a router that actually
+    // claims this request's model. Declining (null) — including simply not
+    // implementing the method, or a concrete model the router doesn't
+    // recognize as its own sentinel — falls straight through to the
+    // unmodified pipeline below (software-arch doc SS2.1), identical to
+    // today for every request a router doesn't claim. Host code carries no
+    // knowledge of any sentinel string; that's entirely the plugin's
+    // business. Called at most once per request — selectRoute can have real
+    // side effects (payment signing, ledger recording), so this must never
+    // run twice for the same request.
+    const routeSelected = requestedService
+      ? await this._node.router?.selectRoute?.(
+          serializedReq,
+          peers,
+          conversationIdentity,
+          this._routingPreferences,
+          this._defaultRoutedModel,
+        ) ?? null
+      : null
+
+    if ((!explicitPeerId || routeSelected) && requestedService) {
       const router = this._node.router
       const policyRouter = router as BuyerPolicyRouter | null | undefined
-
-      // Additive, optional: a router that implements selectRoute picks both
-      // model and seller together, ahead of the fixed-model narrowing below.
-      // Declining (null) — including simply not implementing the method —
-      // falls straight through to the unmodified pipeline (software-arch
-      // doc SS2.1). Host code carries no knowledge of any sentinel string;
-      // that's entirely the plugin's business.
-      const routeSelected = await router?.selectRoute?.(
-        serializedReq,
-        peers,
-        conversationIdentity,
-        this._routingPreferences,
-        this._defaultRoutedModel,
-      ) ?? null
 
       let candidates: Array<{
         peer: PeerInfo
