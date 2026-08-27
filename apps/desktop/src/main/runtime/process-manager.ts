@@ -92,10 +92,15 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * When the preference is off (or unreadable/unset -- never default to on),
  * `opts` passes through unchanged: no router override, no routing-peer env,
  * `normalizeRouterIdentifier`'s own fallback takes it to the standard 'local'
- * price+trust router. The routing peer URL/peer id below still point at
- * whatever `local-peer-daemon.ts` instance is running locally when the
- * preference *is* on, since there is still no real mainnet Levanto routing
- * peer to point at instead.
+ * price+trust router. When it's on, which routing peer and env this injects
+ * further depends on the buyer's own configured chain
+ * (`payments.crypto.chainId`, same config file): `base-local` gets the
+ * devnet-shaped defaults (a local `local-peer-daemon.ts` instance, devnet
+ * peer addresses, official-bootstrap disabled); anything else (real chains
+ * default to `base-mainnet`, same as `createDefaultConfig()`) gets the real,
+ * staked Levanto routing peer instead, with none of the devnet isolation
+ * flags -- those would cut a real buyer off from the real dht1/dht2.antseed.com
+ * swarm entirely.
  *
  * Applied here, at the single point every connect-mode `start()` call
  * ultimately funnels through (`ProcessManager.start` itself), rather than at
@@ -128,29 +133,71 @@ function isLevantoAutoSubscriptionEnabled(): boolean {
   }
 }
 
+type RoutingPeerChainId = 'base-local' | 'base-sepolia' | 'base-mainnet';
+
+/**
+ * Reads the buyer's own configured chain the same way `isLevantoAutoSubscriptionEnabled`
+ * reads the toggle -- straight off disk, no caching. Defaults to
+ * `base-mainnet` on anything unreadable/unset, matching `createDefaultConfig()`'s
+ * own default: real chains are this app's normal state, `base-local` is the
+ * opt-in special case, not the other way around.
+ */
+function resolveConfiguredChainId(): RoutingPeerChainId {
+  try {
+    const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      payments?: { crypto?: { chainId?: unknown } };
+    };
+    const chainId = parsed.payments?.crypto?.chainId;
+    if (chainId === 'base-local' || chainId === 'base-sepolia') return chainId;
+    return 'base-mainnet';
+  } catch {
+    return 'base-mainnet';
+  }
+}
+
 export function applyLevantoRouterDemoOverride(
   opts: StartOptions,
   isEnabled: () => boolean = isLevantoAutoSubscriptionEnabled,
+  resolveChainId: () => RoutingPeerChainId = resolveConfiguredChainId,
 ): StartOptions {
   if (opts.mode !== 'connect') return opts;
   if (!isEnabled()) return opts;
+
+  if (resolveChainId() === 'base-local') {
+    return {
+      ...opts,
+      router: 'levanto',
+      env: {
+        ...opts.env,
+        LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
+        LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
+        // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
+        // override"), not a production NAT solution -- see resolveDirectPeerAddresses
+        // in apps/cli's buyer start command for what actually consumes this.
+        ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
+          ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}',
+        // Isolates this demo buyer from the real public AntSeed network -- without
+        // it, bootstrapping through the local-only routing peer still transitively
+        // discovers real public sellers, since that peer is itself connected to
+        // dht1/dht2.antseed.com. Local-dev only, same reasoning as the two vars above.
+        ANTSEED_NO_OFFICIAL_BOOTSTRAP: process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1',
+      },
+    };
+  }
+
+  // Real chain (base-mainnet / base-sepolia): point at the real, staked
+  // Levanto routing peer instead, and skip the devnet isolation flags above
+  // entirely -- ANTSEED_NO_OFFICIAL_BOOTSTRAP would cut this buyer off from
+  // the real dht1/dht2.antseed.com swarm, and the direct-peer JSON names
+  // devnet-only mock sellers that don't exist on a real chain.
   return {
     ...opts,
     router: 'levanto',
     env: {
       ...opts.env,
-      LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
-      LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
-      // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
-      // override"), not a production NAT solution -- see resolveDirectPeerAddresses
-      // in apps/cli's buyer start command for what actually consumes this.
-      ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
-        ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}',
-      // Isolates this demo buyer from the real public AntSeed network -- without
-      // it, bootstrapping through the local-only routing peer still transitively
-      // discovers real public sellers, since that peer is itself connected to
-      // dht1/dht2.antseed.com. Local-dev only, same reasoning as the two vars above.
-      ANTSEED_NO_OFFICIAL_BOOTSTRAP: process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1',
+      LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://18.219.72.232:8787',
+      LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? '4c63288576d1befdbdd5f4734b4c9d4c3d8791be',
     },
   };
 }
