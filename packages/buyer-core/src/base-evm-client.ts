@@ -13,11 +13,36 @@ import {
 
 const FALLBACK_STALL_TIMEOUT_MS = 750;
 const JSON_RPC_REQUEST_TIMEOUT_MS = 2_500;
+/**
+ * ethers' default JsonRpcProvider pollingInterval is 4000ms -- fine for a
+ * real remote chain, but on a local anvil instance (which mines instantly)
+ * that means every tx.wait() takes up to a full 4s even though the
+ * transaction already has a real receipt. Confirmed live while seeding the
+ * mock marketplace: a seller wallet's on-chain nonce was observed advancing
+ * in real time while tx.wait() calls sat "stuck" for exactly this long --
+ * not a hang, just an unnecessarily slow poll cadence. Scoped to
+ * loopback URLs only so this never touches polling behavior (or request
+ * volume/cost) against a real remote RPC endpoint.
+ */
+const LOCAL_RPC_POLLING_INTERVAL_MS = 100;
+
+function isLoopbackUrl(url: string): boolean {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
+  } catch {
+    return false;
+  }
+}
 
 function createJsonRpcProvider(url: string, network?: Network, opts?: object): JsonRpcProvider {
   const request = new FetchRequest(url);
   request.timeout = JSON_RPC_REQUEST_TIMEOUT_MS;
-  return new JsonRpcProvider(request, network, opts);
+  const provider = new JsonRpcProvider(request, network, opts);
+  if (isLoopbackUrl(url)) {
+    provider.pollingInterval = LOCAL_RPC_POLLING_INTERVAL_MS;
+  }
+  return provider;
 }
 
 function buildProvider(rpcUrl: string, fallbackRpcUrls?: string[], evmChainId?: number): AbstractProvider {

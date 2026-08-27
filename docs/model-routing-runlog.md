@@ -1721,3 +1721,63 @@ describes the handler's *behavior* (subscription gate, then Sage) but not this w
 type block (`docs/model-routing-software-architecture.md:40-62`) present `ConversationIdentity`
 as if it were already cleanly importable into `packages/node` — it wasn't; the doc doesn't
 mention this layering constraint or that the type needs to move.
+
+## [2026-08-27] Diverse marketplace: two independent seller peers proven discoverable end-to-end alongside the routing peer, with a real bug found and worked around in the direct-peer-address path
+
+**What's new.** Two standalone `AntseedNode` sellers ("beta", "gamma") running as real,
+independently staked P2P peers (`local-peer-daemon.ts`'s protocol stack, not mocked in-process)
+were connected to a real buyer via the `directPeerAddresses` local-dev escape hatch
+(`ANTSEED_DIRECT_PEER_ADDRESSES_JSON`) alongside the existing routing peer. Each seller carries
+distinct real on-chain stake/channel/volume history (via `anvil_setStorageAt` against
+`AntseedStaking`/`AntseedChannels`'s actual storage layout, not a mock reputation value), so the
+three peers land at three genuinely different `computeOnChainReputationScore` tiers: routing
+peer ~78.7, beta ~77.0, gamma ~25.6 — one peer above the `minTrustScore:70` auto-routing gate
+besides the routing peer, and one clearly below it, as needed to exercise trust-gating logic
+with more than one peer in play. Confirmed via a real buyer CLI daemon's `/v1/models` output
+(not a standalone script) and via real paid chat completions routed to each seller individually,
+each producing a real on-chain payment channel reserve and a real response from that seller's
+own process.
+
+**Real bug found: a freshly-started buyer's eager background DHT sweep can permanently starve
+out `directPeerAddresses` peers from ever appearing.** `BuyerProxy.start()` calls
+`_startIncrementalDiscoverySweep()` immediately (DHT-only, via `AntseedNode`'s
+`peers:discovered` event) specifically so the desktop app doesn't wait on a slow discovery
+before showing services. That sweep's first event — finding the routing peer, which is also a
+configured DHT bootstrap node — calls `_replacePeers()` and makes `_cachedPeers.length > 0`
+before `/v1/models`'s lazy `_getPeers()` ever runs. Because the cache is now non-empty,
+`_getPeers()` never falls into the branch that calls `_discoverPeersFromNetwork()` (the only
+place that merges in `resolveDirectPeers()`), and `/v1/models` never force-refreshes on its own.
+Direct-peer-only sellers (no DHT bootstrap of their own, by design of the escape hatch) are
+never found this way. They *do* appear after `_startBackgroundRefresh()`'s
+`peerRefreshIntervalMs` interval (5 minutes) elapses, or as soon as any real routing/chat request
+runs (`buyer-proxy.ts` calls `_getPeers({forceRefresh:true})` from the actual routing path) —
+both call `_discoverPeersFromNetwork()` directly. Worked around here by sending one real paid
+chat request per direct peer rather than waiting on the interval; not fixed in code this
+session. `resolveDirectPeers()` itself was verified correct in isolation (a standalone script
+using the same config resolves all three peers with full metadata reliably) — the bug is
+specifically in which of two independent peer-population paths wins the race at cold start.
+
+**Real, working-as-designed behavior initially mistaken for a bug: `computeOnChainScore`'s
+sybil-risk adjustment (`buildSybilContext`/`computeOnChainSybilRisk`, weight
+`SYBIL_WEIGHT_NARROW_CUSTOM=0.25`) discounts a peer whose entire service list is one or two
+models nobody else serves.** Each mock seller was originally seeded to serve exactly one
+exclusive custom model, which is exactly the `narrow_custom` signal's target pattern — beta's
+ground-truth (single-peer, no sybil context) score of 71.14 was landing at 46.95 once scored
+against the real multi-peer buyer pipeline. Also contributing for beta specifically: an average
+per-channel ticket size below `SYBIL_SUBFLOOR_TICKET_USDC` ($1.00) tripped `subfloor_ticket`
+(weight 0.30) — beta's seeded 700 USDC / 1000 channels = $0.70/channel average. Fixed by giving
+each mock seller a second, shared model (`kimi-k3`, already served by the routing peer) so
+`narrowCustom`'s `allExclusive` check no longer holds, and by raising beta's seeded
+`totalVolumeUsdc` to 1200 USDC (1.2/channel, clearing the subfloor gate). Post-fix, beta and
+gamma's scores on their own flagship-model listings match their single-peer ground truth exactly
+(76.99, 25.57). Not yet explained: the same two peers show *lower* scores (38.49, 12.78) when
+they show up as additional sellers under the routing peer's shared `kimi-k3` listing in the same
+`/v1/models` response — same underlying peer objects, same request, different number in a
+different part of the same JSON payload. Left open; did not block the reputation-tiering goal
+this was seeded for, but is a real inconsistency worth a follow-up look before relying on
+per-model reputation display for a model multiple peers serve.
+
+**Ground truth reference:** none of the model-routing decision docs describe the sybil-risk
+scoring or the two independent peer-discovery paths in `buyer-proxy.ts` — both were found by
+reading `packages/node/src/reputation/on-chain-reputation.ts` and
+`apps/cli/src/proxy/buyer-proxy.ts` directly against observed runtime behavior.
