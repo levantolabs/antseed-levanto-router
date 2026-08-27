@@ -19,6 +19,14 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-27] Client-side self-heal for a "not subscribed" routing rejection — a mitigation for the entry below, not a fix for it
+
+Requested directly: a reliability improvement for the exact failure mode the entry below documents (a signed SpendingAuth silently fails to durably reach the seller, and the once-per-day signing throttle then blocks any retry until the next calendar day). The real fix is a seller→buyer rejection signal on the wire, which the entry below explicitly declines to build under time pressure on the payment-critical path. This is a narrower, lower-risk client-side improvement that doesn't touch that path at all.
+
+`LevantoRouter.selectRoute` already gets a real, structured signal for this specific failure: the `/_antseed/route` HTTP call itself returns a 402 with `error.message` containing `"Not subscribed..."` — a signal the router already had access to, just never acted on beyond throwing. Fixed: when that specific rejection occurs and `autoSubscriptionEnabled` is genuinely on, `router.ts` now resets `lastSignedDayKey` (forcing `ensureSignedToday` to actually re-sign despite the once-per-day gate) and retries the routing call exactly once with the fresh signature before giving up — bounded to a single retry so a seller down for an unrelated reason doesn't loop. `router.test.ts`: 43/43 passing, three new tests (retry fires and succeeds, retry is bounded to one attempt when the seller still rejects, existing no-retry behavior preserved when the toggle is off). Live-verified no regression to normal (non-error) routing on the WSL devnet post-change.
+
+---
+
 ## [2026-08-27] A latency-sensitive race corrupts bootstrap's back-to-back SpendingAuth sends, and nothing tells the buyer when it happens
 
 Live, on a fresh native-Windows client connecting through WSL2 to this same devnet: the very first subscription bootstrap failed, and every retry escalated further into failure rather than recovering. Root cause was two compounding real bugs, not one.
