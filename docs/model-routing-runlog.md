@@ -1905,3 +1905,34 @@ and retrying never helped. Left as-is; not the day's blocker.
 `autoSubscriptionEnabled` (decisions doc SS8.1, SS14 item 29) describe what the fields mean, not
 that a specific config-loading function needed updating to read them; found by reading the merge
 function directly against the observed live failure, not from a doc gap.
+
+## [2026-08-27] Long-lived routing peer process: new real payment connections started hanging indefinitely after ~40 minutes of sustained test load
+
+**Type:** Real, observed environmental/resource issue, not root-caused to a specific line —
+recorded as a finding, worked around by restart, not fixed in code.
+
+**What was observed.** After roughly 40 minutes of one `local-peer-daemon.js` process serving a
+continuous stream of test connections (this session's `routetest` scripts, two full test
+batteries, several buyer-daemon restarts, and the live desktop app), a **freshly-started** buyer
+process — new PID, new P2P connection, first request of its life — could reach `/v1/models` and
+`/_antseed/status` instantly (discovery-only, no payment connection) but hung indefinitely
+(60s+, no error, no timeout) on any real chat completion, Auto-routed or explicitly pinned alike.
+Isolated by elimination: not Auto-specific (a pinned `glm-5.2` request hung identically), not a
+signing-logic bug (the exact same buyer identity had signed and completed real chat completions
+successfully minutes earlier through a different, since-replaced buyer process), and not
+anything client-side (the routing peer's own log showed zero incoming connection activity for
+the hung request — the hang is upstream of the seller ever seeing it, in payment-connection
+establishment).
+
+**Resolved immediately by restarting only the routing peer process** (same identity, same
+on-chain stake — `loadOrCreateIdentity` reuses the persisted wallet, no re-registration needed).
+The very next request from the *same* already-running buyer process succeeded instantly. This
+points at connection-handling state internal to the long-running P2P layer (`ConnectionManager`/
+DHT signaling) degrading under sustained real-world load rather than anything specific to this
+session's `candidateCatalog()` or config-loader changes — but wasn't traced further (no `strace`
+available in this sandbox to inspect exactly what a hung `getOrConnectPaymentMux` call was
+blocked on). Worth a dedicated look before this routing peer runs unattended for any real
+length of time; a periodic restart is not a real fix.
+
+**Ground truth reference:** none — this is infrastructure behavior under load, not a design
+question any of the model-routing docs address.
