@@ -35,19 +35,20 @@ test('resolveCommandArgs forwards non-default routers', () => {
   ]);
 });
 
-test('applyLevantoRouterDemoOverride forces the Levanto router on connect-mode starts regardless of the caller-requested router', () => {
-  // Regression for the real bug this was written to fix: the renderer's own
-  // boot-time auto-start (app.ts's ensureConnectRuntimeStarted) requests
-  // whatever router the user has configured (defaulting away from
+test('applyLevantoRouterDemoOverride forces the Levanto router on connect-mode starts when the user has it enabled, regardless of the caller-requested router', () => {
+  // Regression for the real bug this was originally written to fix: the
+  // renderer's own boot-time auto-start (app.ts's ensureConnectRuntimeStarted)
+  // requests whatever router the user has configured (defaulting away from
   // 'levanto'), races ahead of the main process's own attempt to force
   // 'levanto', and wins -- so the override has to hold regardless of what a
-  // caller asks for, not just when nothing is specified.
+  // caller asks for, not just when nothing is specified. Only applies when
+  // the user's own preference says on, hence the injected isEnabled() stub.
   for (const requestedRouter of [undefined, 'local', 'custom-router']) {
     const result = applyLevantoRouterDemoOverride({
       mode: 'connect',
       router: requestedRouter,
       env: { EXISTING: '1' },
-    });
+    }, () => true);
     assert.equal(result.router, 'levanto', `router should be forced to levanto when requested router was ${String(requestedRouter)}`);
     assert.equal(result.env?.['LEVANTO_ROUTING_PEER_URL'], process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787');
     assert.equal(result.env?.['LEVANTO_SELLER_PEER_ID'], process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265');
@@ -55,9 +56,20 @@ test('applyLevantoRouterDemoOverride forces the Levanto router on connect-mode s
   }
 });
 
+test('applyLevantoRouterDemoOverride leaves connect-mode starts untouched when the user has not enabled Levanto Auto', () => {
+  // The gap this closes: unconditionally forcing router:'levanto' meant a
+  // genuine mainnet buyer with the router dropdown left on "None" was still
+  // silently pointed at a local routing-peer URL, devnet peer addresses, and
+  // official-bootstrap disabled -- mixing devnet routing infra into a
+  // real-network session the user never asked to be in.
+  const opts = { mode: 'connect' as const, router: 'local', env: { EXISTING: '1' } };
+  const result = applyLevantoRouterDemoOverride(opts, () => false);
+  assert.deepEqual(result, opts);
+});
+
 test('applyLevantoRouterDemoOverride leaves non-connect modes untouched', () => {
   const opts = { mode: 'system-proxy' as const, systemProxyPort: 8080 };
-  const result = applyLevantoRouterDemoOverride(opts);
+  const result = applyLevantoRouterDemoOverride(opts, () => true);
   assert.deepEqual(result, opts);
 });
 

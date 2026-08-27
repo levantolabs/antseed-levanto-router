@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import { desktopSystemProxyCliDataDir } from '../dev-instance.js';
 import { WORKSPACE_APPS_DIR } from '../paths.js';
+import { ACTIVE_CONFIG_PATH } from './active-config.js';
 
 const { join, resolve } = path;
 
@@ -76,13 +77,25 @@ function normalizeRouterIdentifier(value: string | undefined): string {
 }
 
 /**
- * Hardcoded to the Levanto model router for local model-routing-feature demo
- * purposes (runlog: "local routing-peer daemon", 2026-08-26) -- there is no
- * settings/config path yet that lets a buyer choose a router, so this is a
- * deliberate, temporary stand-in for that real choice, not a finished
- * decision. The routing peer URL/peer id below point at whatever
- * `local-peer-daemon.ts` instance is running locally and will need to become
- * real config once one exists.
+ * Applies the Levanto model router only when the user has actually turned it
+ * on (Preferences' "Select model router" dropdown, persisted as
+ * `buyer.routingPreferences.autoSubscriptionEnabled` -- VprPreferencesView.tsx).
+ * That dropdown is the real choice this override used to stand in for before
+ * it existed (runlog: "local routing-peer daemon", 2026-08-26); now that it
+ * exists, unconditionally forcing router:'levanto' regardless of the user's
+ * selection would fight it -- worse, it would force *every* connect-mode
+ * start (including a genuine mainnet buyer with the dropdown left on "None")
+ * onto devnet-shaped defaults (a local routing-peer URL/seller id, devnet
+ * peer addresses, official-bootstrap disabled), silently mixing devnet
+ * routing infra into what's otherwise a real-network session.
+ *
+ * When the preference is off (or unreadable/unset -- never default to on),
+ * `opts` passes through unchanged: no router override, no routing-peer env,
+ * `normalizeRouterIdentifier`'s own fallback takes it to the standard 'local'
+ * price+trust router. The routing peer URL/peer id below still point at
+ * whatever `local-peer-daemon.ts` instance is running locally when the
+ * preference *is* on, since there is still no real mainnet Levanto routing
+ * peer to point at instead.
  *
  * Applied here, at the single point every connect-mode `start()` call
  * ultimately funnels through (`ProcessManager.start` itself), rather than at
@@ -93,8 +106,34 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * them left the other silently winning the race with the wrong router. A
  * single choke point means neither caller needs to know this override exists.
  */
-export function applyLevantoRouterDemoOverride(opts: StartOptions): StartOptions {
+/**
+ * Reads `buyer.routingPreferences.autoSubscriptionEnabled` straight from disk
+ * rather than caching it -- the config file is the one source of truth the
+ * renderer's dropdown, a config-file edit, and this main-process check all
+ * agree on, and a start() call is infrequent enough that a sync file read
+ * here is not a real cost. Any read/parse failure (missing file, malformed
+ * JSON, a config shape from before this field existed) resolves to false --
+ * same "never default to on" rule as the real-money signing gate this
+ * mirrors (router.ts's ensureSignedToday).
+ */
+function isLevantoAutoSubscriptionEnabled(): boolean {
+  try {
+    const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      buyer?: { routingPreferences?: { autoSubscriptionEnabled?: unknown } };
+    };
+    return parsed.buyer?.routingPreferences?.autoSubscriptionEnabled === true;
+  } catch {
+    return false;
+  }
+}
+
+export function applyLevantoRouterDemoOverride(
+  opts: StartOptions,
+  isEnabled: () => boolean = isLevantoAutoSubscriptionEnabled,
+): StartOptions {
   if (opts.mode !== 'connect') return opts;
+  if (!isEnabled()) return opts;
   return {
     ...opts,
     router: 'levanto',
