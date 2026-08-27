@@ -2014,3 +2014,42 @@ services on the old editorial-prior fallback, a decision left to the user rather
 
 **Ground truth reference:** none of the four model-routing docs mention this project at all —
 found by searching the filesystem after being asked directly, not from any doc pointing here.
+
+## [2026-08-27] Real Sage router wired in, marketplace narrowed to its trained hull — genuinely real E2E flow end to end
+
+**Type:** Real feature work (`levanto-routing-server` commit `e92a35c`, `sage_model_router` commits
+`7d5aaa9`/`ced7d28`), superseding the same-day OpenRouter-only entry above, at the user's explicit
+direction after the previous entry's correction surfaced that a real trained Sage router exists.
+
+**What's new.** `sage_model_router/serve.py` (new, committed on that project's own
+`rank-from-precomputed-vector` branch, not pushed — the user's own active feature branch, only my
+one file touched) is a thin HTTP shim over that project's real `Router.load()` +
+`artifact.head.predict_all()`, speaking the exact `/rank` contract the mock sidecar already used.
+`local-peer-daemon.ts` spawns it instead of `sidecar/mock_sage.py` when `SAGE_MODEL_ROUTER_DIR`
+points at a checkout with a venv (httpx/joblib/scikit-learn/tiktoken installed this session), and
+falls back to the fixed-table mock otherwise so this repo still runs standalone. The wire
+protocol's `sagePrompt` field — sent on every real routing request all session, never forwarded —
+now reaches the sidecar (`SidecarClient.rank()`/`handleRoute` both threaded it through), since real
+Sage feature extraction is about the actual prompt text, not just token counts.
+
+The demo marketplace's model panel is narrowed from five fictional/mixed-real service ids to
+exactly `sage_model_router`'s trained hull (SAGE_ROUTER_OVERVIEW.md: `gpt-5.6-luna`,
+`deepseek-v4-flash-0731`, `hy3`, `gpt-5.6-sol`, `kimi-k3`), split across the same 3 peers as
+before (routing peer: `gpt-5.6-luna`+`kimi-k3`+`hy3`; beta: `gpt-5.6-sol`+shared `kimi-k3`; gamma:
+`deepseek-v4-flash-0731`+shared `kimi-k3`), each now mapped to its real, identically-named,
+*paid* (not free-tier) OpenRouter model — genuinely cheap per call, but not zero-cost like the
+prior entry's free-tier mapping. `serve.py` scores only the models a request actually asks for
+(the antseed-servable set), not the artifact's full 14-model trained panel, and loads
+`artifact_live9_cal.joblib` (2026-08-18, a recalibrated CQT/price schedule on the identical trained
+hull `artifact_live9.joblib` used) rather than the older file the committed docs reference.
+
+**Verified live**, through the actual desktop app: a real "What is the tallest mountain on Earth?"
+produced a real, substantive, correct multi-paragraph answer from `hy3` (a real OpenRouter model,
+picked by real Sage feature extraction on that exact prompt through real trained per-model quality
+heads, real CQT-weighted selection against real marketplace prices), real 312 total tokens, routed
+through the same real `candidateCatalog()`/`minTrustScore` pipeline the earlier entries built —
+end to end, every layer of this flow is now real: routing decision, quality signal, payment,
+inference.
+
+**Ground truth reference:** none — this composes three same-session findings (real peer discovery,
+real payment, the newly-found real Sage router) rather than following any of the four docs.
