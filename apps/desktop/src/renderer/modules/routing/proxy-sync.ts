@@ -4,6 +4,7 @@ import { chooseBestVprRoute } from './select';
 import { routesForSelectedModel } from '../catalog/view-models';
 import { CODING_ONLY_SUFFIX_RE } from '../catalog/model-identity';
 import { activeProfilesFromRuntimeState, buildVprPeerOptions } from './tools';
+import { isLevantoAutoSelected } from './levanto-auto';
 
 declare const __ANTSEED_SYSTEM_PROXY_PORT__: number;
 
@@ -29,6 +30,15 @@ export function buyerDefaultRoutePayload(
 function resolveRouteTarget(uiState: RendererUiState): VprRouteTarget | null {
   const selection = uiState.vprRouteSelection;
   if (!selection.model) return null;
+  // Auto has no real advertised service and must never resolve to a
+  // peer-pinned default route -- `LevantoRouter.selectRoute` makes this
+  // conversation's routing decision itself, per real request. Without this
+  // guard, a stale `mode: 'pinned-peer'` selection left over from an earlier
+  // explicit peer pin (selection.model already back to the Auto sentinel)
+  // falls through this function's peerId fallback below and posts a bogus
+  // `<peerId>@levanto-auto` default route, which every peer correctly
+  // rejects as "Service levanto-auto is not served by this peer".
+  if (isLevantoAutoSelected(selection.model)) return null;
   const selectedEntry = uiState.vprModelCatalog.find((entry) => (
     entry.provider === selection.model?.provider && entry.serviceId === selection.model.serviceId
   ));

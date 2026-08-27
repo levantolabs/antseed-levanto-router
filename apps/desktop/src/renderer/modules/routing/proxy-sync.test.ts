@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { createInitialUiState, type DiscoverRow, type VprRouteSelection } from '../../core/state.js';
 import { buyerDefaultRoutePayload, syncBuyerDefaultRoute, type VprRouteTarget } from './proxy-sync.js';
+import { LEVANTO_AUTO_CATALOG_ENTRY } from './levanto-auto.js';
 
 const model = {
   provider: 'openai',
@@ -114,4 +115,27 @@ test('desktop Auto replaces a stale coding-only selection with an unrestricted r
   }, uiState);
 
   assert.deepEqual(payloads, [{ service: 'claude-fable-5' }]);
+});
+
+test('desktop never syncs a peer-pinned default route while Auto is selected, even with a stale pinned-peer mode', async () => {
+  const uiState = createInitialUiState();
+  // Simulates a leftover `mode: 'pinned-peer'` from an earlier explicit peer
+  // pin, with the selection since switched back to the Auto sentinel --
+  // without the Auto guard, resolveRouteTarget's peerId fallback would still
+  // produce a target and post `<peerId>@levanto-auto` to the buyer proxy.
+  uiState.vprRouteSelection = {
+    model: LEVANTO_AUTO_CATALOG_ENTRY,
+    mode: 'pinned-peer',
+    peerId: 'a'.repeat(40),
+  };
+  const payloads: unknown[] = [];
+
+  await syncBuyerDefaultRoute({
+    chatSetBuyerDefaultRoute: async (payload) => {
+      payloads.push(payload);
+      return { ok: true };
+    },
+  }, uiState);
+
+  assert.deepEqual(payloads, []);
 });
