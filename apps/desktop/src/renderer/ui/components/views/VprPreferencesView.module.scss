@@ -85,6 +85,25 @@
   line-height: 20px;
 }
 
+.select {
+  min-width: 120px;
+  max-width: 170px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 18px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+
+.select:focus {
+  border-color: var(--border-strong);
+}
+
 /* ---------- Pinned seller ---------- */
 
 .pinnedSection {

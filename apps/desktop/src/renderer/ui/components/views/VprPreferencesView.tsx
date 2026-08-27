@@ -81,20 +81,26 @@ export function VprPreferencesView({ onSelectView }: Props) {
           />
 
           <VprSettingRow
-            title="Levanto Auto model routing"
-            caption="(Daily subscription)"
+            title="Select model router"
             hint={subscriptionHint}
             control={(
-              <VprToggle
-                checked={autoSubscriptionEnabled}
-                onChange={(next) => actions.updateVprRoutingPreferences({
-                  autoSubscriptionEnabled: next,
-                  ...(next && snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
-                    ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
-                    : {}),
-                })}
-                ariaLabel="Enable Levanto Auto model routing (starts a daily subscription)"
-              />
+              <select
+                className={styles.select}
+                value={autoSubscriptionEnabled ? 'levanto-auto' : 'none'}
+                onChange={(event) => {
+                  const next = event.target.value === 'levanto-auto';
+                  actions.updateVprRoutingPreferences({
+                    autoSubscriptionEnabled: next,
+                    ...(next && snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
+                      ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
+                      : {}),
+                  });
+                }}
+                aria-label="Select model router"
+              >
+                <option value="none">None</option>
+                <option value="levanto-auto">Levanto Auto (daily subscription)</option>
+              </select>
             )}
           />
 
@@ -115,7 +121,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
                 ariaLabel="Cost / quality tradeoff"
               />
               <div className={styles.sliderHint}>
-                Only affects "Levanto Auto" model requests. A relative dial, not a spend target.
+                Only affects requests routed through the selected model router. A relative dial, not a spend target.
               </div>
             </div>
           ) : null}
@@ -150,7 +156,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
             />
             <div className={styles.sliderHint}>
               Providers rated below this are never used
-              {autoSubscriptionEnabled ? ' — locked to 7.0+ while Levanto Auto is on' : ''}
+              {autoSubscriptionEnabled ? ' — locked to 7.0+ while a model router is selected' : ''}
             </div>
           </div>
 
