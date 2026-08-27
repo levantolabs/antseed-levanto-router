@@ -106,7 +106,7 @@ export function applyLevantoRouterDemoOverride(opts: StartOptions): StartOptions
       // override"), not a production NAT solution -- see resolveDirectPeerAddresses
       // in apps/cli's buyer start command for what actually consumes this.
       ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
-        ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892"}',
+        ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}',
       // Isolates this demo buyer from the real public AntSeed network -- without
       // it, bootstrapping through the local-only routing peer still transitively
       // discovers real public sellers, since that peer is itself connected to
