@@ -375,6 +375,9 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           // seller can extract via an inflated 402 target (per 402 round trip).
           maxPerRequestUsdc: config.payments?.maxPerRequestUsdc ?? '300000',
           maxReserveAmountUsdc: config.payments?.maxReserveAmountUsdc ?? '1000000',
+          ...(config.payments?.defaultAuthDurationSecs !== undefined
+            ? { defaultAuthDurationSecs: config.payments.defaultAuthDurationSecs }
+            : {}),
           disableMetadataV2Services: effectiveBuyerConfig.disableMetadataV2Services,
         }
       }
