@@ -70,10 +70,8 @@ describe('buildDigest', () => {
     expect(digest.routedRequests).toBe(0);
   });
 
-  it('regenerations/overrides/failovers/timeouts default to 0 (no signal source yet)', () => {
+  it('failovers/timeouts default to 0 (no signal source yet)', () => {
     const digest = buildDigest([row()], periodKey());
-    expect(digest.regenerations).toBe(0);
-    expect(digest.overrides).toBe(0);
     expect(digest.failovers).toBe(0);
     expect(digest.timeouts).toBe(0);
   });

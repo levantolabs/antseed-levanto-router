@@ -20,12 +20,10 @@ export interface DailyDigestBody {
   observedCachedInputTokens: number;
   observedOutputTokens: number;
   modelMix: Record<string, number>;
-  // regenerations/overrides/failovers/timeouts: doc SS2.7 flags all four as
-  // needing a signal nothing currently produces (VPR UI, SS2.4 failover-walk
-  // counters) -- always 0 in this pass, not a fabricated measurement. Logged
-  // in the runlog rather than silently presented as real data.
-  regenerations: number;
-  overrides: number;
+  // failovers/timeouts: doc SS2.7 flags both as needing a signal nothing
+  // currently produces (SS2.4 failover-walk counters) -- always 0 in this
+  // pass, not a fabricated measurement. Logged in the runlog rather than
+  // silently presented as real data.
   failovers: number;
   timeouts: number;
   avgRoutingLatencyMs: number | null;
@@ -87,8 +85,6 @@ export function buildDigest(rows: readonly RoutingDecisionRow[], period: string)
     observedCachedInputTokens,
     observedOutputTokens,
     modelMix,
-    regenerations: 0,
-    overrides: 0,
     failovers: 0,
     timeouts: 0,
     avgRoutingLatencyMs: latencyCount > 0 ? latencySum / latencyCount : null,
