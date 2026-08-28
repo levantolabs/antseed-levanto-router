@@ -1443,7 +1443,10 @@ export function initChatModule({
       && !isLevantoAutoSelected(selected)
       && routesForSelectedModel(uiState.vprRoutableRows, selected).length === 0
     ) {
-      const defaultModel = selectDefaultVprModel(uiState.vprModelCatalog, null, freeEntryRouteReputation);
+      const defaultModel = selectDefaultVprModel(
+        uiState.vprModelCatalog, null, freeEntryRouteReputation,
+        uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+      );
       uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
       saveVprRouteSelection(uiState.vprRouteSelection);
     }
@@ -1561,7 +1564,10 @@ export function initChatModule({
         ? findCatalogEntry(uiState.vprModelCatalog, selectedRouteModel.provider, selectedRouteModel.serviceId)
         : null;
       if (!selectedRouteModel || selectedRouteEntry?.kind === 'image') {
-        const defaultModel = selectDefaultVprModel(uiState.vprModelCatalog, null, freeEntryRouteReputation);
+        const defaultModel = selectDefaultVprModel(
+          uiState.vprModelCatalog, null, freeEntryRouteReputation,
+          uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+        );
         if (defaultModel) {
           uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
           saveVprRouteSelection(uiState.vprRouteSelection);

@@ -89,7 +89,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
                 aria-label="Select model router"
               >
                 <option value="none">None</option>
-                <option value="levanto-auto">Levanto Auto (daily subscription)</option>
+                <option value="levanto-auto">Levanto Router</option>
               </select>
             )}
           />

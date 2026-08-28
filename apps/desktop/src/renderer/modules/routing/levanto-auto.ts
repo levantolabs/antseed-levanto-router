@@ -13,7 +13,7 @@ import type { VprModelCatalogEntry } from '../../core/state';
  */
 export const LEVANTO_AUTO_PROVIDER = 'levanto';
 export const LEVANTO_AUTO_SERVICE_ID = 'levanto-auto';
-export const LEVANTO_AUTO_LABEL = 'Levanto Auto';
+export const LEVANTO_AUTO_LABEL = 'Levanto Router';
 
 /**
  * Satisfies VprModelCatalogEntry's full shape for type compatibility with the

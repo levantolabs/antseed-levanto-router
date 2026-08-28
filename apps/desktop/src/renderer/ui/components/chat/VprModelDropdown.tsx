@@ -14,6 +14,7 @@ import {
 } from '../../../modules/catalog/recommended';
 import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
 import { BrandIcon } from '../brand/BrandIcon';
+import { LevantoRouterInfoDialog } from './LevantoRouterInfoDialog';
 import styles from './VprModelDropdown.module.scss';
 
 /* The menu shows the curated recommended lineup (frontier + free models);
@@ -65,6 +66,7 @@ export function VprModelDropdown({
 }: VprModelDropdownProps) {
   const [open, setOpen] = useState(false);
   const [favorites, setFavorites] = useState(loadFavoriteModels);
+  const [levantoInfoEntry, setLevantoInfoEntry] = useState<VprModelCatalogEntry | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Favorites are starred on the model pages (localStorage); re-read on each
@@ -178,7 +180,7 @@ export function VprModelDropdown({
         aria-selected={active}
         onClick={() => {
           setOpen(false);
-          if (!active) onSelect(entry);
+          if (!active) setLevantoInfoEntry(entry);
         }}
       >
         <span className={styles.itemTopRow}>
@@ -186,10 +188,9 @@ export function VprModelDropdown({
             <BrandIcon name={entry.provider} hints={[entry.label]} size={16} />
             <span className={styles.itemName}>{entry.label}</span>
           </span>
-          <span className={styles.itemPricing}>$0.59/day</span>
         </span>
         <span className={styles.itemMeta}>
-          <span>Cost/quality-aware routing across every model, one flat subscription</span>
+          <span>configure cost quality tradeoff in preferences</span>
         </span>
       </button>
     );
@@ -240,6 +241,14 @@ export function VprModelDropdown({
           )}
         </div>
       )}
+      <LevantoRouterInfoDialog
+        isOpen={levantoInfoEntry !== null}
+        onClose={() => setLevantoInfoEntry(null)}
+        onConfirm={() => {
+          if (levantoInfoEntry) onSelect(levantoInfoEntry);
+          setLevantoInfoEntry(null);
+        }}
+      />
     </div>
   );
 }

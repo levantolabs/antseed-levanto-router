@@ -7,6 +7,7 @@ import {
   projectRowsToVprModelCatalog,
   selectDefaultVprModel,
 } from './model-catalog.js';
+import { LEVANTO_AUTO_PROVIDER, LEVANTO_AUTO_SERVICE_ID, withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
 
 function discoverRow(overrides: Partial<DiscoverRow> = {}): DiscoverRow {
   const peerId = overrides.peerId ?? 'p1';
@@ -169,6 +170,32 @@ test('selectDefaultVprModel falls back to the first sorted catalog entry', () =>
     label: 'Alpha',
     categories: [],
   });
+});
+
+test('selectDefaultVprModel prefers Levanto Router when enabled, ahead of a free model that would otherwise win', () => {
+  const withFreeModel = projectRowsToVprModelCatalog([
+    discoverRow({
+      provider: 'openai', serviceId: 'free-mini', serviceLabel: 'Free Mini',
+      inputUsdPerMillion: 0, outputUsdPerMillion: 0,
+    }),
+  ]);
+  const catalog = withLevantoAutoCatalogEntry(withFreeModel, true);
+
+  const result = selectDefaultVprModel(catalog, null, undefined, true);
+
+  assert.equal(result?.provider, LEVANTO_AUTO_PROVIDER);
+  assert.equal(result?.serviceId, LEVANTO_AUTO_SERVICE_ID);
+});
+
+test('selectDefaultVprModel falls back to normal selection when preferLevantoRouter is true but the entry is absent', () => {
+  const catalog = projectRowsToVprModelCatalog([
+    discoverRow({
+      provider: 'openai', serviceId: 'free-mini', serviceLabel: 'Free Mini',
+      inputUsdPerMillion: 0, outputUsdPerMillion: 0,
+    }),
+  ]);
+
+  assert.equal(selectDefaultVprModel(catalog, null, undefined, true)?.serviceId, 'free-mini');
 });
 
 test('selectDefaultVprModel prefers a free model for the first selection', () => {
