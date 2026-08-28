@@ -925,16 +925,28 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
     if (assistantMeta.latencyMs > 0) rows.push({ label: 'Latency', value: `${Math.round(assistantMeta.latencyMs)}ms` });
     return rows;
   }, [assistantMeta]);
-  const routeAlternativeRows = useMemo<ChatRoutingAlternativeRow[]>(() => {
-    if (!assistantMeta || assistantMeta.routeAlternatives.length === 0) return [];
-    return assistantMeta.routeAlternatives.map((candidate) => ({
-      model: displayModelLabel(candidate.service),
+  const routeAlternatives = useMemo(() => {
+    if (!assistantMeta || assistantMeta.routeAlternatives.length === 0) {
+      return { rows: [] as ChatRoutingAlternativeRow[], modelCaption: undefined as string | undefined };
+    }
+    // Alternatives are usually the same model from different sellers -- when
+    // that holds, showing it once above the table (instead of truncating an
+    // identical, near-illegible string on every row) leaves the row width
+    // for what actually differs: seller and price.
+    const services = new Set(assistantMeta.routeAlternatives.map((c) => c.service));
+    const sameModel = services.size === 1;
+    const rows = assistantMeta.routeAlternatives.map((candidate) => ({
+      ...(sameModel ? {} : { model: displayModelLabel(candidate.service) }),
       peerId: candidate.peerId,
       price: candidate.inputUsdPerMillion !== null && candidate.outputUsdPerMillion !== null
         ? `$${formatUsd(candidate.inputUsdPerMillion)} / $${formatUsd(candidate.outputUsdPerMillion)} per M`
         : '—',
       isPicked: candidate.peerId === assistantMeta.peerId && candidate.service === assistantMeta.service,
     }));
+    return {
+      rows,
+      modelCaption: sameModel ? displayModelLabel([...services][0]!) : undefined,
+    };
   }, [assistantMeta]);
   const hasStreamingBlocks = useMemo(
     () =>
@@ -987,7 +999,8 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
             <ChatRoutingBadge
               modelLabel={displayModelLabel(assistantMeta.service)}
               details={routingDetails}
-              alternatives={routeAlternativeRows}
+              alternatives={routeAlternatives.rows}
+              alternativesModelCaption={routeAlternatives.modelCaption}
             />
           )}
         </div>

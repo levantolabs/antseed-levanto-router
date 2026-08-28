@@ -13,7 +13,10 @@ export type ChatRoutingDetail = {
 };
 
 export type ChatRoutingAlternativeRow = {
-  model: string;
+  /** Omitted when every alternative serves the same model -- the caller
+   *  shows that once via `alternativesModelCaption` instead of repeating a
+   *  long, near-identical string on every row. */
+  model?: string;
   peerId: string;
   price: string;
   /** True for the candidate that was actually used -- highlighted in the
@@ -28,12 +31,15 @@ type Props = {
   details?: ChatRoutingDetail[];
   /** The router's top few ranked candidates for this request, in order. */
   alternatives?: ChatRoutingAlternativeRow[];
+  /** Shown once above the alternatives table when every row serves this
+   *  same model (the common case: same model, different sellers). */
+  alternativesModelCaption?: string;
 };
 
 /** Collapsed by default -- "Routed to X" is enough at a glance; the rest
  *  (peer, cost, latency, alternatives considered) is one click away instead
  *  of always cluttering the message. */
-export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [] }: Props) {
+export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [], alternativesModelCaption }: Props) {
   const [expanded, setExpanded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -81,15 +87,31 @@ export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [] }
           ))}
           {alternatives.length > 0 && (
             <div className={styles.alternatives}>
-              <div className={styles.alternativesTitle}>Considered</div>
+              <div className={styles.alternativesTitle}>
+                Considered{alternativesModelCaption ? ` — ${alternativesModelCaption}` : ''}
+              </div>
               <table className={styles.alternativesTable}>
+                <colgroup>
+                  {alternativesModelCaption ? (
+                    <>
+                      <col className={styles.colPeerNoModel} />
+                      <col className={styles.colPriceNoModel} />
+                    </>
+                  ) : (
+                    <>
+                      <col className={styles.colModel} />
+                      <col className={styles.colPeer} />
+                      <col className={styles.colPrice} />
+                    </>
+                  )}
+                </colgroup>
                 <tbody>
-                  {alternatives.map((row) => (
+                  {alternatives.map((row, index) => (
                     <tr
-                      key={`${row.peerId}-${row.model}`}
+                      key={`${row.peerId}-${row.model ?? index}`}
                       className={row.isPicked ? styles.alternativeRowPicked : styles.alternativeRow}
                     >
-                      <td className={styles.alternativeModel}>{row.model}</td>
+                      {row.model && <td className={styles.alternativeModel}>{row.model}</td>}
                       <td className={styles.alternativePeer}>{row.peerId.slice(0, 8)}</td>
                       <td className={styles.alternativePrice}>{row.price}</td>
                     </tr>

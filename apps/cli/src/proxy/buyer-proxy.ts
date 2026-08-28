@@ -157,6 +157,9 @@ export interface BuyerProxyConfig {
 }
 
 const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504])
+/** Client disclosure only (x-antseed-route-alternatives) -- not a limit on
+ *  how many candidates the router itself ranks or dispatch tries. */
+const MAX_DISCLOSED_ROUTE_ALTERNATIVES = 10
 const MODEL_RATE_LIMIT_MAX_ATTEMPTS_PER_PEER = 3
 const MODEL_RATE_LIMIT_RETRY_DELAYS_MS = [250, 750] as const
 const MODEL_RATE_LIMIT_MAX_RETRY_AFTER_MS = 2_000
@@ -2518,7 +2521,7 @@ export class BuyerProxy {
           peerCooldownUntil: null,
           peerFailureStreak: 0,
         }))
-        routeAlternatives = candidates.slice(0, 3).map((candidate) => ({
+        routeAlternatives = candidates.slice(0, MAX_DISCLOSED_ROUTE_ALTERNATIVES).map((candidate) => ({
           peerId: candidate.peerId,
           service: candidate.serviceId,
           inputUsdPerMillion: candidate.inputUsdPerMillion,

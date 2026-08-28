@@ -107,17 +107,30 @@
 
 .alternativesTitle {
   margin-bottom: 6px;
+  overflow: hidden;
   color: var(--text-muted);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* Fixed layout so cell widths come from these column rules instead of
+   content -- without it, a long model/peer string stretches the table wider
+   than `.detail`'s own box instead of eliding inside it. */
 .alternativesTable {
   width: 100%;
+  table-layout: fixed;
   border-collapse: collapse;
   font-size: 12px;
 }
+
+.colModel { width: 46%; }
+.colPeer { width: 27%; }
+.colPrice { width: 27%; }
+.colPeerNoModel { width: 40%; }
+.colPriceNoModel { width: 60%; }
 
 .alternativeRow,
 .alternativeRowPicked {
@@ -130,7 +143,9 @@
 
 .alternativesTable td {
   padding: 3px 6px;
+  overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .alternativesTable td:first-child {
@@ -145,9 +160,6 @@
 
 .alternativeModel {
   color: var(--text-primary);
-  max-width: 140px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .alternativePeer {
