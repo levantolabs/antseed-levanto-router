@@ -94,30 +94,34 @@ interface RouteResponseBody {
 }
 
 /**
- * Curated baseline/dropdown model list (decisions doc SS8.4, SS13 item 10,
- * resolved). Names TBD from the real model hull (SS7) per the user's own
- * note -- these are placeholders, not a final curated list. Picked from this
- * codebase's own existing catalog code, not invented fresh: `recommended.ts`
- * (apps/desktop/src/renderer/modules/catalog/recommended.ts) already treats
- * `claude-opus-5` and `gpt-5.6-sol` as distinct, notable flagship-tier
- * variants with their own slot, matching SS8.4's "the most expensive, most
- * capable flagship -- the top GPT or Claude model."
+ * Default pre-selected comparison model for a future SS8.4 savings-page
+ * dropdown (decisions doc SS8.4, SS13 item 10) -- not a limit on which
+ * models get a price snapshot (computeBaselinePrices below covers every
+ * model actually ranked), just which one a comparison UI opens on before the
+ * user picks a different one. `claude-opus-5` matches `recommended.ts`
+ * (apps/desktop/src/renderer/modules/catalog/recommended.ts)'s own
+ * flagship-tier slot, per SS8.4's "the most expensive, most capable
+ * flagship -- the top GPT or Claude model."
  */
 export const DEFAULT_BASELINE_MODELS: readonly string[] = ['claude-opus-5', 'gpt-5.6-sol'];
 
 type BaselinePrices = Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
 
 /**
- * One entry per curated baseline model actually present in this decision's
- * ranked response, collapsed across peers to the best available offer
- * (decisions doc SS2.5) -- "best" here means lowest inUsdPerM, the simplest
- * defensible single-axis choice absent a fixed token mix to combine input
- * and output into one true total cost. Absent entirely for a baseline model
- * that wasn't offered at all in this ranking.
+ * One entry per DISTINCT model actually present in this decision's ranked
+ * response -- every candidate the routing peer offered, not just a curated
+ * subset -- collapsed across peers to the best available offer (decisions
+ * doc SS2.5) -- "best" here means lowest inUsdPerM, the simplest defensible
+ * single-axis choice absent a fixed token mix to combine input and output
+ * into one true total cost. Covering every ranked model (not just
+ * DEFAULT_BASELINE_MODELS) is deliberate: a future comparison dropdown needs
+ * real price data for whatever model the user picks, not just the two
+ * pre-selected ones.
  */
 function computeBaselinePrices(ranked: RouteResponseBody['ranked']): BaselinePrices {
   const out: BaselinePrices = {};
-  for (const model of DEFAULT_BASELINE_MODELS) {
+  const models = new Set(ranked.map((entry) => entry.model));
+  for (const model of models) {
     let best: RouteResponseBody['ranked'][number] | null = null;
     for (const entry of ranked) {
       if (entry.model !== model) continue;

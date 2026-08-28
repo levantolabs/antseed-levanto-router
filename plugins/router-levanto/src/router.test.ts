@@ -564,19 +564,19 @@ describe('LevantoRouter.selectRoute', () => {
       expect(rows[0]?.routingLatencyMs).toBeGreaterThanOrEqual(0);
     });
 
-    it('populates baselinePrices from the curated model list, collapsed across peers to the cheapest input price (decisions doc SS13 item 10)', async () => {
+    it('populates baselinePrices for every ranked model, collapsed across peers to the cheapest input price (decisions doc SS13 item 10)', async () => {
       const fetchImpl = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => rankedResponse({
           ranked: [
             { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.0012, inputTokens: 100, cachedInputTokens: 20, outputTokens: 45 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
-            // Two sellers of a curated baseline model -- the cheaper one (0xCCC) should win.
+            // Two sellers of the same model -- the cheaper one (0xCCC) should win.
             { model: 'claude-opus-5', peer: '0xBBB', estimate: { costUsd: 0.02, inputTokens: 100, cachedInputTokens: 0, outputTokens: 45 },
               price: { inUsdPerM: 16, outUsdPerM: 80, cachedInUsdPerM: 1.6 } },
             { model: 'claude-opus-5', peer: '0xCCC', estimate: { costUsd: 0.018, inputTokens: 100, cachedInputTokens: 0, outputTokens: 45 },
               price: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 0 } },
-            // gpt-5.6-sol (the other curated model) is NOT offered at all this call.
+            // gpt-5.6-sol is NOT offered at all this call.
           ],
         }),
       });
@@ -586,7 +586,10 @@ describe('LevantoRouter.selectRoute', () => {
       router.onResult(peer('0xAAA'), { success: true, latencyMs: 10, tokens: 10, requestId: 'r1' });
 
       const row = router.getLedgerRows()[0];
+      // Every distinct model actually ranked gets a snapshot -- not a curated
+      // subset -- so a future comparison dropdown can price any of them.
       expect(row?.baselinePrices).toEqual({
+        'gpt-5.6-luna': { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 },
         'claude-opus-5': { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: null }, // 0xCCC wins (cheaper), 0 -> null
       });
       expect(row?.baselinePrices['gpt-5.6-sol']).toBeUndefined(); // never offered -- absent, not fabricated
