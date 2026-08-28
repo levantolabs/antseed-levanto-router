@@ -557,7 +557,21 @@ export function registerPiChatHandlers({
             );
           }
         }
-        await Promise.all(enrichmentTasks);
+        // Bounded, not awaited unconditionally: each task already carries its
+        // own 2.5s per-domain AbortSignal timeout (domain-site-metadata.ts),
+        // but a domain that black-holes at the network level (packets
+        // dropped, not refused) can outlast that -- found live: 4 of 18
+        // seller-advertised verification domains did this, hanging
+        // Promise.all indefinitely and leaving chat:ai-list-discover-rows
+        // (and the whole catalog) stuck with nothing to return. Enrichment
+        // is cosmetic favicon/verification-badge data, never something the
+        // catalog itself should block on -- any task still pending past this
+        // just keeps its pre-enrichment default (peerIconUrl: null, links
+        // unchanged) rather than holding up real, non-cosmetic catalog data.
+        await Promise.race([
+          Promise.all(enrichmentTasks),
+          new Promise<void>((resolve) => setTimeout(resolve, 3_000)),
+        ]);
       } catch {
         // No state file yet
       }
