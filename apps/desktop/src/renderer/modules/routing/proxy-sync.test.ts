@@ -139,3 +139,45 @@ test('desktop never syncs a peer-pinned default route while Auto is selected, ev
 
   assert.deepEqual(payloads, []);
 });
+
+test('desktop clears the buyer default route while Auto is selected', async () => {
+  const uiState = createInitialUiState();
+  uiState.vprRouteSelection = { model: LEVANTO_AUTO_CATALOG_ENTRY, mode: 'auto', peerId: null };
+  let clearCalls = 0;
+  const setPayloads: unknown[] = [];
+
+  await syncBuyerDefaultRoute({
+    chatSetBuyerDefaultRoute: async (payload) => {
+      setPayloads.push(payload);
+      return { ok: true };
+    },
+    chatClearBuyerDefaultRoute: async () => {
+      clearCalls += 1;
+      return { ok: true };
+    },
+  }, uiState);
+
+  assert.equal(clearCalls, 1);
+  assert.deepEqual(setPayloads, []);
+});
+
+test('desktop does not clear the buyer default route for a non-Auto null target (e.g. no route found yet)', async () => {
+  const uiState = createInitialUiState();
+  // A real model selection with no advertising peer in vprRoutableRows --
+  // resolveRouteTarget returns null here too, but for an unrelated reason
+  // (no route found), which must leave any existing default route alone
+  // rather than being swept up by the Auto-only clear.
+  uiState.vprRouteSelection = { model, mode: 'auto', peerId: null };
+  uiState.vprRoutableRows = [];
+  let clearCalls = 0;
+
+  await syncBuyerDefaultRoute({
+    chatSetBuyerDefaultRoute: async () => ({ ok: true }),
+    chatClearBuyerDefaultRoute: async () => {
+      clearCalls += 1;
+      return { ok: true };
+    },
+  }, uiState);
+
+  assert.equal(clearCalls, 0);
+});

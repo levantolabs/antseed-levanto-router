@@ -106,6 +106,15 @@ async function startProfilesOnRoute(
  * resolve their peer from this route instead of re-deriving it. Best-effort —
  * main dedupes repeat values and the buyer proxy may not be running yet, so
  * this is safe to call from polling refreshes.
+ *
+ * Levanto Auto has no fixed peer/model `resolveRouteTarget` can return, so it
+ * actively clears the route instead of merely skipping the update -- without
+ * this, a route set before Auto was selected (or written by the null-selection
+ * auto-fill's free-model fallback) sits there indefinitely, and the `antseed`
+ * alias/Telegram bridge keep silently resolving to it. Scoped to exactly the
+ * Auto-selected case, not every other reason `resolveRouteTarget` can return
+ * null (an image-kind selection, a real model with no route found yet), which
+ * must leave the existing route untouched as before.
  */
 export async function syncBuyerDefaultRoute(
   bridge: DesktopBridge | undefined,
@@ -113,7 +122,12 @@ export async function syncBuyerDefaultRoute(
 ): Promise<void> {
   if (!bridge?.chatSetBuyerDefaultRoute) return;
   const target = resolveRouteTarget(uiState);
-  if (!target) return;
+  if (!target) {
+    if (isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+      await bridge.chatClearBuyerDefaultRoute?.().catch(() => undefined);
+    }
+    return;
+  }
   await bridge.chatSetBuyerDefaultRoute(
     buyerDefaultRoutePayload(uiState.vprRouteSelection, target),
   ).catch(() => undefined);

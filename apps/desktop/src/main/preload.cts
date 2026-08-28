@@ -312,6 +312,9 @@ const api = {
   chatSetBuyerDefaultRoute(payload: { peerId?: string; service: string }): Promise<{ ok: boolean; error?: string }> {
     return ipcRenderer.invoke('chat:set-buyer-default-route', payload);
   },
+  chatClearBuyerDefaultRoute(): Promise<{ ok: boolean; error?: string }> {
+    return ipcRenderer.invoke('chat:clear-buyer-default-route');
+  },
   chatSyncModelPicker(payload: unknown): Promise<{ ok: boolean }> {
     return ipcRenderer.invoke('chat:sync-model-picker', payload);
   },

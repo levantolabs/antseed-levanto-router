@@ -924,6 +924,34 @@ export function registerPiChatHandlers({
     setBuyerDefaultRoute(payload?.peerId, payload?.service)
   ));
 
+  // Levanto Auto has no fixed peer/model to post as the default route --
+  // `setBuyerDefaultRoute` above correctly declines to update it while Auto
+  // is selected, but "decline to update" leaves whatever concrete route was
+  // set before Auto was chosen sitting there indefinitely, since nothing
+  // else clears it. The `antseed` alias and the Telegram bridge then keep
+  // silently resolving to that stale model, invisibly to the user. A
+  // dedicated clear (POST an empty model) is the only way back to "no
+  // default route" -- distinct from `setBuyerDefaultRoute`, which rejects an
+  // empty service as a malformed call rather than an intentional clear.
+  const clearBuyerDefaultRoute = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (lastPostedDefaultRoute === '') return { ok: true };
+    try {
+      const proxyPort = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${proxyPort}/_antseed/route`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model: '' }),
+      });
+      const result = await response.json() as { ok?: boolean; error?: string };
+      if (result.ok) lastPostedDefaultRoute = '';
+      return { ok: result.ok ?? false, error: result.error };
+    } catch (err) {
+      return { ok: false, error: asErrorMessage(err) };
+    }
+  };
+
+  ipcMain.handle('chat:clear-buyer-default-route', async () => clearBuyerDefaultRoute());
+
   return {
     createConversation,
     sendMessageStream: (conversationId, userMessage, options) => runStreamingPrompt(
