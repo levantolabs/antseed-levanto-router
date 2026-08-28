@@ -394,6 +394,12 @@ export class BuyerPaymentManager {
     this._rejectedPeers.delete(sellerPeerId);
     this._responseTokenTotals.delete(sellerPeerId);
     this._clearRequestBillingForSeller(sellerPeerId);
+    // Keyed by sellerPeerId, not sessionId -- without this, retiring a
+    // session and opening a fresh one with the same seller left this map's
+    // stale timestamp in place, so signCumulativeAuth's very first signature
+    // on the new session would compute its elapsed-day window against the
+    // OLD session's last sign instead of correctly treating it as day one.
+    this._lastFlatFeeSignedAt.delete(sellerPeerId);
   }
 
   getActiveSession(sellerPeerId: string): StoredChannel | null {
