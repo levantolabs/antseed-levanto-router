@@ -920,6 +920,10 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
   const routingDetails = useMemo<ChatRoutingDetail[]>(() => {
     if (!assistantMeta) return [];
     const rows: ChatRoutingDetail[] = [];
+    // The collapsed pill shows displayModelLabel's friendly form; expanded is
+    // where the precise, full serviceId belongs (e.g. "deepseek-v4-flash-0731"
+    // rather than "DeepSeek V4 Flash 0731").
+    if (assistantMeta.service) rows.push({ label: 'Model', value: assistantMeta.service, copyValue: assistantMeta.service });
     if (assistantMeta.peerId) rows.push({ label: 'Seller', value: assistantMeta.peerId.slice(0, 8), copyValue: assistantMeta.peerId });
     if (assistantMeta.costUsd > 0) rows.push({ label: 'Cost', value: `$${formatUsd(assistantMeta.costUsd)}` });
     if (assistantMeta.latencyMs > 0) rows.push({ label: 'Latency', value: `${Math.round(assistantMeta.latencyMs)}ms` });
