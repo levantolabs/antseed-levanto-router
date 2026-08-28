@@ -71,8 +71,8 @@ function calendarDayKey(now = new Date()): string {
 interface RouteRequestBody {
   v: 1;
   cqt: number;
-  sagePrompt: string;
-  contextTokens: number;
+  inputMessage: string;
+  promptTokens: number;
   expectedCachedTokens: Array<{ model: string; peer: string; tokens: number }>;
   constraints: {
     maxInputUsdPerMillion?: number;
@@ -87,16 +87,10 @@ interface RouteResponseBody {
   ranked: Array<{
     model: string;
     peer: string;
-    score: number;
-    predictedQuality: number;
-    predictedCostUsd: number;
-    predictedInputTokens: number;
-    predictedCachedInputTokens: number;
-    predictedOutputTokens: number;
+    estimate: { costUsd: number; inputTokens: number; cachedInputTokens: number; outputTokens: number };
     price: { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number };
   }>;
-  baselineSuggestion: { model: string; peer: string; price: { inUsdPerM: number; outUsdPerM: number } } | null;
-  receipt: { routerId: string; artifactVersion: string; lambdaVersion: string };
+  router: string;
 }
 
 /**
@@ -140,12 +134,12 @@ function computeBaselinePrices(ranked: RouteResponseBody['ranked']): BaselinePri
   return out;
 }
 
-/** Head+tail trim, matching the "trimmed last user turn" shape sagePrompt expects. */
-const SAGE_PROMPT_HEAD_TAIL_CHARS = 4096;
+/** Head+tail trim, matching the "trimmed last user turn" shape inputMessage expects. */
+const INPUT_MESSAGE_HEAD_TAIL_CHARS = 4096;
 
-function trimForSagePrompt(text: string): string {
-  if (text.length <= SAGE_PROMPT_HEAD_TAIL_CHARS * 2) return text;
-  return `${text.slice(0, SAGE_PROMPT_HEAD_TAIL_CHARS)}…${text.slice(-SAGE_PROMPT_HEAD_TAIL_CHARS)}`;
+function trimForInputMessage(text: string): string {
+  if (text.length <= INPUT_MESSAGE_HEAD_TAIL_CHARS * 2) return text;
+  return `${text.slice(0, INPUT_MESSAGE_HEAD_TAIL_CHARS)}…${text.slice(-INPUT_MESSAGE_HEAD_TAIL_CHARS)}`;
 }
 
 function parseChatBody(req: SerializedHttpRequest): { model: string | undefined; lastUserText: string } {
@@ -337,7 +331,7 @@ export class LevantoRouter {
     try {
       // Explicit suffix path (decisions doc SS13 item 20, resolved) -- states
       // intent via the URL rather than relying on the routing peer to
-      // body-sniff for an absent sagePrompt field.
+      // body-sniff for an absent inputMessage field.
       const res = await doFetch(`${this.config.routingPeerUrl}/_antseed/route/digest`, {
         method: 'POST',
         headers: {
@@ -457,12 +451,12 @@ export class LevantoRouter {
     // blocks or fails the routing call itself.
     await this.sendDailyDigestIfNeeded();
 
-    const contextTokens = estimateTokens(lastUserText);
+    const promptTokens = estimateTokens(lastUserText);
     const expectedCachedTokens = convKey
       ? this.conversations.observedModelPeers(convKey).map(({ model: m, peerId }) => ({
         model: m,
         peer: peerId,
-        tokens: Math.round(this.conversations.expectedCachedTokens(convKey, m, peerId, contextTokens)),
+        tokens: Math.round(this.conversations.expectedCachedTokens(convKey, m, peerId, promptTokens)),
       })).filter((entry) => entry.tokens > 0)
       : [];
 
@@ -474,8 +468,8 @@ export class LevantoRouter {
     const body: RouteRequestBody = {
       v: 1,
       cqt,
-      sagePrompt: trimForSagePrompt(lastUserText),
-      contextTokens,
+      inputMessage: trimForInputMessage(lastUserText),
+      promptTokens,
       expectedCachedTokens,
       constraints: {
         maxInputUsdPerMillion: routingPreferences?.maxInputUsdPerMillion ?? undefined,
@@ -582,10 +576,10 @@ export class LevantoRouter {
         // For SS2.5's ledger, and reused as-is by a later pinned/reused
         // dispatch (SS13 item 14) -- carried on the candidate itself now
         // rather than looked up separately once the winner is known.
-        predictedCostUsd: entry.predictedCostUsd,
-        predictedInputTokens: entry.predictedInputTokens,
-        predictedCachedInputTokens: entry.predictedCachedInputTokens,
-        predictedOutputTokens: entry.predictedOutputTokens,
+        predictedCostUsd: entry.estimate.costUsd,
+        predictedInputTokens: entry.estimate.inputTokens,
+        predictedCachedInputTokens: entry.estimate.cachedInputTokens,
+        predictedOutputTokens: entry.estimate.outputTokens,
         cqt,
         baselinePrices,
       });
@@ -599,13 +593,11 @@ export class LevantoRouter {
     // The fallback needs a model to pair with those peers -- decisions doc
     // SS13 item 8: use whatever the pre-existing "antseed" alias currently
     // resolves to (defaultRoutedModel, host-owned buyer.state.json state
-    // passed in by buyer-proxy.ts), not parsed.baselineSuggestion. Sage's
-    // baselineSuggestion is its own ranked opinion of a cheap/simple model --
-    // it has no reason to be one this buyer has actually allowlisted a
-    // peer for, whereas defaultRoutedModel is the buyer's own already-chosen
-    // fallback target. No price data comes with defaultRoutedModel (unlike
-    // baselineSuggestion's price block), so the synthesized candidates carry
-    // null pricing -- honest "unknown," not a fabricated number.
+    // passed in by buyer-proxy.ts) -- the buyer's own already-chosen fallback
+    // target, which has an actual reason to be one of these allowlisted
+    // peers' models. No price data comes with defaultRoutedModel, so the
+    // synthesized candidates carry null pricing -- honest "unknown," not a
+    // fabricated number.
     const allowedPeerIds = routingPreferences?.allowedPeerIds;
     if (allowedPeerIds && allowedPeerIds.length > 0) {
       const allowedSet = new Set(allowedPeerIds.map((p) => p.toLowerCase()));

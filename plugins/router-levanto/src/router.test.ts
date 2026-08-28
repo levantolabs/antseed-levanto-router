@@ -25,16 +25,14 @@ function conversation(sessionKey = 'sess-1'): ConversationIdentity {
   return { tool: 'claude-code', sessionKey, parentSessionKey: null, isUserThread: true };
 }
 
-function rankedResponse(overrides?: Partial<{ ranked: unknown[]; baselineSuggestion: unknown }>) {
+function rankedResponse(overrides?: Partial<{ ranked: unknown[] }>) {
   return {
     v: 1,
     ranked: overrides?.ranked ?? [
-      { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
-        predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+      { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
         price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
     ],
-    baselineSuggestion: overrides?.baselineSuggestion ?? { model: 'gpt-5.6-sol', peer: '0xBBB', price: { inUsdPerM: 1.1, outUsdPerM: 8.9 } },
-    receipt: { routerId: 'mock', artifactVersion: 'test', lambdaVersion: 'test' },
+    router: 'mock',
   };
 }
 
@@ -71,14 +69,11 @@ describe('LevantoRouter.selectRoute', () => {
         v: 1,
         ranked: [
           {
-            model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9,
-            predictedQuality: 0.9, predictedCostUsd: 0.001,
-            predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
             price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 },
           },
         ],
-        baselineSuggestion: { model: 'gpt-5.6-sol', peer: '0xBBB', price: { inUsdPerM: 1.1, outUsdPerM: 8.9 } },
-        receipt: { routerId: 'mock', artifactVersion: 'test', lambdaVersion: 'test' },
+        router: 'mock',
       }),
     });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -98,12 +93,10 @@ describe('LevantoRouter.selectRoute', () => {
       json: async () => ({
         v: 1,
         ranked: [
-          { model: 'gpt-5.6-luna', peer: '0xNOT-A-PEER', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
-            predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+          { model: 'gpt-5.6-luna', peer: '0xNOT-A-PEER', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
             price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
         ],
-        baselineSuggestion: { model: 'x', peer: '0xBBB', price: { inUsdPerM: 1, outUsdPerM: 1 } },
-        receipt: { routerId: 'mock', artifactVersion: 'test', lambdaVersion: 'test' },
+        router: 'mock',
       }),
     });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -141,7 +134,7 @@ describe('LevantoRouter.selectRoute', () => {
     let routingCalls = 0;
     // /_antseed/route/digest shares the same fetchImpl (sendDailyDigestIfNeeded)
     // -- discriminate by URL rather than call order/count, same reasoning as
-    // the sagePrompt filter in "signs before the routing call it gates" above.
+    // the inputMessage filter in "signs before the routing call it gates" above.
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (!url.endsWith('/_antseed/route')) return { ok: true, json: async () => ({}) };
       routingCalls += 1;
@@ -286,10 +279,10 @@ describe('LevantoRouter.selectRoute', () => {
     it('signs before the routing call it gates, not after', async () => {
       const order: string[] = [];
       const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
-        // Only the SS4.4 routing call (carries sagePrompt) is the "fetch" this
+        // Only the SS4.4 routing call (carries inputMessage) is the "fetch" this
         // test cares about ordering against sign -- the digest submission
         // fires alongside it but isn't part of what this test verifies.
-        if ('sagePrompt' in JSON.parse(init.body)) order.push('fetch');
+        if ('inputMessage' in JSON.parse(init.body)) order.push('fetch');
         return { ok: true, json: async () => rankedResponse() };
       });
       const signDailyIfNeeded = vi.fn().mockImplementation(async () => { order.push('sign'); });
@@ -460,7 +453,7 @@ describe('LevantoRouter.selectRoute', () => {
     function digestAwareFetch(routeHandler: () => unknown) {
       return vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
         const parsedBody = JSON.parse(init.body);
-        if ('sagePrompt' in parsedBody) {
+        if ('inputMessage' in parsedBody) {
           return { ok: true, json: async () => routeHandler() };
         }
         return { ok: true, json: async () => ({ accepted: true }) };
@@ -502,7 +495,7 @@ describe('LevantoRouter.selectRoute', () => {
     it('a failed digest send never blocks or fails the routing call itself', async () => {
       const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
         const parsedBody = JSON.parse(init.body);
-        if ('sagePrompt' in parsedBody) return { ok: true, json: async () => rankedResponse() };
+        if ('inputMessage' in parsedBody) return { ok: true, json: async () => rankedResponse() };
         throw new Error('digest endpoint unreachable');
       });
       const router = new LevantoRouter({
@@ -517,7 +510,7 @@ describe('LevantoRouter.selectRoute', () => {
       let digestCalls = 0;
       const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
         const parsedBody = JSON.parse(init.body);
-        if ('sagePrompt' in parsedBody) return { ok: true, json: async () => rankedResponse() };
+        if ('inputMessage' in parsedBody) return { ok: true, json: async () => rankedResponse() };
         digestCalls += 1;
         if (digestCalls === 1) throw new Error('digest endpoint unreachable');
         return { ok: true, json: async () => ({ accepted: true }) };
@@ -537,8 +530,7 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.0012,
-              predictedInputTokens: 100, predictedCachedInputTokens: 20, predictedOutputTokens: 45,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.0012, inputTokens: 100, cachedInputTokens: 20, outputTokens: 45 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
           ],
         }),
@@ -577,15 +569,12 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.0012,
-              predictedInputTokens: 100, predictedCachedInputTokens: 20, predictedOutputTokens: 45,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.0012, inputTokens: 100, cachedInputTokens: 20, outputTokens: 45 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
             // Two sellers of a curated baseline model -- the cheaper one (0xCCC) should win.
-            { model: 'claude-opus-5', peer: '0xBBB', score: 0.5, predictedQuality: 0.95, predictedCostUsd: 0.02,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 45,
+            { model: 'claude-opus-5', peer: '0xBBB', estimate: { costUsd: 0.02, inputTokens: 100, cachedInputTokens: 0, outputTokens: 45 },
               price: { inUsdPerM: 16, outUsdPerM: 80, cachedInUsdPerM: 1.6 } },
-            { model: 'claude-opus-5', peer: '0xCCC', score: 0.4, predictedQuality: 0.95, predictedCostUsd: 0.018,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 45,
+            { model: 'claude-opus-5', peer: '0xCCC', estimate: { costUsd: 0.018, inputTokens: 100, cachedInputTokens: 0, outputTokens: 45 },
               price: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 0 } },
             // gpt-5.6-sol (the other curated model) is NOT offered at all this call.
           ],
@@ -628,9 +617,7 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9,
-              predictedCostUsd: JSON.parse(init.body).sagePrompt === 'first' ? 0.001 : 0.002,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: JSON.parse(init.body).inputMessage === 'first' ? 0.001 : 0.002, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
           ],
         }),
@@ -661,8 +648,7 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.0012,
-              predictedInputTokens: 100, predictedCachedInputTokens: 20, predictedOutputTokens: 45,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.0012, inputTokens: 100, cachedInputTokens: 20, outputTokens: 45 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0.02 } },
           ],
         }),
@@ -714,11 +700,9 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
-            { model: 'kimi-k3', peer: '0xBBB', score: 0.8, predictedQuality: 0.8, predictedCostUsd: 0.0005,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            { model: 'kimi-k3', peer: '0xBBB', estimate: { costUsd: 0.0005, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
               price: { inUsdPerM: 0.1, outUsdPerM: 0.5, cachedInUsdPerM: 0 } },
           ],
         }),
@@ -737,14 +721,9 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
           ],
-          // Sage's own baselineSuggestion is deliberately NOT what the fallback
-          // should use (decisions doc SS13 item 8) -- if the fallback still
-          // read it, this test's serviceId assertion below would fail.
-          baselineSuggestion: { model: 'gpt-5.6-sol', peer: '0xCCC', price: { inUsdPerM: 1.1, outUsdPerM: 8.9 } },
         }),
       });
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -755,7 +734,7 @@ describe('LevantoRouter.selectRoute', () => {
 
       expect(result).toHaveLength(1);
       expect(result?.[0]?.peerId).toBe('0xCCC');
-      expect(result?.[0]?.serviceId).toBe('gpt-4o'); // defaultRoutedModel, not baselineSuggestion's model
+      expect(result?.[0]?.serviceId).toBe('gpt-4o'); // defaultRoutedModel, the buyer's own fallback target
       expect(result?.[0]?.inputUsdPerMillion).toBeNull(); // no real price data for this synthesized pair
     });
 
@@ -764,11 +743,9 @@ describe('LevantoRouter.selectRoute', () => {
         ok: true,
         json: async () => rankedResponse({
           ranked: [
-            { model: 'gpt-5.6-luna', peer: '0xAAA', score: 0.9, predictedQuality: 0.9, predictedCostUsd: 0.001,
-              predictedInputTokens: 100, predictedCachedInputTokens: 0, predictedOutputTokens: 50,
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.001, inputTokens: 100, cachedInputTokens: 0, outputTokens: 50 },
               price: { inUsdPerM: 0.2, outUsdPerM: 1.1, cachedInUsdPerM: 0 } },
           ],
-          baselineSuggestion: { model: 'gpt-5.6-sol', peer: '0xCCC', price: { inUsdPerM: 1.1, outUsdPerM: 8.9 } },
         }),
       });
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
