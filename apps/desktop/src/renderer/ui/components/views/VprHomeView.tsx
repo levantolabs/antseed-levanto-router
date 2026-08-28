@@ -26,6 +26,8 @@ import {
   selectFavoriteVprCatalog,
   selectRecommendedVprCatalog,
 } from '../../../modules/catalog/recommended';
+import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { selectDefaultVprModel } from '../../../modules/catalog/model-catalog';
 import { connectVprProfile } from '../../../modules/routing/proxy-sync';
 import { buyerConversationsResource, routingDecisionsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
 import { useCachedResource } from '../../../modules/app/cached-resource';
@@ -99,7 +101,21 @@ export function VprHomeView({ onSelectView }: Props) {
 
   const runtimeOn = snap.processes.some((process) => process.mode === 'connect' && process.running === true);
 
-  const selectedModel = snap.selection.model;
+  // Levanto Router is selectable from the chat model picker only, per
+  // Dawid's explicit ask -- not from this "model for new chats" card, even
+  // though both surfaces share the same underlying vprRouteSelection state
+  // (there is deliberately no separate copy of it for this page). When the
+  // router is the real active selection, this card falls back to displaying
+  // a real model instead -- the shared selection itself is untouched, so
+  // the Chat page still shows and uses the router as normal.
+  const nonLevantoCatalog = useMemo(
+    () => snap.catalog.filter((entry) => !isLevantoAutoEntry(entry)),
+    [snap.catalog],
+  );
+  const rawSelectedModel = snap.selection.model;
+  const selectedModel = rawSelectedModel && isLevantoAutoEntry(rawSelectedModel)
+    ? selectDefaultVprModel(nonLevantoCatalog, null)
+    : rawSelectedModel;
   const selectedEntry = useMemo(
     () => (selectedModel
       ? findCatalogEntry(snap.catalog, selectedModel.provider, selectedModel.serviceId) ?? undefined
@@ -231,7 +247,7 @@ export function VprHomeView({ onSelectView }: Props) {
   // whole list is capped — favorites included — so the menu can't outgrow the
   // hero; everything past the cap lives behind "All models".
   const dropdownEntries = useMemo(() => {
-    const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text');
+    const textCatalog = nonLevantoCatalog.filter((entry) => entry.kind === 'text');
     const favoriteEntries = selectFavoriteVprCatalog(textCatalog, favorites);
     const recommended = selectRecommendedVprCatalog(textCatalog)
       .filter((entry) => !favorites.has(catalogEntryKey(entry)));
