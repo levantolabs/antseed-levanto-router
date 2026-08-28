@@ -1325,12 +1325,33 @@ export function initChatModule({
     // permanently rebinding a fresh Auto chat to whatever real model sorted
     // first (e.g. "glm-5.2"), exactly the applyPeerAccessRules stranding bug
     // fixed earlier, in this sibling function which lacked the same fix.
-    const currentIsLevantoAuto = isLevantoAutoSelected({
-      provider: currentSelection.provider ?? '',
-      serviceId: currentSelection.id,
-    });
-    const preferred = currentIsLevantoAuto
-      ? uiState.chatSelectedServiceValue
+    // Broader than checking `currentSelection` alone: `chatSelectedServiceValue`
+    // can drift to a real model id even while the conversation (or, with none
+    // active, the global preference) is still genuinely on Auto -- e.g.
+    // openConversation matching the conversation's last-served model, which
+    // becomes concrete the moment an auto-routed chat gets its first
+    // response, even though the global selection never left Auto. An
+    // explicit pin always wins regardless (reopening/refreshing a pinned
+    // chat must keep showing its own pin, not unrelated global Auto state);
+    // routeMode alone can't gate the rest, since 'auto' also covers the
+    // ordinary case of a chat on one specific real model with no explicit
+    // peer pin (soft peer-affinity only) -- that conv.service was never the
+    // sentinel and resolving it is correct, not a bug. Only clear the value
+    // below when it has actually drifted into matching a real catalog option
+    // (the corrupted case) -- an already-harmless value (the Auto sentinel's
+    // own encoded form, or empty) never matches a real option either, so
+    // leaving it untouched there preserves it exactly, instead of needlessly
+    // stomping a value that was already correct.
+    const isPinnedConversation = hasActiveConversation && activeConversation?.routeMode === 'pinned';
+    const isAutoConversation = !isPinnedConversation && (
+      isLevantoAutoSelected({
+        provider: currentSelection.provider ?? '',
+        serviceId: currentSelection.id,
+      })
+      || isLevantoAutoSelected(uiState.vprRouteSelection.model)
+    );
+    const preferred = isAutoConversation
+      ? (optionCandidates.some((o) => o.value === uiState.chatSelectedServiceValue) ? '' : uiState.chatSelectedServiceValue)
       : findMatchingChatServiceOptionValue(
         optionCandidates,
         currentSelection.id,
@@ -1855,17 +1876,34 @@ export function initChatModule({
 
         const optionCandidates = getAvailableChatServiceOptions();
         const convPeerIdForMatch = conv.peerId?.trim() ?? '';
-        const preferredValue = findMatchingChatServiceOptionValue(
-          optionCandidates,
-          conv.service,
-          conv.provider,
-          convPeerIdForMatch,
-        );
-        if (preferredValue) {
-          uiState.chatSelectedServiceValue = preferredValue;
-          const matchedOption = optionCandidates.find((o) => o.value === preferredValue);
-          if (matchedOption?.peerId) {
-            uiState.chatSelectedPeerId = matchedOption.peerId;
+        // Resolve/pin chatSelectedServiceValue to conv.service whenever this
+        // chat is explicitly pinned (routeMode 'pinned' always wins, even if
+        // the global preference happens to be Auto elsewhere -- reopening a
+        // pinned chat must show its own pin, not the unrelated global state),
+        // or whenever the global preference currently isn't Levanto Auto at
+        // all. conv.routeMode alone can't gate this: 'auto' also covers the
+        // ordinary case of a chat created against one specific real model
+        // with no explicit peer pin (soft peer-affinity only) -- that case's
+        // conv.service was never the sentinel and matching it here is
+        // correct, not a bug. The actual failure mode is narrower: a
+        // genuinely Levanto-Auto conversation's conv.service becomes the
+        // concrete model that served the last response the moment it gets a
+        // first reply, even though the global selection never left Auto --
+        // matching THAT here would permanently flip the picker off Auto (see
+        // applyChatServiceOptions's isAutoConversation, same bug family).
+        if (conv.routeMode === 'pinned' || !isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+          const preferredValue = findMatchingChatServiceOptionValue(
+            optionCandidates,
+            conv.service,
+            conv.provider,
+            convPeerIdForMatch,
+          );
+          if (preferredValue) {
+            uiState.chatSelectedServiceValue = preferredValue;
+            const matchedOption = optionCandidates.find((o) => o.value === preferredValue);
+            if (matchedOption?.peerId) {
+              uiState.chatSelectedPeerId = matchedOption.peerId;
+            }
           }
         }
         if (!uiState.chatSelectedPeerId && convPeerIdForMatch) {

@@ -64,6 +64,7 @@ type Conversation = {
   service: string;
   provider: string;
   peerId: string;
+  routeMode?: 'auto' | 'pinned';
   messages: unknown[];
   createdAt: number;
   updatedAt: number;
@@ -341,7 +342,7 @@ test('new chat created while previous response is pending keeps its own model an
   let resolveFirstSend: ((value: { ok: true }) => void) | null = null;
 
   const bridge: DesktopBridge = {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const id = `conv-${conversations.length + 1}`;
       conversations.push({
@@ -350,6 +351,7 @@ test('new chat created while previous response is pending keeps its own model an
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1146,7 +1148,7 @@ test('discover-selected draft keeps its peer if another discover chat is opened 
   let resolveFirstCreate: ((value: { ok: true; data: Conversation }) => void) | null = null;
 
   const bridge: DesktopBridge = {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const conversation: Conversation = {
         id: `conv-${conversations.length + 1}`,
@@ -1154,6 +1156,7 @@ test('discover-selected draft keeps its peer if another discover chat is opened 
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1349,7 +1352,7 @@ function makeChatBridge(
   conversations: Conversation[] = [],
 ): DesktopBridge {
   return {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const conversation: Conversation = {
         id: `conv-${conversations.length + 1}`,
@@ -1357,6 +1360,7 @@ function makeChatBridge(
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1504,6 +1508,44 @@ test('active legacy conversation keeps its model without treating its saved peer
     provider: 'openai',
     peerId: undefined,
   });
+});
+
+test('reopening an auto-routed conversation whose service already resolved to a concrete model never pins the picker off Auto', async () => {
+  installDomTimers();
+  const uiState = createInitialUiState();
+  uiState.chatServiceOptions = [chatOption('model-a', 'peer-a')];
+  uiState.vprRouteSelection = {
+    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    mode: 'auto',
+    peerId: null,
+  };
+  // Simulates the drift bug 2B fixes: this Auto-routed conversation's own
+  // service has already resolved to the concrete model that served its last
+  // response (conversation-store.ts sets this the moment a routed response
+  // lands), even though it was never explicitly pinned (routeMode stays
+  // 'auto') and the global selection above is still genuinely Auto.
+  const conversations: Conversation[] = [{
+    id: 'conv-a',
+    title: 'Conversation A',
+    service: 'model-a',
+    provider: 'openai',
+    peerId: 'peer-a',
+    routeMode: 'auto',
+    messages: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }];
+  const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
+  const api = initChatModule({ bridge: makeChatBridge(sends, conversations), uiState, appendSystemLog: () => undefined });
+
+  await api.refreshChatConversations();
+  await api.openConversation('conv-a');
+
+  // Must not have matched conv-a's drifted-concrete service -- doing so
+  // would flip isAutoModeActive (ChatView.tsx) false and permanently stick
+  // the picker on model-a instead of Levanto Auto.
+  assert.notEqual(uiState.chatSelectedServiceValue, `openai${SEP}model-a${SEP}peer-a`);
 });
 
 test('pinned VPR peer with missing option falls back to existing chat selected value', async () => {
