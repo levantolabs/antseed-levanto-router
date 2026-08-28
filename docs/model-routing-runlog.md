@@ -19,6 +19,45 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-28] Router selection and per-router config move onto the existing plugin-instance-config store — decided, not yet built
+
+**Type:** Decision, no code changed yet. Recorded so it isn't re-litigated or re-discovered
+from scratch next time this comes up.
+
+The desktop app's "Select model router" preference is `buyer.routingPreferences.autoSubscriptionEnabled:
+boolean` — a single on/off switch that only ever means "Levanto." `ProcessManager.
+isLevantoAutoSubscriptionEnabled()` hand-injects Levanto-specific env vars (routing-peer URL, seller
+id, chain-shaped defaults) directly at spawn time; nothing in that path is a router *selection*,
+because there is exactly one router the toggle can mean. The renderer mirrors this: `LEVANTO_AUTO_
+SERVICE_ID = 'levanto-auto'` is a literal sentinel baked into UI code, and Preferences/`LevantoRouterInfoDialog`
+hardcode "Levanto Router" branding rather than listing installed routers.
+
+Decided direction: the desktop becomes a client of the plugin-instance-config store `packages/node/
+src/config/plugin-config-manager.ts` already provides (`instances: PluginInstanceConfig[]`,
+schema-driven per plugin via `ConfigField[]`, secrets auto-encrypted with a machine-derived key)
+rather than continuing to hardcode Levanto. That store already lives in the same `~/.antseed/
+config.json` the desktop reads and writes for everything else, and the CLI's `--instance <name>`
+flag already reads it end to end (`getInstance`) — the write side (`addInstance`/`updateInstanceConfig`)
+is fully built but currently has zero callers anywhere in the codebase. `ModelRoutingPreferences`
+stays exactly what it already is — buyer-facing routing preferences, forwarded to whichever router
+is active — and never carries a router's own setup (URL, credentials, seller identity); that
+belongs in the router's own instance config. AIP-5 now states this plainly (`ModelRoutingPreferences`
+is buyer preference data, not `Router` configuration).
+
+Scoping choice, also decided but not committed to code: land the plumbing/renaming first (spawn
+resolves a router by name/instance id generically; the config field is honestly named instead of a
+boolean) without yet building a multi-entry router picker UI, since exactly one real router exists
+today and a picker for a population of one is speculative. Revisit the picker once a second router
+actually exists to choose between.
+
+Not implemented: `ProcessManager`, the renderer's Preferences view, and `LEVANTO_AUTO_SERVICE_ID`'s
+hardcoded sentinel are all untouched — this entry is the decision, not the fix.
+
+**Ground truth reference:** none — the four ground-truth docs are silent on multi-router support;
+this is a host-app implementation decision, not a protocol one.
+
+---
+
 ## [2026-08-27] `noOfficialBootstrap` now also binds to loopback and skips NAT traversal, closing the gap below
 
 `noOfficialBootstrap: true` on `AntseedNode` now means what the entry below wished it meant: the DHT UDP socket, and (for sellers) the signaling TCP socket, bind to `127.0.0.1` only, and NAT-PMP/UPnP port mapping is skipped entirely — `packages/node/src/node.ts`'s `_createDHTConfig()` and `_startSeller()`, plus a new `bindHost` passthrough in `packages/node/src/discovery/dht-node.ts` down to `bittorrent-dht`'s `dht.listen(port, host, cb)` (its `.d.ts` only declared the 2-arg form; added the 3-arg overload to match what the library actually accepts). No new config surface — every devnet process already had `noOfficialBootstrap: true` set for exactly this "isolated local testing" intent, so the fix is a correction to what that flag does, not a new flag to remember to set.
