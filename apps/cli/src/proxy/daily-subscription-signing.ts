@@ -188,7 +188,16 @@ export function createSignDailyIfNeeded(
     // catch-up burst needs the ceiling raised BEFORE that one real sign,
     // not after.
     const currentCumulative = BigInt(existingSession.authMax || '0')
-    const daysSinceLastSign = Math.max(1, Math.ceil((Date.now() - existingSession.updatedAt) / MS_PER_DAY))
+    // Math.floor, not Math.max(1, Math.ceil(...)): a call minutes after the
+    // last one must predict ZERO additional days owed, not a fresh one --
+    // must match signCumulativeAuth's own (equally fixed) elapsed-day math
+    // exactly, or this preemptive gate keeps demanding top-ups signCumulativeAuth
+    // itself would never actually need. The old floor-of-1 combined with
+    // currentCumulative being re-read fresh from the last cycle's own bump is
+    // exactly how a channel with zero real usage reached an $11.21 "owed"
+    // figure from repeated same-day retries (see buyer-payment-manager.ts's
+    // signCumulativeAuth for the full writeup).
+    const daysSinceLastSign = Math.floor((Date.now() - existingSession.updatedAt) / MS_PER_DAY)
     const trueTarget = currentCumulative
       + options.dailyAmountUsdc * BigInt(Math.min(daysSinceLastSign, options.catchUpCapDays))
 

@@ -171,6 +171,43 @@ test('ordinary day: signs exactly one more day\'s increment, no top-up when ther
   })
 })
 
+test('repeated same-day calls never ratchet authMax up, even across many retries with zero real usage', async (t) => {
+  // Regression for a real bug found live on mainnet: a channel with
+  // request_count=0/tokens_delivered=0 throughout (nothing ever actually
+  // served) reached an $11.21 authMax purely from ~20 retries of
+  // signDailyIfNeeded within about 30 minutes -- each retry's Math.max(1, ...)
+  // elapsed-day floor let it grant itself another full day's increment on
+  // top of the last, regardless of how little real time had passed. Root
+  // cause and full narrative: buyer-payment-manager.ts's signCumulativeAuth.
+  t.mock.timers.enable({ apis: ['Date'] })
+  // Generous headroom (matches the "ordinary day" test above), and a scripted
+  // deposit already at that headroom -- the point of this test is the
+  // elapsed-day math, not top-up polling, so nothing here should ever need a
+  // real top-up (real setTimeout is NOT mocked; only Date is).
+  await withBuyer(DAILY_AMOUNT * 5n, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 10n)
+    const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+
+    await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
+    const afterDay1 = buyer.getActiveSession(SELLER_PEER_ID)!
+    assert.equal(BigInt(afterDay1.authMax), DAILY_AMOUNT)
+
+    // No clock advance between calls -- the exact shape of the live failure:
+    // many retries in quick succession, no real elapsed time, no usage.
+    for (let i = 0; i < 20; i++) {
+      await signDailyIfNeeded(SELLER_PEER_ID)
+    }
+
+    const finalSession = buyer.getActiveSession(SELLER_PEER_ID)!
+    assert.equal(
+      BigInt(finalSession.authMax), DAILY_AMOUNT,
+      'authMax must not grow beyond one real day\'s worth no matter how many times this is retried on the same day',
+    )
+  })
+})
+
 test('catch-up: a multi-day gap tops up before signing, then captures the full backlog in one signature', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] })
   // A tight top-up step (equal to one day) deliberately forces the ceiling

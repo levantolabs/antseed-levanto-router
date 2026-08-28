@@ -1462,9 +1462,23 @@ export class BuyerPaymentManager {
 
     const prevAmount = this._cumulativeAmount.get(sellerPeerId) ?? 0n;
     const lastSignedAt = this._lastFlatFeeSignedAt.get(sellerPeerId);
+    // Math.floor, not Math.ceil clamped to a minimum of 1: a call minutes (or
+    // even hours) after the last one must grant ZERO additional days, not a
+    // fresh one. The old `Math.max(1, Math.ceil(...))` floored ANY positive
+    // gap up to a full day's worth every single call -- and since prevAmount
+    // is fed forward from the previous call's own newAmount (line below,
+    // this._cumulativeAmount.set), repeated same-day calls (e.g. every
+    // retried request while something else, like an unconfirmed reserve
+    // top-up, keeps this function getting re-invoked) each granted another
+    // full dailyAmountUsdc on top of the last -- a real ratchet toward a
+    // "cumulative owed" figure with zero real usage behind it (found live:
+    // a channel with request_count=0/tokens_delivered=0 throughout still
+    // reached $11.21 authMax from ~20 retries in under 30 minutes). Only
+    // `lastSignedAt == null` (the very first signature ever) still grants a
+    // day immediately; every later call must wait for a real day to pass.
     const daysElapsed = lastSignedAt == null
       ? 1 // first-ever flat-fee signature for this seller — exactly one day's worth
-      : Math.max(1, Math.ceil((Date.now() - lastSignedAt) / (24 * 60 * 60 * 1000)));
+      : Math.floor((Date.now() - lastSignedAt) / (24 * 60 * 60 * 1000));
     const cappedDays = Math.min(daysElapsed, config.catchUpCapDays);
     const maxAllowedIncrement = config.dailyAmountUsdc * BigInt(cappedDays);
 
