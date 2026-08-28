@@ -157,7 +157,16 @@ function migrateDesktopBuyerDefaults(config: Record<string, unknown>): {
 
   const allowedPeerIds = validRoutingPeerIds(routingPreferences.allowedPeerIds);
   const blockedPeerIds = validRoutingPeerIds(routingPreferences.blockedPeerIds);
+  // Spread the existing object first -- this literal only validates/defaults
+  // the five fields below; without the spread, every OTHER field on
+  // ModelRoutingPreferences (cqt, autoSubscriptionEnabled) got silently
+  // dropped whenever this migration fired for an unrelated reason, since a
+  // narrower reconstructed object simply never had them. Found live: a real
+  // user's Levanto Auto toggle (autoSubscriptionEnabled) reset to off on
+  // every app launch, with no error, because this ran and rebuilt
+  // routingPreferences without it.
   const nextRoutingPreferences = {
+    ...routingPreferences,
     preferFreePeers: typeof routingPreferences.preferFreePeers === 'boolean'
       ? routingPreferences.preferFreePeers
       : DEFAULT_MODEL_ROUTING_PREFERENCES.preferFreePeers,
