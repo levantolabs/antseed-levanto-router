@@ -31,6 +31,7 @@ import { SessionApprovalCard } from '../chat/SessionApprovalCard';
 import { ToolApprovalCard } from '../chat/ToolApprovalCard';
 import { LowBalanceWarning } from '../chat/LowBalanceWarning';
 import { VprModelDropdown } from '../chat/VprModelDropdown';
+import { ChatRoutingBadge } from '../chat/ChatRoutingBadge';
 import { SwitchServiceDialog } from '../chat/SwitchServiceDialog';
 import { LowReputationDialog } from '../chat/LowReputationDialog';
 import { AttachmentViewer, type ViewerAttachment } from '../chat/AttachmentViewer';
@@ -1626,15 +1627,23 @@ export function ChatView({ onSelectView }: ChatViewProps) {
                   </div>
                 ) : null}
               </div>
-              <button
-                type="button"
-                className={styles.workspaceButton}
-                onClick={() => void actions.chooseWorkspace()}
-                title={workspacePath || 'Choose workspace'}
-              >
-                <HugeiconsIcon icon={Folder01Icon} size={14} strokeWidth={1.5} />
-                <span className={styles.workspaceLabel}>{workspaceLabel}</span>
-              </button>
+              <div className={styles.chatInputMetaRight}>
+                {isAutoModeActive && activeConversationServiceId && peerDisplayName && (
+                  <ChatRoutingBadge
+                    modelLabel={displayModelLabel(activeConversationServiceId)}
+                    peerName={peerDisplayName}
+                  />
+                )}
+                <button
+                  type="button"
+                  className={styles.workspaceButton}
+                  onClick={() => void actions.chooseWorkspace()}
+                  title={workspacePath || 'Choose workspace'}
+                >
+                  <HugeiconsIcon icon={Folder01Icon} size={14} strokeWidth={1.5} />
+                  <span className={styles.workspaceLabel}>{workspaceLabel}</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

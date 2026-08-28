@@ -44,8 +44,7 @@ export function LevantoRouterInfoDialog({ isOpen, onClose, onConfirm }: Props) {
           : <span className={styles.priceAmount}>Billed daily</span>}
       </div>
       <p className={styles.paragraph}>
-        Charged once per day you use it. Cancel any time from Preferences — nothing further is
-        charged once it's off.
+        Charged once per day. Cancel any time from Preferences.
       </p>
 
       <div className={styles.actions}>
