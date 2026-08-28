@@ -889,22 +889,38 @@ type ChatBubbleProps = {
   conversationId?: string;
   searchQuery?: string;
   searchActive?: boolean;
+  /** Only a router-picked response has alternatives worth disclosing --
+   *  a manually-pinned model's "Routed to" would just repeat the picker. */
+  showRoutingBadge?: boolean;
 };
 
-export function ChatBubble({ message, streaming = false, onOpenPreview, conversationId, searchQuery, searchActive }: ChatBubbleProps) {
+export function ChatBubble({ message, streaming = false, onOpenPreview, conversationId, searchQuery, searchActive, showRoutingBadge = false }: ChatBubbleProps) {
   const [metaExpanded, setMetaExpanded] = useState(false);
-  const timeLabel = message.createdAt ? formatChatTime(message.createdAt) : '';
   const assistantMeta = useMemo(() => normalizeAssistantMeta(message), [message]);
+  const topMetaParts = useMemo(() => {
+    const parts: string[] = [];
+    const timeLabel = message.createdAt ? formatChatTime(message.createdAt) : '';
+    if (timeLabel) parts.push(timeLabel);
+    if (assistantMeta) {
+      if (assistantMeta.outputImages > 0) {
+        parts.push(`${assistantMeta.outputImages} ${assistantMeta.outputImages === 1 ? 'image' : 'images'}`);
+      }
+      if (assistantMeta.totalTokens > 0) {
+        const tokenParts = [`${formatCompactNumber(assistantMeta.totalTokens)} tok`];
+        if (assistantMeta.inputTokens > 0 || assistantMeta.outputTokens > 0) {
+          tokenParts.push(
+            `(${formatCompactNumber(assistantMeta.inputTokens)} in / ${formatCompactNumber(assistantMeta.outputTokens)} out)`,
+          );
+        }
+        parts.push(tokenParts.join(' '));
+      }
+    }
+    return parts;
+  }, [message.createdAt, assistantMeta]);
   const routingDetails = useMemo<ChatRoutingDetail[]>(() => {
     if (!assistantMeta) return [];
     const rows: ChatRoutingDetail[] = [];
-    if (assistantMeta.peerId) rows.push({ label: 'Seller', value: assistantMeta.peerId.slice(0, 8) });
-    if (assistantMeta.totalTokens > 0) {
-      rows.push({
-        label: 'Tokens',
-        value: `${formatCompactNumber(assistantMeta.totalTokens)} (${formatCompactNumber(assistantMeta.inputTokens)} in / ${formatCompactNumber(assistantMeta.outputTokens)} out)`,
-      });
-    }
+    if (assistantMeta.peerId) rows.push({ label: 'Seller', value: assistantMeta.peerId.slice(0, 8), copyValue: assistantMeta.peerId });
     if (assistantMeta.costUsd > 0) rows.push({ label: 'Cost', value: `$${formatUsd(assistantMeta.costUsd)}` });
     if (assistantMeta.latencyMs > 0) rows.push({ label: 'Latency', value: `${Math.round(assistantMeta.latencyMs)}ms` });
     return rows;
@@ -945,8 +961,8 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
   }, [message, isStreamingBubble, messagePrefix, onOpenPreview, conversationId, searchQuery, searchActive]);
 
   const bubbleMeta =
-    timeLabel && !isStreamingBubble ? (
-      <span className={styles.chatBubbleStats}>{timeLabel}</span>
+    topMetaParts.length > 0 && !isStreamingBubble ? (
+      <span className={styles.chatBubbleStats}>{topMetaParts.join(' · ')}</span>
     ) : null;
 
   return (
@@ -956,7 +972,7 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
       {message.role !== 'user' && !isStreamingBubble ? (
         <div className={styles.messageActions}>
           <CopyResponseButton content={message.content} />
-          {assistantMeta?.service && (
+          {showRoutingBadge && assistantMeta?.service && (
             <ChatRoutingBadge
               modelLabel={displayModelLabel(assistantMeta.service)}
               details={routingDetails}

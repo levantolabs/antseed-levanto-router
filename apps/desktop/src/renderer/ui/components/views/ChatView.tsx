@@ -1342,6 +1342,7 @@ export function ChatView({ onSelectView }: ChatViewProps) {
                       conversationId={snap.chatActiveConversation || undefined}
                       searchQuery={isSearchMatch ? messageSearchQuery : undefined}
                       searchActive={isActiveSearchMatch}
+                      showRoutingBadge={isAutoModeActive}
                     />
                   </div>
                 );
@@ -1354,6 +1355,7 @@ export function ChatView({ onSelectView }: ChatViewProps) {
                 streaming
                 onOpenPreview={handleOpenPreview}
                 conversationId={snap.chatActiveConversation || undefined}
+                showRoutingBadge={isAutoModeActive}
               />
             ) : null}
             {imageRequestInProgress ? (
