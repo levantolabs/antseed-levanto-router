@@ -942,9 +942,14 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
     const rows = assistantMeta.routeAlternatives.map((candidate) => ({
       ...(sameModel ? {} : { model: displayModelLabel(candidate.service) }),
       peerId: candidate.peerId,
-      price: candidate.inputUsdPerMillion !== null && candidate.outputUsdPerMillion !== null
-        ? `$${formatUsd(candidate.inputUsdPerMillion)} / $${formatUsd(candidate.outputUsdPerMillion)} per M`
-        : '—',
+      // Input and output price per million tokens, shown as separate columns
+      // under their own "In"/"Out" headers rather than one slash-joined
+      // string -- a bare "$X / $Y" reads as two arbitrary numbers with no
+      // indication which is which, which is exactly what led to a real
+      // misread of the ranking here (comparing input price alone missed that
+      // the other candidate's output price was the one driving its total up).
+      priceIn: candidate.inputUsdPerMillion !== null ? `$${formatUsd(candidate.inputUsdPerMillion)}` : '—',
+      priceOut: candidate.outputUsdPerMillion !== null ? `$${formatUsd(candidate.outputUsdPerMillion)}` : '—',
       isPicked: candidate.peerId === assistantMeta.peerId && candidate.service === assistantMeta.service,
     }));
     return {

@@ -18,7 +18,11 @@ export type ChatRoutingAlternativeRow = {
    *  long, near-identical string on every row. */
   model?: string;
   peerId: string;
-  price: string;
+  /** Input and output price per million tokens, pre-formatted (e.g. "$0.14")
+   *  -- kept as two separate values, not one joined string, so the table can
+   *  label them "In"/"Out" once in the header instead of on every row. */
+  priceIn: string;
+  priceOut: string;
   /** True for the candidate that was actually used -- highlighted in the
    *  table instead of repeated as its own "current" row. */
   isPicked: boolean;
@@ -96,15 +100,25 @@ export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [], 
                     <>
                       <col className={styles.colPeerNoModel} />
                       <col className={styles.colPriceNoModel} />
+                      <col className={styles.colPriceNoModel} />
                     </>
                   ) : (
                     <>
                       <col className={styles.colModel} />
                       <col className={styles.colPeer} />
                       <col className={styles.colPrice} />
+                      <col className={styles.colPrice} />
                     </>
                   )}
                 </colgroup>
+                <thead>
+                  <tr>
+                    {!alternativesModelCaption && <th className={styles.alternativesHeaderCell} />}
+                    <th className={styles.alternativesHeaderCell} />
+                    <th className={styles.alternativesHeaderCell}>In</th>
+                    <th className={styles.alternativesHeaderCell}>Out</th>
+                  </tr>
+                </thead>
                 <tbody>
                   {alternatives.map((row, index) => (
                     <tr
@@ -113,11 +127,13 @@ export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [], 
                     >
                       {row.model && <td className={styles.alternativeModel}>{row.model}</td>}
                       <td className={styles.alternativePeer}>{row.peerId.slice(0, 8)}</td>
-                      <td className={styles.alternativePrice}>{row.price}</td>
+                      <td className={styles.alternativePrice}>{row.priceIn}</td>
+                      <td className={styles.alternativePrice}>{row.priceOut}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
+              <div className={styles.alternativesFootnote}>Price per million tokens</div>
             </div>
           )}
         </div>
