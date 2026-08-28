@@ -31,6 +31,17 @@ export type ResponseTelemetry = {
   estimatedCostUsd: number | null
 }
 
+/** One router-ranked candidate the client can compare the actual pick
+ *  against — a router-decisions doc SS8.3-style disclosure, not a billing
+ *  record. Only meaningful for a request the router actually picked
+ *  (`selectRoute` returned candidates); absent for a directly pinned peer. */
+export type RouteAlternative = {
+  peerId: string
+  service: string
+  inputUsdPerMillion: number | null
+  outputUsdPerMillion: number | null
+}
+
 type UsageCounts = {
   inputTokens: number
   freshInputTokens: number
@@ -231,6 +242,14 @@ function setPeerIdentityHeaders(headers: Record<string, string>, selectedPeer: P
   }
 }
 
+function setRouteAlternativesHeader(
+  headers: Record<string, string>,
+  routeAlternatives: RouteAlternative[] | null | undefined,
+): void {
+  if (!routeAlternatives || routeAlternatives.length === 0) return
+  headers['x-antseed-route-alternatives'] = JSON.stringify(routeAlternatives)
+}
+
 type ResolvedPricing = {
   inputUsdPerMillion: number | null
   outputUsdPerMillion: number | null
@@ -320,11 +339,13 @@ export function attachAntseedTelemetryHeaders(
   telemetry: ResponseTelemetry,
   requestId: string,
   latencyMs: number,
+  routeAlternatives?: RouteAlternative[] | null,
 ): Record<string, string> {
   const headers: Record<string, string> = { ...upstreamHeaders }
   headers['x-antseed-request-id'] = requestId
   headers['x-antseed-latency-ms'] = String(Math.max(0, Math.floor(latencyMs)))
   setPeerIdentityHeaders(headers, selectedPeer)
+  setRouteAlternativesHeader(headers, routeAlternatives)
   setFiniteNumberHeader(headers, 'x-antseed-peer-reputation', selectedPeer.reputationScore)
   setFiniteNumberHeader(headers, 'x-antseed-peer-current-load', selectedPeer.currentLoad)
   setFiniteNumberHeader(headers, 'x-antseed-peer-max-concurrency', selectedPeer.maxConcurrency)
@@ -351,10 +372,12 @@ export function attachStreamingAntseedHeaders(
   selectedPeer: PeerInfo,
   requestId: string,
   request: SerializedHttpRequest,
+  routeAlternatives?: RouteAlternative[] | null,
 ): Record<string, string> {
   const headers: Record<string, string> = { ...upstreamHeaders }
   headers['x-antseed-request-id'] = requestId
   setPeerIdentityHeaders(headers, selectedPeer)
+  setRouteAlternativesHeader(headers, routeAlternatives)
   // Model-routing decisions doc SS8.3 / software-arch doc SS4.6: the
   // streaming path previously carried no provider/service at all, so a
   // routed ("levanto-auto") message had nothing for the client to read

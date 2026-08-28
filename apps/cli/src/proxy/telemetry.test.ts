@@ -35,3 +35,17 @@ test('attachStreamingAntseedHeaders still attaches peer identity and request id 
   assert.equal(headers['x-antseed-request-id'], 'req-1')
   assert.equal(headers['x-antseed-peer-id'], '0xAAA')
 })
+
+test('attachStreamingAntseedHeaders JSON-encodes route alternatives when provided', () => {
+  const alternatives = [
+    { peerId: '0xAAA', service: 'gpt-5.6-luna', inputUsdPerMillion: 1, outputUsdPerMillion: 2 },
+    { peerId: '0xBBB', service: 'kimi-k3', inputUsdPerMillion: 0.5, outputUsdPerMillion: 1 },
+  ]
+  const headers = attachStreamingAntseedHeaders({}, peer(['openai']), 'req-1', req('gpt-5.6-luna'), alternatives)
+  assert.deepEqual(JSON.parse(headers['x-antseed-route-alternatives'] ?? '[]'), alternatives)
+})
+
+test('attachStreamingAntseedHeaders omits the alternatives header when there are none (a pinned/direct request)', () => {
+  const headers = attachStreamingAntseedHeaders({}, peer(['openai']), 'req-1', req('gpt-5.6-luna'), null)
+  assert.equal('x-antseed-route-alternatives' in headers, false)
+})

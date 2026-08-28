@@ -36,7 +36,8 @@
   left: 0;
   top: calc(100% + 6px);
   z-index: 30;
-  min-width: 200px;
+  min-width: 240px;
+  max-width: 320px;
   padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -97,4 +98,64 @@
 
 .detailCopyBtnCopied {
   color: var(--accent-green, #1fd87a);
+}
+
+.alternatives {
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.alternativesTitle {
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.alternativesTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.alternativeRow,
+.alternativeRowPicked {
+  border-radius: 5px;
+}
+
+.alternativeRowPicked {
+  background: var(--bg-hover);
+}
+
+.alternativesTable td {
+  padding: 3px 6px;
+  white-space: nowrap;
+}
+
+.alternativesTable td:first-child {
+  padding-left: 4px;
+  border-radius: 5px 0 0 5px;
+}
+
+.alternativesTable td:last-child {
+  border-radius: 0 5px 5px 0;
+  text-align: right;
+}
+
+.alternativeModel {
+  color: var(--text-primary);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.alternativePeer {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.alternativePrice {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }

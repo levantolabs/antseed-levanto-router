@@ -12,17 +12,28 @@ export type ChatRoutingDetail = {
   copyValue?: string;
 };
 
+export type ChatRoutingAlternativeRow = {
+  model: string;
+  peerId: string;
+  price: string;
+  /** True for the candidate that was actually used -- highlighted in the
+   *  table instead of repeated as its own "current" row. */
+  isPicked: boolean;
+};
+
 type Props = {
   /** The model that actually served this message. */
   modelLabel: string;
   /** Extra rows (peer, cost, latency, ...) shown once expanded. */
   details?: ChatRoutingDetail[];
+  /** The router's top few ranked candidates for this request, in order. */
+  alternatives?: ChatRoutingAlternativeRow[];
 };
 
 /** Collapsed by default -- "Routed to X" is enough at a glance; the rest
- *  (peer, cost, latency) is one click away instead of always cluttering the
- *  message. */
-export function ChatRoutingBadge({ modelLabel, details = [] }: Props) {
+ *  (peer, cost, latency, alternatives considered) is one click away instead
+ *  of always cluttering the message. */
+export function ChatRoutingBadge({ modelLabel, details = [], alternatives = [] }: Props) {
   const [expanded, setExpanded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -47,7 +58,7 @@ export function ChatRoutingBadge({ modelLabel, details = [] }: Props) {
         <HugeiconsIcon icon={RouteIcon} size={13} strokeWidth={1.8} />
         <span className={styles.triggerLabel}>Routed to {modelLabel}</span>
       </button>
-      {expanded && details.length > 0 && (
+      {expanded && (details.length > 0 || alternatives.length > 0) && (
         <div className={styles.detail} role="dialog">
           {details.map((row) => (
             <div className={styles.detailRow} key={row.label}>
@@ -68,6 +79,25 @@ export function ChatRoutingBadge({ modelLabel, details = [] }: Props) {
               </span>
             </div>
           ))}
+          {alternatives.length > 0 && (
+            <div className={styles.alternatives}>
+              <div className={styles.alternativesTitle}>Considered</div>
+              <table className={styles.alternativesTable}>
+                <tbody>
+                  {alternatives.map((row) => (
+                    <tr
+                      key={`${row.peerId}-${row.model}`}
+                      className={row.isPicked ? styles.alternativeRowPicked : styles.alternativeRow}
+                    >
+                      <td className={styles.alternativeModel}>{row.model}</td>
+                      <td className={styles.alternativePeer}>{row.peerId.slice(0, 8)}</td>
+                      <td className={styles.alternativePrice}>{row.price}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       )}
     </div>

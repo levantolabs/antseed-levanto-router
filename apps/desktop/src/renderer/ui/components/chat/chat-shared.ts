@@ -219,6 +219,13 @@ export type ContentBlock = {
   streaming?: boolean;
 };
 
+export type RouteAlternative = {
+  peerId: string;
+  service: string;
+  inputUsdPerMillion: number | null;
+  outputUsdPerMillion: number | null;
+};
+
 export type AssistantMeta = {
   peerId: string | null;
   peerAddress: string | null;
@@ -236,6 +243,7 @@ export type AssistantMeta = {
   costUsd: number;
   latencyMs: number;
   outputImages: number;
+  routeAlternatives: RouteAlternative[];
 };
 
 export const THINKING_PHRASES: readonly string[] = [
@@ -363,6 +371,23 @@ export function normalizeAssistantMeta(msg: ChatMessage): AssistantMeta | null {
   const peerMaxConcurrency = Number.isFinite(Number(meta.peerMaxConcurrency)) ? Number(meta.peerMaxConcurrency) : null;
   const routeRequestId = typeof meta.routeRequestId === 'string' && (meta.routeRequestId as string).trim().length > 0 ? (meta.routeRequestId as string).trim() : null;
   const outputImages = Math.max(0, Math.floor(Number(meta.outputImages) || 0));
+  const routeAlternatives = Array.isArray(meta.routeAlternatives)
+    ? (meta.routeAlternatives as unknown[])
+        .map((entry): RouteAlternative | null => {
+          if (!entry || typeof entry !== 'object') return null;
+          const row = entry as Record<string, unknown>;
+          const rowPeerId = typeof row.peerId === 'string' ? row.peerId.trim() : '';
+          const rowService = typeof row.service === 'string' ? row.service.trim() : '';
+          if (!rowPeerId || !rowService) return null;
+          return {
+            peerId: rowPeerId,
+            service: rowService,
+            inputUsdPerMillion: typeof row.inputUsdPerMillion === 'number' ? row.inputUsdPerMillion : null,
+            outputUsdPerMillion: typeof row.outputUsdPerMillion === 'number' ? row.outputUsdPerMillion : null,
+          };
+        })
+        .filter((row): row is RouteAlternative => row !== null)
+    : [];
   return {
     peerId,
     peerAddress,
@@ -380,6 +405,7 @@ export function normalizeAssistantMeta(msg: ChatMessage): AssistantMeta | null {
     costUsd: costUsd > 0 ? costUsd : 0,
     latencyMs: latencyMs > 0 ? latencyMs : 0,
     outputImages,
+    routeAlternatives,
   };
 }
 

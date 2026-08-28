@@ -77,6 +77,7 @@ import {
   computeResponseTelemetry,
   attachAntseedTelemetryHeaders,
   attachStreamingAntseedHeaders,
+  type RouteAlternative,
 } from './telemetry.js'
 import { DEFAULT_BUYER_PEER_REFRESH_INTERVAL_MS } from '../config/defaults.js'
 import {
@@ -756,6 +757,15 @@ export class BuyerProxy {
    */
   private _defaultRoutedModel: string | null = null
   private _conversations!: ConversationStore
+  /**
+   * Last router-ranked candidate list per conversation, for client disclosure
+   * only (`GET /_antseed/conversations/:id`'s `routeAlternatives`) — not
+   * persisted with the rest of `ConversationStore`, since it's meaningful
+   * only for the most recent response and stale on every new one. Capped by
+   * simple insertion-order eviction; a UI nicety doesn't need real LRU.
+   */
+  private _lastRouteAlternativesByConversation = new Map<string, RouteAlternative[]>()
+  private static readonly MAX_TRACKED_ROUTE_ALTERNATIVES = 50
   /**
    * Wall-clock of the last model-request activity (dispatch or streamed
    * frame). Exposed on /_antseed/buyer-usage so the desktop pill can show a
@@ -1765,7 +1775,7 @@ export class BuyerProxy {
       const conversation = this._conversations.get(id)
       res.writeHead(conversation ? 200 : 404, { 'content-type': 'application/json' })
       res.end(JSON.stringify(conversation
-        ? { ok: true, conversation }
+        ? { ok: true, conversation, routeAlternatives: this._lastRouteAlternativesByConversation.get(id) ?? null }
         : { ok: false, error: 'Unknown conversation' }))
       return
     }
@@ -2490,6 +2500,13 @@ export class BuyerProxy {
       // falls back to resolving the route plan itself per peer+model when a
       // peer has no entry (existing 'lenient' fallback, buyer-proxy.ts _dispatchToPeer).
       let modelPlans: Map<string, PeerProtocolRoutePlan> = new Map()
+      // Snapshot of the router's own top few, for client disclosure
+      // (x-antseed-route-alternatives) — captured once, ahead of the
+      // preferredConversationPeerId reorder below, so it reflects the
+      // router's actual ranking rather than the host's cache-affinity bump.
+      // Stays null for the fixed-model (non-routed) branch: a directly
+      // requested model has no "alternatives" the router considered.
+      let routeAlternatives: RouteAlternative[] | null = null
 
       if (routeSelected) {
         // The routing peer's returned order already *is* the score/quality/
@@ -2500,6 +2517,12 @@ export class BuyerProxy {
           effectiveReputationScore: candidate.reputation,
           peerCooldownUntil: null,
           peerFailureStreak: 0,
+        }))
+        routeAlternatives = candidates.slice(0, 3).map((candidate) => ({
+          peerId: candidate.peerId,
+          service: candidate.serviceId,
+          inputUsdPerMillion: candidate.inputUsdPerMillion,
+          outputUsdPerMillion: candidate.outputUsdPerMillion,
         }))
       } else {
         const selectModelPeers = (candidateSources: PeerInfo[]): CandidatePeerRouteSelection =>
@@ -2642,6 +2665,7 @@ export class BuyerProxy {
             router,
             RETRYABLE_STATUS_CODES,
             clientAbortController.signal,
+            routeAlternatives,
           )
           if (result.done) {
             if (trackedConversationId) {
@@ -2649,6 +2673,9 @@ export class BuyerProxy {
                 trackedConversationId,
                 `${selected.peer.peerId}@${selected.serviceId}`,
               )
+              if (routeAlternatives) {
+                this._recordRouteAlternatives(trackedConversationId, routeAlternatives)
+              }
             }
             return
           }
@@ -2965,6 +2992,16 @@ export class BuyerProxy {
     }
   }
 
+  private _recordRouteAlternatives(conversationId: string, alternatives: RouteAlternative[]): void {
+    this._lastRouteAlternativesByConversation.delete(conversationId)
+    this._lastRouteAlternativesByConversation.set(conversationId, alternatives)
+    while (this._lastRouteAlternativesByConversation.size > BuyerProxy.MAX_TRACKED_ROUTE_ALTERNATIVES) {
+      const oldestKey = this._lastRouteAlternativesByConversation.keys().next().value
+      if (oldestKey === undefined) break
+      this._lastRouteAlternativesByConversation.delete(oldestKey)
+    }
+  }
+
   private _formatBytes(bytes: number): string {
     if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size'
     const mib = bytes / (1024 * 1024)
@@ -2990,6 +3027,9 @@ export class BuyerProxy {
     router: Router | null,
     retryableStatusCodes: Set<number>,
     requestSignal: AbortSignal,
+    /** Router-ranked candidates to disclose to the client (top few, client
+     *  display only) — undefined/null for a directly pinned peer. */
+    routeAlternatives?: RouteAlternative[] | null,
   ): Promise<
     | { done: true }
     | { done: false; statusCode: number; responseBody: Buffer; responseHeaders: Record<string, string>; errorMessage: string | null }
@@ -3115,6 +3155,7 @@ export class BuyerProxy {
               selectedPeer,
               requestForPeer.requestId,
               requestForPeer,
+              routeAlternatives,
             )
             // Ensure content-type is set for SSE — some upstream APIs (e.g. Codex)
             // omit it, which can cause the client's fetch body reader to not
@@ -3238,6 +3279,7 @@ export class BuyerProxy {
           telemetry,
           requestForPeer.requestId,
           latencyMs,
+          routeAlternatives,
         )
         if (retryableStatusCodes.has(responseForClient.statusCode)) {
           return {
@@ -3286,6 +3328,7 @@ export class BuyerProxy {
           telemetry,
           requestForPeer.requestId,
           latencyMs,
+          routeAlternatives,
         )
 
         const responseFault = responseFaultAttribution(response)

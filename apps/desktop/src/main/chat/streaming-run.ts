@@ -741,6 +741,7 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
             ...(completedAssistantMessage.meta ?? {}),
             peerId: routed.peerId,
             service: routed.service,
+            ...(routed.routeAlternatives ? { routeAlternatives: routed.routeAlternatives } : {}),
           };
           preferredPeerByConversationId.set(conversationId, routed.peerId);
           const peerLabel = getServiceCatalogEntries().find((entry) => entry.peerId === routed.peerId)?.peerLabel;

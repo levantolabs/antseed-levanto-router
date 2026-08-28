@@ -8,7 +8,7 @@ import { findSensitiveChatArtifacts } from './chat-safety';
 import styles from './ChatBubble.module.scss';
 import { AttachmentViewer, type ViewerAttachment } from './AttachmentViewer';
 import { ChatCopyButton } from './ChatCopyButton';
-import { ChatRoutingBadge, type ChatRoutingDetail } from './ChatRoutingBadge';
+import { ChatRoutingBadge, type ChatRoutingDetail, type ChatRoutingAlternativeRow } from './ChatRoutingBadge';
 import { displayModelLabel } from '../../../modules/catalog/model-identity';
 import { formatUsd } from '../../../core/format';
 import type { ChatMessage, ContentBlock } from './chat-shared';
@@ -925,6 +925,17 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
     if (assistantMeta.latencyMs > 0) rows.push({ label: 'Latency', value: `${Math.round(assistantMeta.latencyMs)}ms` });
     return rows;
   }, [assistantMeta]);
+  const routeAlternativeRows = useMemo<ChatRoutingAlternativeRow[]>(() => {
+    if (!assistantMeta || assistantMeta.routeAlternatives.length === 0) return [];
+    return assistantMeta.routeAlternatives.map((candidate) => ({
+      model: displayModelLabel(candidate.service),
+      peerId: candidate.peerId,
+      price: candidate.inputUsdPerMillion !== null && candidate.outputUsdPerMillion !== null
+        ? `$${formatUsd(candidate.inputUsdPerMillion)} / $${formatUsd(candidate.outputUsdPerMillion)} per M`
+        : '—',
+      isPicked: candidate.peerId === assistantMeta.peerId && candidate.service === assistantMeta.service,
+    }));
+  }, [assistantMeta]);
   const hasStreamingBlocks = useMemo(
     () =>
       Array.isArray(message.content) &&
@@ -976,6 +987,7 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
             <ChatRoutingBadge
               modelLabel={displayModelLabel(assistantMeta.service)}
               details={routingDetails}
+              alternatives={routeAlternativeRows}
             />
           )}
         </div>
