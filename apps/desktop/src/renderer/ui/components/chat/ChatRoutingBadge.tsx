@@ -3,16 +3,22 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import { RouteIcon } from '@hugeicons/core-free-icons';
 import styles from './ChatRoutingBadge.module.scss';
 
-type Props = {
-  /** The model this conversation's most recent response actually routed to. */
-  modelLabel: string;
-  /** The seller peer that served it, if known. */
-  peerName?: string;
+export type ChatRoutingDetail = {
+  label: string;
+  value: string;
 };
 
-/** Collapsed by default -- "Routed to X" is enough at a glance; peer detail
- *  is one click away rather than always taking up composer space. */
-export function ChatRoutingBadge({ modelLabel, peerName }: Props) {
+type Props = {
+  /** The model that actually served this message. */
+  modelLabel: string;
+  /** Extra rows (peer, tokens, cost, latency, ...) shown once expanded. */
+  details?: ChatRoutingDetail[];
+};
+
+/** Collapsed by default -- "Routed to X" is enough at a glance; the rest
+ *  (peer, tokens, cost, latency) is one click away instead of always
+ *  cluttering the message. */
+export function ChatRoutingBadge({ modelLabel, details = [] }: Props) {
   const [expanded, setExpanded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -37,18 +43,14 @@ export function ChatRoutingBadge({ modelLabel, peerName }: Props) {
         <HugeiconsIcon icon={RouteIcon} size={13} strokeWidth={1.8} />
         <span className={styles.triggerLabel}>Routed to {modelLabel}</span>
       </button>
-      {expanded && (
+      {expanded && details.length > 0 && (
         <div className={styles.detail} role="dialog">
-          <div className={styles.detailRow}>
-            <span className={styles.detailLabel}>Model</span>
-            <span className={styles.detailValue}>{modelLabel}</span>
-          </div>
-          {peerName && (
-            <div className={styles.detailRow}>
-              <span className={styles.detailLabel}>Seller</span>
-              <span className={styles.detailValue}>{peerName}</span>
+          {details.map((row) => (
+            <div className={styles.detailRow} key={row.label}>
+              <span className={styles.detailLabel}>{row.label}</span>
+              <span className={styles.detailValue}>{row.value}</span>
             </div>
-          )}
+          ))}
         </div>
       )}
     </div>

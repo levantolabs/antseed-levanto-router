@@ -8,11 +8,16 @@ import { findSensitiveChatArtifacts } from './chat-safety';
 import styles from './ChatBubble.module.scss';
 import { AttachmentViewer, type ViewerAttachment } from './AttachmentViewer';
 import { ChatCopyButton } from './ChatCopyButton';
+import { ChatRoutingBadge, type ChatRoutingDetail } from './ChatRoutingBadge';
+import { displayModelLabel } from '../../../modules/catalog/model-identity';
+import { formatUsd } from '../../../core/format';
 import type { ChatMessage, ContentBlock } from './chat-shared';
 import {
-  buildChatMetaParts,
+  formatChatTime,
+  formatCompactNumber,
   formatToolExecutionLabel,
   getMyrmecochoryLabel,
+  normalizeAssistantMeta,
   toToolDisplayName,
 } from './chat-shared';
 
@@ -888,7 +893,22 @@ type ChatBubbleProps = {
 
 export function ChatBubble({ message, streaming = false, onOpenPreview, conversationId, searchQuery, searchActive }: ChatBubbleProps) {
   const [metaExpanded, setMetaExpanded] = useState(false);
-  const metaParts = useMemo(() => buildChatMetaParts(message), [message]);
+  const timeLabel = message.createdAt ? formatChatTime(message.createdAt) : '';
+  const assistantMeta = useMemo(() => normalizeAssistantMeta(message), [message]);
+  const routingDetails = useMemo<ChatRoutingDetail[]>(() => {
+    if (!assistantMeta) return [];
+    const rows: ChatRoutingDetail[] = [];
+    if (assistantMeta.peerId) rows.push({ label: 'Seller', value: assistantMeta.peerId.slice(0, 8) });
+    if (assistantMeta.totalTokens > 0) {
+      rows.push({
+        label: 'Tokens',
+        value: `${formatCompactNumber(assistantMeta.totalTokens)} (${formatCompactNumber(assistantMeta.inputTokens)} in / ${formatCompactNumber(assistantMeta.outputTokens)} out)`,
+      });
+    }
+    if (assistantMeta.costUsd > 0) rows.push({ label: 'Cost', value: `$${formatUsd(assistantMeta.costUsd)}` });
+    if (assistantMeta.latencyMs > 0) rows.push({ label: 'Latency', value: `${Math.round(assistantMeta.latencyMs)}ms` });
+    return rows;
+  }, [assistantMeta]);
   const hasStreamingBlocks = useMemo(
     () =>
       Array.isArray(message.content) &&
@@ -925,8 +945,8 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
   }, [message, isStreamingBubble, messagePrefix, onOpenPreview, conversationId, searchQuery, searchActive]);
 
   const bubbleMeta =
-    metaParts.length > 0 && !isStreamingBubble ? (
-      <span className={styles.chatBubbleStats}>{metaParts.join(' · ')}</span>
+    timeLabel && !isStreamingBubble ? (
+      <span className={styles.chatBubbleStats}>{timeLabel}</span>
     ) : null;
 
   return (
@@ -936,6 +956,12 @@ export function ChatBubble({ message, streaming = false, onOpenPreview, conversa
       {message.role !== 'user' && !isStreamingBubble ? (
         <div className={styles.messageActions}>
           <CopyResponseButton content={message.content} />
+          {assistantMeta?.service && (
+            <ChatRoutingBadge
+              modelLabel={displayModelLabel(assistantMeta.service)}
+              details={routingDetails}
+            />
+          )}
         </div>
       ) : null}
     </div>
