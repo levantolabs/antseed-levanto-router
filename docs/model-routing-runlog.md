@@ -19,6 +19,47 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-28] `autoSubscriptionEnabled` moves off `ModelRoutingPreferences`, into plugin config — decided in the AIP, not yet built
+
+**Type:** Decision, no code changed yet. Recorded so it isn't re-derived from
+scratch next time this comes up.
+
+Reviewing AIP-5 against the router-agnostic decision above surfaced a related
+inconsistency: `ModelRoutingPreferences.autoSubscriptionEnabled` was kept as
+a "buyer preference" field, but unlike every other field on that type
+(`minTrustScore`, `maxInputUsdPerMillion`, `allowedPeerIds`,
+`blockedPeerIds`, `cqt`) it isn't something *any* router can use regardless
+of its own pricing model — it exists purely to gate `configureDailySigning`,
+which only a subscription-priced router implements at all. A metered or free
+router has nothing to check it against. AIP-5 now says so directly and moves
+it out of the type: a subscription-priced `Router` reads its own consent
+from its own plugin configuration (the same place the rest of its setup
+already lives, per the entry above), never treating an absent/unreadable
+value as consent -- same real-money-consent invariant as before, just
+relocated to match where the rest of a router's own setup lives.
+
+`DailyDigestBody` and the `/_antseed/route/digest` reserved path were
+dropped from AIP-5 in the same pass, for the same underlying reason: not
+every routing peer needs periodic performance reporting, only one running
+some metered/subscription pricing model. Left as something a companion
+pricing AIP can define if a router needs it, same treatment as pricing
+itself.
+
+**Not implemented:** `packages/node`'s `ModelRoutingPreferences` type still
+has `autoSubscriptionEnabled`; the desktop's `VprRoutingPreferences` /
+`buyerModelRoutingPreferences` bridge still carries it as a preference;
+`router.ts` still reads `this.cachedRoutingPreferences?.autoSubscriptionEnabled`
+instead of its own plugin config. All three need to move together with
+whatever lands for the router-selection/instance-config work above, since
+"read consent from plugin config" only means something once a router
+actually has a plugin-config instance to read from.
+
+**Ground truth reference:** none — same as the entry above, this is
+downstream of the router-agnostic decision, not something the four
+ground-truth docs address.
+
+---
+
 ## [2026-08-28] Router selection and per-router config move onto the existing plugin-instance-config store — decided, not yet built
 
 **Type:** Decision, no code changed yet. Recorded so it isn't re-litigated or re-discovered
