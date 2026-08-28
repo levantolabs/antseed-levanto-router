@@ -50,7 +50,7 @@ export function LevantoRouterInfoDialog({ isOpen, onClose, onConfirm }: Props) {
 
       <div className={styles.actions}>
         <Button variant="ghost" onClick={onClose}>Cancel</Button>
-        <Button onClick={onConfirm}>Use Levanto Router</Button>
+        <Button onClick={onConfirm}>Enable Levanto Router</Button>
       </div>
     </Modal>
   );

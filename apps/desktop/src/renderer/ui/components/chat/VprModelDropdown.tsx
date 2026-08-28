@@ -14,7 +14,6 @@ import {
 } from '../../../modules/catalog/recommended';
 import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
 import { BrandIcon } from '../brand/BrandIcon';
-import { LevantoRouterInfoDialog } from './LevantoRouterInfoDialog';
 import styles from './VprModelDropdown.module.scss';
 
 /* The menu shows the curated recommended lineup (frontier + free models);
@@ -66,7 +65,6 @@ export function VprModelDropdown({
 }: VprModelDropdownProps) {
   const [open, setOpen] = useState(false);
   const [favorites, setFavorites] = useState(loadFavoriteModels);
-  const [levantoInfoEntry, setLevantoInfoEntry] = useState<VprModelCatalogEntry | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
   // Favorites are starred on the model pages (localStorage); re-read on each
@@ -180,7 +178,7 @@ export function VprModelDropdown({
         aria-selected={active}
         onClick={() => {
           setOpen(false);
-          if (!active) setLevantoInfoEntry(entry);
+          if (!active) onSelect(entry);
         }}
       >
         <span className={styles.itemTopRow}>
@@ -241,14 +239,6 @@ export function VprModelDropdown({
           )}
         </div>
       )}
-      <LevantoRouterInfoDialog
-        isOpen={levantoInfoEntry !== null}
-        onClose={() => setLevantoInfoEntry(null)}
-        onConfirm={() => {
-          if (levantoInfoEntry) onSelect(levantoInfoEntry);
-          setLevantoInfoEntry(null);
-        }}
-      />
     </div>
   );
 }

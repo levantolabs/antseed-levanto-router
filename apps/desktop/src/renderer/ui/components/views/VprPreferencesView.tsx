@@ -12,6 +12,7 @@ import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
 import { formatUsdShort, VprCard, VprPage, VprSettingRow, VprSlider, VprToggle } from '../vpr/VprKit';
 import { VprPeerAccessDialog } from './VprPeerAccessDialog';
+import { LevantoRouterInfoDialog } from '../chat/LevantoRouterInfoDialog';
 import styles from './VprPreferencesView.module.scss';
 
 type Props = { onSelectView?: (view: import('../../types').ViewName) => void };
@@ -28,6 +29,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
   }), shallowEqual);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => activeThemeMode());
   const [accessOpen, setAccessOpen] = useState(false);
+  const [levantoInfoOpen, setLevantoInfoOpen] = useState(false);
 
   const peerOptions = useMemo(
     () => buildVprPeerOptions(snap.lastPeers, snap.discoverRows),
@@ -79,12 +81,15 @@ export function VprPreferencesView({ onSelectView }: Props) {
                 value={autoSubscriptionEnabled ? 'levanto-auto' : 'none'}
                 onChange={(event) => {
                   const next = event.target.value === 'levanto-auto';
-                  actions.updateVprRoutingPreferences({
-                    autoSubscriptionEnabled: next,
-                    ...(next && snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
-                      ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
-                      : {}),
-                  });
+                  if (next) {
+                    // Enabling costs real, recurring money -- explain and
+                    // confirm before it takes effect. The <select> itself
+                    // reverts to "None" on the next render if the user
+                    // cancels, since autoSubscriptionEnabled never changed.
+                    setLevantoInfoOpen(true);
+                    return;
+                  }
+                  actions.updateVprRoutingPreferences({ autoSubscriptionEnabled: false });
                 }}
                 aria-label="Select model router"
               >
@@ -277,6 +282,20 @@ export function VprPreferencesView({ onSelectView }: Props) {
         peerOptions={peerOptions}
         onSetListing={actions.setVprPeerListing}
         onClearAllowlist={() => actions.updateVprRoutingPreferences({ allowedPeerIds: [] })}
+      />
+
+      <LevantoRouterInfoDialog
+        isOpen={levantoInfoOpen}
+        onClose={() => setLevantoInfoOpen(false)}
+        onConfirm={() => {
+          actions.updateVprRoutingPreferences({
+            autoSubscriptionEnabled: true,
+            ...(snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
+              ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
+              : {}),
+          });
+          setLevantoInfoOpen(false);
+        }}
       />
     </section>
   );
