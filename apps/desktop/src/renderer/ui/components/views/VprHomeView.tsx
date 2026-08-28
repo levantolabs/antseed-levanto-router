@@ -113,9 +113,12 @@ export function VprHomeView({ onSelectView }: Props) {
     [snap.catalog],
   );
   const rawSelectedModel = snap.selection.model;
-  const selectedModel = rawSelectedModel && isLevantoAutoEntry(rawSelectedModel)
-    ? selectDefaultVprModel(nonLevantoCatalog, null)
-    : rawSelectedModel;
+  const selectedModel = useMemo(
+    () => (rawSelectedModel && isLevantoAutoEntry(rawSelectedModel)
+      ? selectDefaultVprModel(nonLevantoCatalog, null)
+      : rawSelectedModel),
+    [rawSelectedModel, nonLevantoCatalog],
+  );
   const selectedEntry = useMemo(
     () => (selectedModel
       ? findCatalogEntry(snap.catalog, selectedModel.provider, selectedModel.serviceId) ?? undefined
