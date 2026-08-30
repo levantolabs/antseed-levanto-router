@@ -335,6 +335,8 @@ function detectNodeArch(nodeBinary: string): string | null {
     const output = execFileSync(nodeBinary, ['-p', 'process.arch'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
     }).trim();
     return output.length > 0 ? output : null;
   } catch {
@@ -347,6 +349,8 @@ function detectNodeMajorVersion(nodeBinary: string): number | null {
     const output = execFileSync(nodeBinary, ['-p', 'process.versions.node.split(".")[0]'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
     }).trim();
     const major = Number(output);
     return Number.isFinite(major) && major > 0 ? major : null;
@@ -561,6 +565,7 @@ export function resolveCommandArgs(opts: StartOptions): string[] {
 export class ProcessManager {
   private readonly processes = new Map<RuntimeMode, ChildProcessWithoutNullStreams>();
   private readonly attachedModes = new Set<RuntimeMode>();
+  private readonly startPromises = new Map<RuntimeMode, Promise<RuntimeProcessState>>();
   private runtimeNativeAligned = false;
   private runtimeNativeAlignmentPromise: Promise<void> | null = null;
   private readonly states = new Map<RuntimeMode, RuntimeProcessState>([
@@ -623,6 +628,19 @@ export class ProcessManager {
     if (this.processes.has(mode)) {
       throw new Error(`${mode} is already running`);
     }
+    const inFlightStart = this.startPromises.get(mode);
+    if (inFlightStart) {
+      return inFlightStart;
+    }
+
+    const startPromise = this.spawnForMode(mode, opts).finally(() => {
+      this.startPromises.delete(mode);
+    });
+    this.startPromises.set(mode, startPromise);
+    return startPromise;
+  }
+
+  private async spawnForMode(mode: RuntimeMode, opts: StartOptions): Promise<RuntimeProcessState> {
     this.attachedModes.delete(mode);
 
     const cliExecution = resolveCliExecution();
@@ -702,10 +720,12 @@ export class ProcessManager {
     });
 
     child.on('exit', (code, signal) => {
-      this.processes.delete(mode);
-      state.running = false;
-      state.pid = null;
-      state.lastExitCode = code;
+      if (this.processes.get(mode) === child) {
+        this.processes.delete(mode);
+        state.running = false;
+        state.pid = null;
+        state.lastExitCode = code;
+      }
       const reason = signal ? `signal=${signal}` : `code=${String(code)}`;
       this.onLog(mode, 'system', `Process exited (${reason})`);
     });
@@ -958,7 +978,12 @@ export class ProcessManager {
         child.kill('SIGKILL');
       }, 5_000);
       const forceKillTimeout = timeout;
-      const resolveTimeout = setTimeout(finish, 7_500);
+      const resolveTimeout = setTimeout(() => {
+        this.processes.delete(mode);
+        state.running = false;
+        state.pid = null;
+        finish();
+      }, 7_500);
 
       child.once('exit', finish);
 

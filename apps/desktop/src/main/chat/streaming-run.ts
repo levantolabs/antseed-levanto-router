@@ -221,7 +221,9 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
       preferredPeerByConversationId.set(conversationId, preferredPeerId);
       if (peerOverrideId && persistedPeer?.peerId !== peerOverrideId) {
         const peerLabel = getServiceCatalogEntries().find((entry) => entry.peerId === peerOverrideId)?.peerLabel;
-        void store.setPeer(conversationId, peerOverrideId, peerLabel, 'pinned');
+        void store.setPeer(conversationId, peerOverrideId, peerLabel, 'pinned').catch((err) => {
+          appendSystemLog(`Failed to persist pinned peer: ${asErrorMessage(err)}`);
+        });
       }
     }
     // Catalog entry for this (service, peer) pair drives both the API
@@ -635,7 +637,9 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
             // Persist peer to session file if it's new or changed
             if (peerId !== prevPeerId) {
               const peerLabel = getServiceCatalogEntries().find((e) => e.peerId === peerId)?.peerLabel;
-              void store.setPeer(conversationId, peerId, peerLabel);
+              void store.setPeer(conversationId, peerId, peerLabel).catch((err) => {
+                appendSystemLog(`Failed to persist peer for conversation ${conversationId.slice(0, 8)}...: ${asErrorMessage(err)}`);
+              });
             }
           }
           const assistantMessage = message as AssistantMessage & { meta?: AiMessageMeta };

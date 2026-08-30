@@ -314,7 +314,9 @@ export function registerPiChatHandlers({
     serviceCatalogRefreshPromise = (async () => {
       try {
         const port = await resolveProxyPort(configPath);
-        const response = await fetch(`${LOCALHOST_URL}:${port}/v1/models`);
+        const response = await fetch(`${LOCALHOST_URL}:${port}/v1/models`, {
+          signal: AbortSignal.timeout(2_000),
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const entries = buildChatServiceCatalogFromNetworkModels(await response.json());
         const limited = limitChatServiceCatalogEntries(entries);
@@ -418,7 +420,9 @@ export function registerPiChatHandlers({
     // default router-local) or the buyer runtime isn't up yet.
     try {
       const port = await resolveProxyPort(configPath);
-      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions`);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions`, {
+        signal: AbortSignal.timeout(2_000),
+      });
       if (!response.ok) return { ok: true, data: [] };
       const body = await response.json() as { ok?: boolean; rows?: unknown[] };
       return { ok: true, data: Array.isArray(body.rows) ? body.rows : [] };
@@ -437,7 +441,9 @@ export function registerPiChatHandlers({
     // copy in that case.
     try {
       const port = await resolveProxyPort(configPath);
-      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/subscription-price`);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/subscription-price`, {
+        signal: AbortSignal.timeout(2_000),
+      });
       if (!response.ok) return { ok: true, data: null };
       const body = await response.json() as { ok?: boolean; offer?: { peerId?: string; flatUsdPrice?: number } | null };
       return { ok: true, data: body.offer ?? null };
@@ -493,6 +499,7 @@ export function registerPiChatHandlers({
         try {
           const resp = await fetch(
             `${LOCALHOST_URL}:${buyerPort}/_antseed/metering/${encodeURIComponent(peerId)}`,
+            { signal: AbortSignal.timeout(2_000) },
           );
           if (!resp.ok) return;
           const body = await resp.json() as Record<string, unknown> | null;
@@ -712,6 +719,7 @@ export function registerPiChatHandlers({
   ipcMain.handle('chat:ai-delete-conversation', async (_event, id: string) => {
     preferredPeerByConversationId.delete(id);
     cachedPaymentRequired.delete(id);
+    await abortConversations(id);
     await store.delete(id);
     // Best effort: wipe any raw attachment bytes we persisted for this
     // conversation. Failures are swallowed so a stuck directory doesn't
@@ -884,6 +892,7 @@ export function registerPiChatHandlers({
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ peerId: pinnedPeerId }),
+        signal: AbortSignal.timeout(2_000),
       });
       const result = await response.json() as { ok: boolean; error?: string };
       return { ok: result.ok, error: result.error };
@@ -911,6 +920,7 @@ export function registerPiChatHandlers({
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model }),
+        signal: AbortSignal.timeout(2_000),
       });
       const result = await response.json() as { ok?: boolean; error?: string };
       if (result.ok) lastPostedDefaultRoute = model;
@@ -941,6 +951,7 @@ export function registerPiChatHandlers({
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ model: '' }),
+        signal: AbortSignal.timeout(2_000),
       });
       const result = await response.json() as { ok?: boolean; error?: string };
       if (result.ok) lastPostedDefaultRoute = '';
