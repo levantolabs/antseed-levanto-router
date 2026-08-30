@@ -3419,6 +3419,14 @@ export class BuyerProxy {
         fault === 'buyer' ? 'buyer-local' : 'request-failed',
         fault,
       )
+      if (router && fault !== 'buyer' && routeAlternatives) {
+        router.onResult(selectedPeer, {
+          success: false,
+          latencyMs,
+          tokens: 0,
+          requestId: requestForPeer.requestId,
+        })
+      }
 
       if (res.headersSent) {
         // Headers already sent (streaming), can't retry
