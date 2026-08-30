@@ -9,7 +9,7 @@ import { ACTIVE_CONFIG_PATH } from './active-config.js';
 
 const { join, resolve } = path;
 
-export type RuntimeMode = 'connect' | 'system-proxy';
+export type RuntimeMode = 'connect' | 'system-proxy' | 'tunnel';
 
 export interface RuntimeProcessState {
   mode: RuntimeMode;
@@ -34,6 +34,7 @@ export interface StartOptions {
   systemProxyDefaultModel?: string;
   systemProxyServedModels?: string[];
   setSystemProxy?: boolean;
+  tunnelBuyerPort?: number;
 }
 
 export interface DaemonStateSnapshot {
@@ -555,6 +556,11 @@ export function resolveCommandArgs(opts: StartOptions): string[] {
         args.push('--system-proxy');
       }
       break;
+    case 'tunnel':
+      args.push('--data-dir', resolveConnectDataDir());
+      args.push('tunnel', 'start');
+      if (opts.tunnelBuyerPort) args.push('--buyer-port', String(opts.tunnelBuyerPort));
+      break;
     default:
       throw new Error(`Unsupported runtime mode: ${String(opts.mode)}`);
   }
@@ -571,6 +577,7 @@ export class ProcessManager {
   private readonly states = new Map<RuntimeMode, RuntimeProcessState>([
     ['connect', { mode: 'connect', running: false, pid: null, startedAt: null, lastExitCode: null, lastError: null }],
     ['system-proxy', { mode: 'system-proxy', running: false, pid: null, startedAt: null, lastExitCode: null, lastError: null }],
+    ['tunnel', { mode: 'tunnel', running: false, pid: null, startedAt: null, lastExitCode: null, lastError: null }],
   ]);
 
   constructor(
@@ -997,6 +1004,7 @@ export class ProcessManager {
     await Promise.all([
       this.stop('system-proxy'),
       this.stop('connect'),
+      this.stop('tunnel'),
     ]);
   }
 }

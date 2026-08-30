@@ -56,6 +56,7 @@ export {
   type FaultAttribution,
   type AntseedErrorCode,
 } from './errors.js';
+export { adaptPeerFaultErrorResponse } from '@antseed/buyer-core';
 
 // Submodule re-exports (commonly used)
 export {

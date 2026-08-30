@@ -8,6 +8,7 @@ import {
   ANTSEED_FAULT_ATTRIBUTION_HEADER,
   ANTSEED_ATTEST_PATH,
   buildNetworkServiceOffers,
+  adaptPeerFaultErrorResponse,
   computeOnChainReputationScore,
   decodeSweepRequest,
   faultAttributionOf,
@@ -156,7 +157,13 @@ export interface BuyerProxyConfig {
   verifier?: VerifierPolicy
 }
 
-const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504])
+// 401/403 are included: sellers relay upstream auth failures (revoked or
+// expired key, region/WAF block) that are specific to that seller's upstream
+// account, so another peer serving the same model can usually complete the
+// request. 402 stays terminal (buyer payment flow), and 404 stays terminal
+// because model_not_found already has dedicated unadvertise handling while a
+// generic 404 would repeat identically on every peer.
+const RETRYABLE_STATUS_CODES = new Set([401, 403, 408, 429, 500, 502, 503, 504])
 /** Client disclosure only (x-antseed-route-alternatives) -- not a limit on
  *  how many candidates the router itself ranks or dispatch tries. */
 const MAX_DISCLOSED_ROUTE_ALTERNATIVES = 10
@@ -2667,6 +2674,7 @@ export class BuyerProxy {
             explicitProvider,
             router,
             RETRYABLE_STATUS_CODES,
+            false,
             clientAbortController.signal,
             routeAlternatives,
           )
@@ -2906,6 +2914,7 @@ export class BuyerProxy {
       explicitProvider,
       router,
       RETRYABLE_STATUS_CODES,
+      true,
       clientAbortController.signal,
     )
     if (result.done && trackedConversationId && pinnedServiceId) {
@@ -3029,6 +3038,7 @@ export class BuyerProxy {
     explicitProvider: string | null,
     router: Router | null,
     retryableStatusCodes: Set<number>,
+    pinned: boolean,
     requestSignal: AbortSignal,
     /** Router-ranked candidates to disclose to the client (top few, client
      *  display only) — undefined/null for a directly pinned peer. */
@@ -3142,6 +3152,9 @@ export class BuyerProxy {
 
     // Forward through P2P
     const wantsStreaming = clientWantsStreaming
+    const peerResponseProtocol = selectedRoutePlan.selection?.targetProtocol ?? requestProtocol
+    const adaptPeerResponse = (response: SerializedHttpResponse): SerializedHttpResponse =>
+      adaptPeerFaultErrorResponse(response, peerResponseProtocol, { pinned })
     const startTime = Date.now()
     try {
       if (wantsStreaming) {
@@ -3183,9 +3196,10 @@ export class BuyerProxy {
               }
             }
           },
-        }, { signal: requestSignal })
+        }, { signal: requestSignal, pinned })
 
         let responseForClient = adaptBuyerFaultErrorResponse(response, requestProtocol)
+        responseForClient = adaptPeerResponse(responseForClient)
         if (
           !streamed
           && responseForClient.headers[ANTSEED_FAULT_ATTRIBUTION_HEADER]?.toLowerCase() !== 'buyer'
@@ -3298,12 +3312,16 @@ export class BuyerProxy {
         res.end(Buffer.from(responseForClient.body))
         return { done: true }
       } else {
-        const upstreamResponse = await this._node.sendRequest(selectedPeer, requestForPeer, { signal: requestSignal })
+        const upstreamResponse = await this._node.sendRequest(selectedPeer, requestForPeer, {
+          signal: requestSignal,
+          pinned,
+        })
         if (upstreamResponse.statusCode >= 400 && !adaptResponse) {
           log(`Upstream raw error detail: ${summarizeErrorResponse(upstreamResponse)}`)
         }
 
         let response = adaptBuyerFaultErrorResponse(upstreamResponse, requestProtocol)
+        response = adaptPeerResponse(response)
         if (
           adaptResponse
           && response.headers[ANTSEED_FAULT_ATTRIBUTION_HEADER]?.toLowerCase() !== 'buyer'
@@ -3461,7 +3479,19 @@ export class BuyerProxy {
         }
       }
 
-      return { done: false, statusCode: 502, responseBody: Buffer.from(`P2P request failed: ${message}`), responseHeaders: { 'content-type': 'text/plain' }, errorMessage: message }
+      const peerResponse = adaptPeerResponse({
+        requestId: requestForPeer.requestId,
+        statusCode: 502,
+        headers: { 'content-type': 'text/plain' },
+        body: Buffer.from(message),
+      })
+      return {
+        done: false,
+        statusCode: peerResponse.statusCode,
+        responseBody: Buffer.from(peerResponse.body),
+        responseHeaders: peerResponse.headers,
+        errorMessage: message,
+      }
     }
   }
 }

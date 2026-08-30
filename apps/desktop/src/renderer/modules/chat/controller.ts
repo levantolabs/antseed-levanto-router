@@ -1,4 +1,4 @@
-import type { BadgeTone, DiscoverRow, RendererUiState, VprModelCatalogEntry } from '../../core/state';
+import type { BadgeTone, DiscoverRow, RendererUiState, VprModelCatalogEntry, VprSelectedModel } from '../../core/state';
 import { LOCALHOST_URL } from '../../constants';
 import { notifyUiStateChanged, notifyUiStateChangedSync } from '../../core/store';
 import { normalizeDiscoverRow, projectRowsToChatServiceOptions } from '../catalog/discover-rows.js';
@@ -143,6 +143,9 @@ export type ChatModuleApi = {
   /** Re-derive the routable rows, model catalog and service list after a peer
       allow/block rule changes. */
   applyPeerAccessRules: () => void;
+  /** End the provisional-default window after an explicit model choice made
+      outside this module (the model page's "Use" button). */
+  endProvisionalDefaultModel: () => void;
   refreshChatProxyStatus: () => Promise<void>;
   refreshChatConversations: () => Promise<void>;
   refreshWorkspace: () => Promise<void>;
@@ -208,7 +211,11 @@ export function initChatModule({
   const CHAT_SERVICE_REFRESH_INTERVAL_MS = 60_000;
   // Faster retry during first-run setup while no services have been found yet.
   const CHAT_SERVICE_SETUP_REFRESH_INTERVAL_MS = 2_000;
-  const CHAT_SERVICE_LIST_TIMEOUT_MS = 12_000;
+  // Last-resort backstop only: the main-process handler bounds itself to
+  // ~26s worst case via per-phase budgets, so on a healthy machine this never
+  // fires. Generous so slow machines/connections still get their rows late
+  // rather than never.
+  const CHAT_SERVICE_LIST_TIMEOUT_MS = 30_000;
 
   // ---------------------------------------------------------------------------
   // Module-local state
@@ -420,6 +427,10 @@ export function initChatModule({
       : null;
   }
 
+  function isPinnedConversation(convId: string): boolean {
+    return findConversationSummary(convId)?.routeMode === 'pinned';
+  }
+
   /**
    * Pick a different healthy peer for a conversation whose current peer just
    * failed.
@@ -438,7 +449,7 @@ export function initChatModule({
     const conversation = findConversationSummary(convId);
     // Threads with no recorded mode predate route-mode tracking; they are
     // treated as auto, since failover only runs after a failure.
-    if (conversation?.routeMode === 'pinned') return null;
+    if (isPinnedConversation(convId)) return null;
 
     const serviceId = normalizeChatServiceId(conversation?.service);
     if (serviceId.length === 0) return null;
@@ -1447,6 +1458,63 @@ export function initChatModule({
     );
   }
 
+  // The auto-picked default model, while it is only provisional: not backed by
+  // an eligible free route. First-launch discovery snapshots are cold — DHT
+  // discovery is partial and on-chain reputation hasn't been fetched yet, so
+  // every free seller fails the trust gate and the default pick falls back to
+  // a paid model. Persisting that pick would lock a brand-new user onto a paid
+  // default forever, so a provisional pick is kept in memory only and
+  // re-evaluated on every refresh until a free-backed default appears or the
+  // user chooses a model explicitly.
+  let provisionalDefaultModel: VprSelectedModel | null = null;
+
+  /** Keep the UI's "finding free peers" hint in step with the provisional pick. */
+  function setProvisionalDefaultModel(model: VprSelectedModel | null): void {
+    provisionalDefaultModel = model;
+    uiState.vprDefaultModelProvisional = model !== null;
+  }
+
+  /**
+   * An explicit model choice ends the provisional-default window — even when
+   * it lands on the very model the provisional default chose. For selection
+   * paths outside this module (the model page's "Use" button) that must stop
+   * the refresh loop from re-picking over the user's choice.
+   */
+  function endProvisionalDefaultModel(): void {
+    setProvisionalDefaultModel(null);
+  }
+
+  /**
+   * Pick the default model and adopt it into the route selection. Free-backed
+   * picks are final (persisted); anything else is provisional (see above).
+   * Returns the pick, or null when the catalog offers nothing to pick.
+   */
+  function adoptDefaultVprModel(): VprSelectedModel | null {
+    const defaultModel = selectDefaultVprModel(
+      uiState.vprModelCatalog, null, freeEntryRouteReputation,
+      uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+    );
+    if (!defaultModel) return null;
+    const entry = findCatalogEntry(uiState.vprModelCatalog, defaultModel.provider, defaultModel.serviceId);
+    const freeBacked = entry !== null && freeEntryRouteReputation(entry) !== null;
+    const current = uiState.vprRouteSelection;
+    const changed = !current.model
+      || current.model.provider !== defaultModel.provider
+      || current.model.serviceId !== defaultModel.serviceId
+      || current.mode !== 'auto'
+      || current.peerId !== null;
+    if (changed) {
+      uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
+    }
+    if (freeBacked) {
+      setProvisionalDefaultModel(null);
+      saveVprRouteSelection(uiState.vprRouteSelection);
+    } else {
+      setProvisionalDefaultModel(defaultModel);
+    }
+    return defaultModel;
+  }
+
   // Catalog price tags must only come from sellers auto-routing may pick, so
   // an untrusted seller's $0 offer can't render a "Free" badge for a model
   // that would really route (and bill) through a trusted paid seller.
@@ -1478,12 +1546,10 @@ export function initChatModule({
       && !isLevantoAutoSelected(selected)
       && routesForSelectedModel(uiState.vprRoutableRows, selected).length === 0
     ) {
-      const defaultModel = selectDefaultVprModel(
-        uiState.vprModelCatalog, null, freeEntryRouteReputation,
-        uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
-      );
-      uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
-      saveVprRouteSelection(uiState.vprRouteSelection);
+      if (!adoptDefaultVprModel()) {
+        uiState.vprRouteSelection = { model: null, mode: 'auto', peerId: null };
+        saveVprRouteSelection(uiState.vprRouteSelection);
+      }
     }
 
     updateChatServiceOptions(projectRowsToChatServiceOptions(uiState.vprRoutableRows));
@@ -1532,8 +1598,31 @@ export function initChatModule({
     }
   }
 
+  // Service-discovery failures (notably the 12s IPC timeout above) used to be
+  // invisible in exported logs — the runtime looked healthy while the model
+  // list stayed empty. Log the first failure, then one summary per minute,
+  // plus the recovery, so a log export tells the story.
+  let discoverFailureStreak = 0;
+  let discoverFailureLogAt = 0;
+  function noteDiscoverFailure(message: string): void {
+    discoverFailureStreak += 1;
+    const now = Date.now();
+    if (discoverFailureStreak === 1 || now - discoverFailureLogAt >= 60_000) {
+      discoverFailureLogAt = now;
+      appendSystemLog(discoverFailureStreak === 1
+        ? `Service discovery failed: ${message}`
+        : `Service discovery still failing (${String(discoverFailureStreak)} consecutive): ${message}`);
+    }
+  }
+  function noteDiscoverSuccess(rowCount: number): void {
+    if (discoverFailureStreak === 0) return;
+    appendSystemLog(`Service discovery recovered after ${String(discoverFailureStreak)} failure(s): ${String(rowCount)} row(s)`);
+    discoverFailureStreak = 0;
+    discoverFailureLogAt = 0;
+  }
+
   async function refreshChatServiceOptions(): Promise<void> {
-    // Skip if a fetch is already in-flight — the 12s timeout outlasts the 5s poll
+    // Skip if a fetch is already in-flight — the 30s timeout outlasts the 5s poll
     // cycle, so without this guard every result gets a stale token and is dropped.
     if (serviceRefreshInProgress) return;
     serviceRefreshInProgress = true;
@@ -1558,6 +1647,7 @@ export function initChatModule({
       if (!result.ok || !Array.isArray(result.data)) {
         uiState.chatDiscoverRowsLoaded = false;
         updateChatServiceOptions(fallback);
+        noteDiscoverFailure(result.error || 'Service catalog unavailable.');
         setRuntimeActivity('warn', result.error || 'Service catalog unavailable.');
         notifyUiStateChanged();
         return;
@@ -1570,6 +1660,7 @@ export function initChatModule({
       uiState.discoverRows = rows;
       uiState.vprRoutableRows = filterRoutableVprRoutes(rows, uiState.vprRoutingPreferences);
       uiState.chatDiscoverRowsLoaded = true;
+      noteDiscoverSuccess(rows.length);
       // Guard on the raw discovery result, not the projection: an allowlist
       // that excludes every discovered seller must empty the catalog, while a
       // transient empty discovery snapshot must leave the last one standing.
@@ -1594,20 +1685,27 @@ export function initChatModule({
       // Only auto-fill an empty selection. A user-chosen model that is briefly
       // missing from a partial discover snapshot (peer flap, partial DHT
       // results) must not be silently replaced — it resolves again as soon as
-      // its peer reappears in the catalog.
+      // its peer reappears in the catalog. A provisional default (auto-picked
+      // with no eligible free route in sight yet) is the one exception: it
+      // keeps being re-picked so the first-launch experience upgrades to a
+      // free model as soon as discovery and reputation warm up.
       const selectedRouteModel = uiState.vprRouteSelection.model;
       const selectedRouteEntry = selectedRouteModel
         ? findCatalogEntry(uiState.vprModelCatalog, selectedRouteModel.provider, selectedRouteModel.serviceId)
         : null;
-      if (!selectedRouteModel || selectedRouteEntry?.kind === 'image') {
-        const defaultModel = selectDefaultVprModel(
-          uiState.vprModelCatalog, null, freeEntryRouteReputation,
-          uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
-        );
-        if (defaultModel) {
-          uiState.vprRouteSelection = { model: defaultModel, mode: 'auto', peerId: null };
-          saveVprRouteSelection(uiState.vprRouteSelection);
-        }
+      if (provisionalDefaultModel && (!selectedRouteModel
+        || selectedRouteModel.provider !== provisionalDefaultModel.provider
+        || selectedRouteModel.serviceId !== provisionalDefaultModel.serviceId
+        || uiState.vprRouteSelection.mode !== 'auto'
+        || uiState.vprRouteSelection.peerId !== null)) {
+        // The selection moved off the provisional pick — a different model, or
+        // the same model deliberately pinned to a seller. Either way that was
+        // an explicit choice (or a rules-driven re-pick); stop second-guessing
+        // it — re-picking here would flatten a pin back to auto.
+        setProvisionalDefaultModel(null);
+      }
+      if (!selectedRouteModel || selectedRouteEntry?.kind === 'image' || provisionalDefaultModel !== null) {
+        adoptDefaultVprModel();
       }
       // Keep the buyer proxy's default route on the current selection. Runs
       // on every poll tick, but main dedupes repeats — the repetition is what
@@ -1628,6 +1726,7 @@ export function initChatModule({
       uiState.chatDiscoverRowsLoaded = false;
       updateChatServiceOptions(fallback);
       const message = toErrorMessage(error, 'Failed to load services');
+      noteDiscoverFailure(message);
       setRuntimeActivity('bad', message);
     } finally {
       serviceRefreshInProgress = false;
@@ -2669,8 +2768,11 @@ export function initChatModule({
               // finalized the partial message. Don't overwrite with an error.
               clearPaymentRetry(convId);
               setConversationSending(convId, false);
-            } else if (result.stopReason?.retryable === false) {
-              reportChatError(result.stopReason.message || result.error, 'Request failed');
+            } else if (
+              result.stopReason?.retryable === false
+              || isPinnedConversation(convId)
+            ) {
+              reportChatError(result.stopReason?.message || result.error, 'Request failed');
               setConversationSending(convId, false);
             } else {
               scheduleChatRetry(
@@ -2857,6 +2959,9 @@ export function initChatModule({
         mode: pinnedPeerId ? 'pinned-peer' : 'auto',
         peerId: pinnedPeerId || null,
       };
+      // An explicit pick ends the provisional-default window even when the
+      // user picks the very model the provisional default landed on.
+      setProvisionalDefaultModel(null);
       if (rememberModelPin) {
         if (pinnedPeerId) {
           uiState.vprModelPins = setVprModelPin(
@@ -3073,6 +3178,10 @@ export function initChatModule({
               categories: [...(option?.categories ?? [])],
             };
         uiState.vprRouteSelection = { model: selectedModel, mode: 'pinned-peer', peerId };
+        // An external explicit pick ends the provisional-default window even
+        // when it lands on the very model the provisional default chose —
+        // otherwise the next refresh's re-pick would flatten the pin to auto.
+        setProvisionalDefaultModel(null);
         uiState.vprModelPins = setVprModelPin(
           uiState.vprModelPins,
           selectedModel.provider,
@@ -3534,6 +3643,7 @@ export function initChatModule({
         streamFailedAtByConversation.set(data.conversationId, Date.now());
 
         const isActiveConversation = data.conversationId === uiState.chatActiveConversation;
+        const isPinned = isPinnedConversation(data.conversationId);
         if (isActiveConversation) {
           // Ensure the waiting-for-stream flag is cleared even if the error fires
           // before chat:ai-stream-start is received (which is the only other place
@@ -3558,7 +3668,7 @@ export function initChatModule({
             } else {
               clearPaymentRetry(data.conversationId);
             }
-          } else if (stopReason?.retryable === false || outputAlreadyStarted) {
+          } else if (stopReason?.retryable === false || outputAlreadyStarted || isPinned) {
             clearPaymentRetry(data.conversationId);
             if (isActiveConversation) {
               reportChatError(stopReason?.message || data.error, 'Request failed');
@@ -3621,6 +3731,7 @@ export function initChatModule({
     decideToolApproval,
     refreshChatServiceOptions,
     applyPeerAccessRules,
+    endProvisionalDefaultModel,
     refreshChatProxyStatus,
     refreshChatConversations,
     refreshWorkspace,
