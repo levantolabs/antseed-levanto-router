@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import type { RoutingDecisionRow } from '@antseed/node';
-import { computeRouterSavings, defaultRouterSavingsBaselineModel } from './router-savings.js';
+import { computeRouterSavings, defaultRouterSavingsBaselineModel, groupRoutingDecisionsByConversation } from './router-savings.js';
 
 const BASELINE_PRICE = { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 };
 
@@ -21,6 +21,7 @@ function row(overrides: Partial<RoutingDecisionRow> = {}): RoutingDecisionRow {
     cqt: 5,
     routingLatencyMs: 50,
     baselinePrices: { [defaultRouterSavingsBaselineModel()]: BASELINE_PRICE },
+    conversationKey: null,
     ...overrides,
   };
 }
@@ -88,4 +89,46 @@ test('clamps a paid-above-baseline scenario to 0%, never negative', () => {
   const result = computeRouterSavings([row({ actualUsdcPaid: 1 })]); // way above the 0.03 baseline
   assert.ok(result);
   assert.equal(result!.pct, 0);
+});
+
+test('groupRoutingDecisionsByConversation groups by conversationKey, dropping keyless rows', () => {
+  const groups = groupRoutingDecisionsByConversation(
+    [
+      row({ conversationKey: 'conv-a', atMs: 1000 }),
+      row({ conversationKey: 'conv-a', atMs: 2000 }),
+      row({ conversationKey: 'conv-b', atMs: 1500 }),
+      row({ conversationKey: null }),
+    ],
+    new Map(),
+  );
+  assert.equal(groups.length, 2);
+  const a = groups.find((g) => g.conversationKey === 'conv-a');
+  assert.equal(a?.turnCount, 2);
+  assert.ok(a?.savings);
+});
+
+test('groupRoutingDecisionsByConversation prefers supplied metadata for label/lastActiveAt, falling back to the ledger otherwise', () => {
+  const groups = groupRoutingDecisionsByConversation(
+    [row({ conversationKey: 'conv-a', atMs: 1000 }), row({ conversationKey: 'conv-b', atMs: 5000 })],
+    new Map([['conv-a', { label: 'Debugging the router', lastActiveAt: 9999 }]]),
+  );
+  const a = groups.find((g) => g.conversationKey === 'conv-a');
+  const b = groups.find((g) => g.conversationKey === 'conv-b');
+  assert.equal(a?.label, 'Debugging the router');
+  assert.equal(a?.lastActiveAt, 9999);
+  assert.equal(b?.label, 'Chat'); // no metadata supplied -- falls back
+  assert.equal(b?.lastActiveAt, 5000); // falls back to the row's own atMs
+});
+
+test('groupRoutingDecisionsByConversation sorts most-recently-active first and respects the limit', () => {
+  const groups = groupRoutingDecisionsByConversation(
+    [
+      row({ conversationKey: 'old', atMs: 1000 }),
+      row({ conversationKey: 'new', atMs: 3000 }),
+      row({ conversationKey: 'mid', atMs: 2000 }),
+    ],
+    new Map(),
+    2,
+  );
+  assert.deepEqual(groups.map((g) => g.conversationKey), ['new', 'mid']);
 });

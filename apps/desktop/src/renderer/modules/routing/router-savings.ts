@@ -69,3 +69,51 @@ export function computeRouterSavings(
   const pct = Math.round(Math.max(0, Math.min(1, 1 - actualUsd / baselineUsd)) * 100);
   return { pct, actualUsd, baselineUsd, matchedServices };
 }
+
+export type RecentAutoSession = {
+  conversationKey: string;
+  label: string;
+  lastActiveAt: number;
+  turnCount: number;
+  savings: MeasuredSavings | null;
+};
+
+/**
+ * Groups a router's ledger rows by `conversationKey` into one entry per
+ * session -- the "can see sessions in vpr" list on the Activity view, a
+ * lighter-weight sibling of the full per-turn ConversationRoutingHistory
+ * panel shown inside an open chat. `conversationMeta` supplies a human
+ * label/last-active timestamp per key (the caller cross-references its own
+ * conversation list -- this module stays free of any bridge/IPC type
+ * coupling); a key with no matching metadata still gets a row (falls back to
+ * "Chat" and this session's own latest decision timestamp) rather than being
+ * dropped, since the ledger data is what actually answers "did this chat get
+ * routed," independent of whether the conversation list happened to load.
+ */
+export function groupRoutingDecisionsByConversation(
+  rows: readonly RoutingDecisionRow[] | undefined,
+  conversationMeta: ReadonlyMap<string, { label: string; lastActiveAt: number }>,
+  limit = 8,
+): RecentAutoSession[] {
+  if (!rows || rows.length === 0) return [];
+  const rowsByKey = new Map<string, RoutingDecisionRow[]>();
+  for (const row of rows) {
+    if (!row.conversationKey) continue;
+    const existing = rowsByKey.get(row.conversationKey);
+    if (existing) existing.push(row);
+    else rowsByKey.set(row.conversationKey, [row]);
+  }
+  return Array.from(rowsByKey.entries())
+    .map(([conversationKey, convRows]) => {
+      const meta = conversationMeta.get(conversationKey);
+      return {
+        conversationKey,
+        label: meta?.label ?? 'Chat',
+        lastActiveAt: meta?.lastActiveAt ?? Math.max(...convRows.map((r) => r.atMs)),
+        turnCount: convRows.length,
+        savings: computeRouterSavings(convRows),
+      };
+    })
+    .sort((a, b) => b.lastActiveAt - a.lastActiveAt)
+    .slice(0, limit);
+}
