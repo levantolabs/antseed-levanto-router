@@ -2457,3 +2457,67 @@ upstream/main alone).
 
 **Ground truth reference:** none of the four docs describe upstream sync at all -- this is
 infrastructure/maintenance work, not a protocol or feature decision.
+
+## [2026-08-31] Per-conversation routing history and a savings-dashboard drill-down
+
+**Type:** Decides something the docs are silent on -- SS4.5/SS4.6 describe the aggregate savings
+figure only; nothing specifies a per-session view. Follows up on an earlier design fork's proposal.
+
+**The biggest open risk resolved cleanly, no new plumbing needed.** That proposal's main unknown
+was whether a router's `ConversationIdentity.sessionKey` actually lines up with the desktop app's
+own conversation id, since nothing had confirmed it. Tracing the real request path
+(`apps/desktop/src/main/chat/proxy-service.ts`'s `makeProxyService`) found it already does:
+`headers['x-vpr-session-id'] = conversationId` is sent on every VPR chat request specifically so
+the buyer's generic `x-<tool>-session-id` conversation-identity extraction
+(`apps/cli/src/proxy/conversation-identity.ts`) recognizes tool `"vpr"` and sets
+`sessionKey` to exactly that header's value -- the desktop's own `AiConversation.id`, unprefixed,
+byte-for-byte. That header already existed for an unrelated reason (per-chat peer-affinity
+routing overrides); it happens to already solve this feature's identity problem too. No new
+header, no new IPC surface.
+
+**`RoutingDecisionRow`/`PendingDecision` gain one field**, `conversationKey: string | null`
+(`packages/node/src/interfaces/buyer-router.ts`, `plugins/router-levanto/src/ledger.ts`), set from
+`conversation?.sessionKey ?? null` at both of `router.ts`'s `recordPending` call sites. Bare
+`sessionKey`, not the tool-qualified `${tool}:${sessionKey}` key `conversationKey()`
+(router.ts's own internal cache key helper) builds -- a host comparing against its own
+conversation id needs no reconstruction. `null` on rows from before this field existed, or from a
+caller with no per-chat identity (a CLI-only invocation) -- `sanitizeRow` defaults a
+missing/malformed value to `null`, not a crash, same pattern as every other field here.
+
+**A second, unrelated leak found and fixed while in this file**: `RoutingLedger.rows` (backing
+`getRoutingDecisions()`) was the one map SS12's earlier robustness audit didn't cap -- that pass
+only bounded `pendingByRequestId`. Flagged by the design fork; fixed the same way, a flat
+`MAX_LEDGER_ROWS = 5000` cap, oldest evicted first, applied both on `loadSync` (an old file can
+hold more than the cap) and on `recordResult`'s push. The on-disk `routing-decisions.jsonl` file
+itself is untouched and still grows without a retention policy -- a separate, still-genuinely-open
+question (no decided retention window exists for this ledger), not addressed here.
+
+**UI integration, two pieces, both reusing existing patterns rather than new ones:**
+
+- *Per-conversation drill-down* -- a new `ConversationRoutingHistory` panel, shown inside an open
+  chat (`ChatView.tsx`) behind a header toggle gated on the conversation actually having routed
+  turns (not on Auto being the live selection, so history survives switching a chat's default
+  away from Auto). Filters the same cached `routingDecisionsResource` the aggregate views already
+  poll, client-side, on the new field -- no new endpoint. Visually modeled on
+  `ChatRoutingBadge`'s existing label-row-plus-table pattern rather than inventing a new one: one
+  row per turn (when/model/peer/cost/latency), the conversation's own `computeRouterSavings`
+  figure at the top.
+- *"Can see sessions in vpr"* -- `VprActivityView.tsx` (the existing aggregate-savings surface,
+  already showing the "Router savings" tile) gained a "Recent Auto sessions" list: the same ledger
+  rows grouped by `conversationKey` (`groupRoutingDecisionsByConversation`, a new pure function in
+  `router-savings.ts`, unit-tested independently of the view), cross-referenced against
+  `buyerConversationsResource`'s `tool === 'vpr'` rows (which share the identical `sessionKey`) for
+  a human label, sorted most-recently-active first. Clicking a row calls the same
+  `actions.openConversation` the sidebar's own chat list already uses, switching to the chat view.
+  Chose to extend this existing view rather than build a new dedicated "dashboard" screen --
+  VprActivityView already was the aggregate destination; a second parallel surface would just
+  fragment where a buyer looks for this.
+
+**Verification:** full suites green -- `plugins/router-levanto` 69/69 (+4 new), `packages/node`
+1023/1023, `apps/desktop` renderer 384/384 (+7 new, 45 files), `apps/desktop` compiled
+main-process 313/313 (0 changes in this area, unaffected), `apps/cli` 475 total/473 pass (the
+same 2 pre-existing, unrelated fixture-mismatch failures noted in earlier entries).
+
+**Ground truth reference:** none of the four docs specify a per-session view; this fills that gap
+without touching anything they do specify (the aggregate `computeRouterSavings` formula, the
+ledger's wire shape) beyond the one additive field.
