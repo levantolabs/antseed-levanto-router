@@ -6,8 +6,8 @@ import { useActions } from '../../hooks/useActions';
 import { shortAddress } from '../../../core/format';
 import { computeMeasuredSavings, formatSavedUsd } from '../../../modules/catalog/measured-savings';
 import { ensureOpenRouterPrices, getCachedOpenRouterPrices } from '../../../modules/catalog/openrouter-baseline';
-import { computeRouterSavings } from '../../../modules/routing/router-savings';
-import { routingDecisionsResource } from '../../../modules/app/vpr-resources';
+import { computeRouterSavings, groupRoutingDecisionsByConversation } from '../../../modules/routing/router-savings';
+import { buyerConversationsResource, routingDecisionsResource } from '../../../modules/app/vpr-resources';
 import { useCachedResource } from '../../../modules/app/cached-resource';
 import { formatCompactTokens, VprCard, VprPage, VprStatRow, VprStatTile } from '../vpr/VprKit';
 import { VprSpendingChart } from './VprSpendingChart';
@@ -132,6 +132,29 @@ export function VprActivityView({ onSelectView }: Props) {
     [routingDecisions],
   );
 
+  // Per-session breakdown ("can see sessions in vpr") for the tile above --
+  // groups the same ledger rows by conversationKey, cross-referenced against
+  // the buyer's own conversation list (tool === 'vpr' rows share the exact
+  // same sessionKey, see RoutingDecisionRow.conversationKey's doc comment)
+  // for a human label.
+  const buyerConversations = useCachedResource(buyerConversationsResource, true).data;
+  const recentAutoSessions = useMemo(() => {
+    const metaByKey = new Map<string, { label: string; lastActiveAt: number }>();
+    for (const conv of buyerConversations ?? []) {
+      if (conv.tool !== 'vpr') continue;
+      metaByKey.set(conv.sessionKey, {
+        label: conv.label || conv.snippet || 'Untitled chat',
+        lastActiveAt: conv.lastActiveAt,
+      });
+    }
+    return groupRoutingDecisionsByConversation(routingDecisions, metaByKey);
+  }, [routingDecisions, buyerConversations]);
+
+  const openAutoSession = (conversationKey: string) => {
+    onSelectView?.('chat');
+    void actions.openConversation(conversationKey);
+  };
+
   const openOnChainClose = (channelId: string) => {
     void window.antseedDesktop?.paymentsOpenPayPage?.({ kind: 'close-channel', channelId });
   };
@@ -193,6 +216,42 @@ export function VprActivityView({ onSelectView }: Props) {
         </VprStatRow>
 
         <VprSpendingChart history={snap.spendHistory} loading={snap.loading} />
+
+        {recentAutoSessions.length > 0 && (
+          <>
+            <div className={styles.sectionIntro}>
+              <div className={styles.sectionHeader}>
+                <h2 className={styles.sectionTitle}>Recent Auto sessions</h2>
+              </div>
+            </div>
+            <VprCard className={styles.listCard}>
+              {recentAutoSessions.map((session) => (
+                <div
+                  key={session.conversationKey}
+                  className={styles.row}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openAutoSession(session.conversationKey)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' || event.key === ' ') openAutoSession(session.conversationKey);
+                  }}
+                >
+                  <div className={styles.rowMain}>
+                    <div className={styles.rowTitle}>
+                      <span className={styles.rowSellerGroup}>
+                        <span className={styles.rowSeller}>{session.label}</span>
+                      </span>
+                    </div>
+                  </div>
+                  <span className={styles.rowLocked}>
+                    {session.turnCount} {session.turnCount === 1 ? 'turn' : 'turns'}
+                    {session.savings && ` · saved ${formatSavedUsd(session.savings.baselineUsd - session.savings.actualUsd)}`}
+                  </span>
+                </div>
+              ))}
+            </VprCard>
+          </>
+        )}
 
         <div className={styles.sectionIntro}>
           <div className={styles.sectionHeader}>
