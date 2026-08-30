@@ -2377,3 +2377,83 @@ dispatch.
 
 **Ground truth reference:** none — this is defensive-engineering sweep work orthogonal to the
 docs' feature/protocol content, not something any of the four docs specify either way.
+
+## [2026-08-30] Merged upstream AntSeed (123 commits) into model-routing
+
+**Type:** Reconciles this branch with upstream, not a feature decision -- recorded because the
+five real conflicts needed judgment calls about which side's behavior should win, and that
+reasoning is worth keeping.
+
+`model-routing` branched off upstream 8 days earlier; upstream gained 123 commits in that window
+(mostly `apps/desktop` and `apps/cli`) while this branch gained 98 of its own (now 108, counting
+tonight's genericization and robustness-audit commits). Merged `upstream/main` into `model-routing`
+directly (not a rebase -- rebasing would have meant re-resolving similar conflicts ~98 times
+instead of once). Five files conflicted; everything else merged cleanly.
+
+**`VprExploreView.tsx`** -- upstream had independently replaced this branch's Recommended/All-tabs
+model list with a newer, more complete design (a favorites-aware "recommended frame" that also
+branches on whether the buyer has ever funded an account, feeding one continuous sorted list
+instead of a tab switch). Confirmed via grep that nothing outside the conflicted hunks still
+referenced the old tab state, so the old design was already fully superseded. Took upstream's
+structure wholesale and grafted in the one thing unique to this branch: filtering the Levanto Auto
+catalog entry out of this page's `catalog` (it has no real sellers/price to browse), applied
+consistently everywhere the new design reads from the catalog.
+
+**`buyer-proxy.ts`** -- three independent hunks. (1) Import list: both sides added a new import at
+the same line; kept both (`buildNetworkServiceOffers` from this branch, `adaptPeerFaultErrorResponse`
+from upstream). (2) `RETRYABLE_STATUS_CODES`: upstream added 401/403 (sellers relay upstream
+auth failures specific to their own account, so another peer usually can complete the request) with
+a documented rationale; took upstream's version and kept this branch's separate
+`MAX_DISCLOSED_ROUTE_ALTERNATIVES` constant alongside it -- unrelated concerns that both belong
+here. (3) The SSE-buffered-blob detection this branch added (`## [2026-08-27] Anthropic-messages
+streaming through a fast local peer...` entry above) has no upstream equivalent; kept it as-is over
+upstream's simpler unconditional `adaptResponse(responseForClient)`, since it fixes a real,
+previously-verified-live bug upstream doesn't have. Verification surfaced a genuine bug in this
+branch's own version of that code, independent of the merge: its `else` fallback called
+`adaptResponse(response)` (the raw seller response) instead of `adaptResponse(responseForClient)`
+(which already carries `adaptPeerFaultErrorResponse`'s attribution), silently dropping the `peer`
+fault header on any transform-requiring peer error. A new test upstream added
+(`transformed pre-stream seller errors preserve peer guidance`) caught it; fixed in the
+immediately-following commit.
+
+**`engine.ts`** -- three hunks, all timeout/budget-related. In each case upstream had independently
+added its own fix for the same category of issue this session's robustness audit had just patched
+in this branch, and upstream's version was strictly better: the `/v1/models` catalog fetch
+conflict resolved to upstream's version because this branch's fix shadowed the outer `port`
+variable with a same-named `const` inside the `try`, silently breaking the catch block's error log
+(it would always report port 0); the per-peer metering fetch conflict resolved to upstream's
+version because it already had an equivalent `AbortController`+`finally` timeout, just under a
+named `METERING_FETCH_TIMEOUT_MS` constant instead of an inline magic number; the domain-enrichment
+bound resolved to upstream's shared `raceBudget` helper (already used twice elsewhere in the same
+function) instead of this branch's one-off `Promise.race`, keeping this branch's own comment
+explaining the real "4 of 18 domains black-holed" finding since upstream's replacement comment
+didn't carry that context.
+
+**`controller.ts`** -- two hunks in the Auto-stranding-bug family (`## [2026-08-26] Auto silently
+rebound to a real model...` and related entries above). Upstream had refactored default-model
+adoption into a shared `adoptDefaultVprModel()` helper with a new "provisional default" mechanism
+(a first-launch paid fallback keeps getting re-evaluated until a free-eligible model appears, so a
+cold-discovery user doesn't get stuck on a paid default) -- a genuine improvement this branch
+didn't have. But `adoptDefaultVprModel()` didn't pass `autoSubscriptionEnabled` through to
+`selectDefaultVprModel`'s `preferLevantoRouter` parameter, which would have silently dropped this
+branch's "prefer Auto as the default for a stranded/new selection when the router toggle is on"
+behavior at both of its call sites. Fixed by passing the flag through `adoptDefaultVprModel()`
+itself (one line, benefits both callers) rather than duplicating inline logic to work around the
+helper, then adopted upstream's structure at both conflict sites. The first site also needed this
+branch's `!isLevantoAutoSelected(selected)` guard kept explicitly -- upstream's version had no such
+exemption, which would have reintroduced the exact "Auto silently rebound to a real model" bug this
+branch already fixed and verified live, since Auto always shows zero matching routes by design.
+
+**Verification:** a full `pnpm run build` was required before trusting any of the per-package test
+suites -- `packages/buyer-core`'s compiled `dist/` predated the merge by two days, so
+`packages/node`'s workspace-resolved tests were silently exercising pre-merge behavior (2 tests
+in `buyer-request-handler.test.ts` failed only after rebuilding, revealing upstream's new peer-
+fault-response wrapping was never actually being tested until the stale build was refreshed). After
+rebuilding and the two fixes above: `plugins/router-levanto` 65/65, `packages/node` 1023/1023,
+`apps/desktop` renderer 377/377 and compiled main-process tests 319/319, `apps/cli` 474/476 (the
+same 2 pre-existing `autoSubscriptionEnabled`/`cqt` fixture-mismatch failures noted in earlier
+entries, confirmed present on this branch's pre-merge base -- not separately re-checked against
+upstream/main alone).
+
+**Ground truth reference:** none of the four docs describe upstream sync at all -- this is
+infrastructure/maintenance work, not a protocol or feature decision.
