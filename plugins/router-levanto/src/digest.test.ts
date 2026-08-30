@@ -17,6 +17,7 @@ function row(overrides: Partial<RoutingDecisionRow> = {}): RoutingDecisionRow {
     predictedOutputTokens: 42,
     cqt: 5,
     routingLatencyMs: 100,
+    conversationKey: null,
     ...overrides,
   };
 }

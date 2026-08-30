@@ -33,6 +33,7 @@ export interface PendingDecision {
   routingLatencyMs: number | null;
   atMs: number;
   baselinePrices: BaselinePrices;
+  conversationKey: string | null;
 }
 
 /** File name within the plugin's data directory -- one JSON row per line, append-only. */
@@ -48,12 +49,32 @@ export const ROUTING_DECISIONS_FILE = 'routing-decisions.jsonl';
  */
 const MAX_PENDING_DECISIONS = 500;
 
+/**
+ * Flat cap on the in-memory `rows` list backing `getRoutingDecisions()`.
+ * Previously unbounded -- the doc comment on `RoutingLedger` used to log this
+ * as an open question for whoever built the savings dashboard; that's this
+ * change. Bounds only the in-process copy (`loadSync` keeps the most recent
+ * N lines on startup, `recordResult` evicts the oldest once over the cap) --
+ * the on-disk `routing-decisions.jsonl` file itself still grows without a
+ * retention policy, which is a separate, still-open question (no decided
+ * retention window exists for this ledger, unlike e.g. the digest's daily
+ * cadence) left for whoever needs to address on-disk growth specifically.
+ * 5000 rows is generous for the per-conversation drill-down/savings
+ * dashboard this caps for -- at 100 routed messages/day that's ~50 days of
+ * in-memory history, far more than either UI surface needs at once.
+ */
+const MAX_LEDGER_ROWS = 5000;
+
 function num(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 function numOrNull(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function strOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 function sanitizeBaselinePrices(value: unknown): BaselinePrices {
@@ -88,6 +109,7 @@ function sanitizeRow(value: unknown): RoutingDecisionRow | null {
     cqt: num(r.cqt, 5),
     routingLatencyMs: numOrNull(r.routingLatencyMs),
     baselinePrices: sanitizeBaselinePrices(r.baselinePrices),
+    conversationKey: strOrNull(r.conversationKey),
   };
 }
 
@@ -116,7 +138,10 @@ function loadSync(filePath: string): RoutingDecisionRow[] {
       // don't lose every row that came before or after it.
     }
   }
-  return rows;
+  // Keep only the most recent MAX_LEDGER_ROWS -- an older file can hold far
+  // more than that; loading it all into memory just to immediately be over
+  // the cap defeats the point of having one.
+  return rows.length > MAX_LEDGER_ROWS ? rows.slice(rows.length - MAX_LEDGER_ROWS) : rows;
 }
 
 /**
@@ -188,8 +213,10 @@ export class RoutingLedger {
       cqt: pending.cqt,
       routingLatencyMs: pending.routingLatencyMs,
       baselinePrices: pending.baselinePrices,
+      conversationKey: pending.conversationKey,
     };
     this.rows.push(row);
+    if (this.rows.length > MAX_LEDGER_ROWS) this.rows.shift();
     this._persist(row);
     return row;
   }

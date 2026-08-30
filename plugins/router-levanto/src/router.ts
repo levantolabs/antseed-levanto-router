@@ -460,6 +460,7 @@ export class LevantoRouter {
           routingLatencyMs: null,
           atMs: Date.now(),
           baselinePrices: pinned.baselinePrices,
+          conversationKey: conversation?.sessionKey ?? null,
         });
         return [pinnedToRouteCandidate(pinned, substituteModel(req, pinned.serviceId))];
       }
@@ -674,6 +675,7 @@ export class LevantoRouter {
       routingLatencyMs,
       atMs: Date.now(),
       baselinePrices: winner.baselinePrices,
+      conversationKey: conversation?.sessionKey ?? null,
     });
 
     return ranked.map((c) => pinnedToRouteCandidate(c, substituteModel(req, c.serviceId)));

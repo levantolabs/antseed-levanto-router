@@ -58,6 +58,21 @@ export type RoutingDecisionRow = {
    * without needing to hold a live price table or re-fetch anything.
    */
   baselinePrices: Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
+  /**
+   * The `ConversationIdentity.sessionKey` in scope when this decision was
+   * made, or `null` when no identity was available (e.g. a CLI-only caller
+   * with no per-chat headers). Lets a host UI filter this router's ledger
+   * down to one conversation's history (a per-session drill-down alongside
+   * the aggregate savings dashboard) without any router-specific plumbing --
+   * same "generic, read via `getRoutingDecisions`" reasoning as the rest of
+   * this type. Deliberately the bare `sessionKey`, not a tool-qualified
+   * `${tool}:${sessionKey}` key: the desktop app's own conversation id is
+   * exactly this value for VPR chats (`x-vpr-session-id`'s header value,
+   * apps/desktop/src/main/chat/proxy-service.ts), so a host can compare
+   * directly against its own conversation id with no reconstruction.
+   * `null` on rows persisted before this field existed.
+   */
+  conversationKey: string | null;
 };
 
 /**

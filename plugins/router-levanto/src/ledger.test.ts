@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTING_DECISIONS_FILE, RoutingLedger } from './ledger.js';
 
-function pending(overrides: Partial<{ model: string; predictedCostUsd: number | null }> = {}) {
+function pending(overrides: Partial<{ model: string; predictedCostUsd: number | null; conversationKey: string | null }> = {}) {
   return {
     model: overrides.model ?? 'gpt-5.6-luna',
     predictedCostUsd: overrides.predictedCostUsd ?? 0.001,
@@ -15,6 +15,7 @@ function pending(overrides: Partial<{ model: string; predictedCostUsd: number | 
     routingLatencyMs: 12,
     atMs: Date.now(),
     baselinePrices: { 'claude-opus-5': { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 } },
+    conversationKey: overrides.conversationKey ?? null,
   };
 }
 
@@ -105,6 +106,52 @@ describe('RoutingLedger (decisions doc SS13 item 12)', () => {
     it('reloads cleanly when no file exists yet (first run)', () => {
       const ledger = new RoutingLedger(dir);
       expect(ledger.all()).toHaveLength(0);
+    });
+  });
+
+  describe('conversationKey', () => {
+    it('carries the pending decision\'s conversationKey through to the persisted row', () => {
+      const ledger = new RoutingLedger();
+      ledger.recordPending('req-1', pending({ conversationKey: 'conv-abc' }));
+      const row = ledger.recordResult('req-1', '0xAAA', actual());
+      expect(row?.conversationKey).toBe('conv-abc');
+    });
+
+    it('defaults to null when no ConversationIdentity was available', () => {
+      const ledger = new RoutingLedger();
+      ledger.recordPending('req-1', pending());
+      const row = ledger.recordResult('req-1', '0xAAA', actual());
+      expect(row?.conversationKey).toBeNull();
+    });
+
+    it('sanitizes a missing/malformed conversationKey on reload to null, not a crash', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'routing-ledger-conv-'));
+      try {
+        writeFileSync(join(dir, ROUTING_DECISIONS_FILE), `${JSON.stringify({
+          atMs: Date.now(), actualModel: 'kimi-k3', actualPeer: '0xCCC', actualPromptTokens: 1, actualCachedTokens: 0,
+          actualCompletionTokens: 1, actualUsdcPaid: 0.0001, predictedCostUsd: null, predictedInputTokens: null,
+          predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
+          conversationKey: 42,
+        })}\n`);
+        const ledger = new RoutingLedger(dir);
+        expect(ledger.all()[0]?.conversationKey).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('MAX_LEDGER_ROWS cap', () => {
+    it('evicts the oldest in-memory row once past the cap, keeping the most recent', () => {
+      const ledger = new RoutingLedger();
+      for (let i = 0; i < 5001; i += 1) {
+        ledger.recordPending(`req-${i}`, pending());
+        ledger.recordResult(`req-${i}`, '0xAAA', actual(i));
+      }
+      const rows = ledger.all();
+      expect(rows).toHaveLength(5000);
+      expect(rows[0]?.actualUsdcPaid).toBe(1); // row 0 (usdcPaid=0) evicted
+      expect(rows[rows.length - 1]?.actualUsdcPaid).toBe(5000);
     });
   });
 });
