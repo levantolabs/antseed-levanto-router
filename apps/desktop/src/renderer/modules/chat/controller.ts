@@ -2218,6 +2218,9 @@ export function initChatModule({
     sendingConversationIds.delete(convId);
     streamTurnsByConversation.delete(convId);
     streamStartedAtByConversation.delete(convId);
+    streamCompletedAtByConversation.delete(convId);
+    streamFailedAtByConversation.delete(convId);
+    clearPaymentRetry(convId);
     // Publish the updated sending set (and resync active-conv UI) before we
     // potentially reset to new-chat state. This covers both the active and
     // non-active delete paths.
@@ -2329,7 +2332,9 @@ export function initChatModule({
       setChatSending(true);
       void (async () => {
         const convId = await createConversationForSelection(selection, { activate: false });
-        setChatSending(false);
+        if (!uiState.chatActiveConversation) {
+          setChatSending(false);
+        }
         if (convId) {
           if (draftVersion === newChatDraftVersion) {
             await openConversation(convId);
@@ -2793,7 +2798,7 @@ export function initChatModule({
       setChatSending(false);
     }
     if (bridge && bridge.chatAiAbort) {
-      await bridge.chatAiAbort(convId ?? undefined);
+      await bridge.chatAiAbort(convId ?? undefined).catch(() => undefined);
     }
   }
 

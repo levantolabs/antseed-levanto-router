@@ -68,13 +68,19 @@ function resolveRouteTarget(uiState: RendererUiState): VprRouteTarget | null {
 }
 
 async function activeProfileNames(bridge: DesktopBridge): Promise<string[]> {
-  try {
-    const state = (await bridge.systemProxyGetState?.()) ?? null;
-    return [...(activeProfilesFromRuntimeState(state) ?? [])];
-  } catch {
-    return [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const state = (await bridge.systemProxyGetState?.()) ?? null;
+      return [...(activeProfilesFromRuntimeState(state) ?? [])];
+    } catch {
+      if (attempt === 1) return [];
+    }
   }
+  return [];
 }
+
+let routeSyncGeneration = 0;
+let routeSyncChain: Promise<void> = Promise.resolve();
 
 async function startProfilesOnRoute(
   bridge: DesktopBridge,
@@ -120,17 +126,24 @@ export async function syncBuyerDefaultRoute(
   bridge: DesktopBridge | undefined,
   uiState: RendererUiState,
 ): Promise<void> {
-  if (!bridge?.chatSetBuyerDefaultRoute) return;
-  const target = resolveRouteTarget(uiState);
-  if (!target) {
-    if (isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
-      await bridge.chatClearBuyerDefaultRoute?.().catch(() => undefined);
+  const setBuyerDefaultRoute = bridge?.chatSetBuyerDefaultRoute;
+  if (!setBuyerDefaultRoute) return;
+  const generation = ++routeSyncGeneration;
+  const run = routeSyncChain.then(async () => {
+    if (generation !== routeSyncGeneration) return;
+    const target = resolveRouteTarget(uiState);
+    if (!target) {
+      if (isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+        await bridge.chatClearBuyerDefaultRoute?.().catch(() => undefined);
+      }
+      return;
     }
-    return;
-  }
-  await bridge.chatSetBuyerDefaultRoute(
-    buyerDefaultRoutePayload(uiState.vprRouteSelection, target),
-  ).catch(() => undefined);
+    await setBuyerDefaultRoute(
+      buyerDefaultRoutePayload(uiState.vprRouteSelection, target),
+    ).catch(() => undefined);
+  });
+  routeSyncChain = run;
+  await run;
 }
 
 /**
