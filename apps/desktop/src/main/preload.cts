@@ -79,6 +79,23 @@ type PluginListResult = {
   error: string | null;
 };
 
+type RouterPluginInfo = {
+  package: string;
+  version: string;
+  name: string;
+  displayName: string;
+  description: string;
+  autoRouteServiceId?: string;
+  autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
+};
+
+type RouterPluginListResult = {
+  ok: boolean;
+  routers: RouterPluginInfo[];
+  error: string | null;
+};
+
 type RawChatAttachment = {
   id: string;
   name: string;
@@ -206,6 +223,9 @@ const api = {
   },
   pluginsList(): Promise<PluginListResult> {
     return ipcRenderer.invoke('plugins:list') as Promise<PluginListResult>;
+  },
+  pluginsListRouters(): Promise<RouterPluginListResult> {
+    return ipcRenderer.invoke('plugins:list-routers') as Promise<RouterPluginListResult>;
   },
   pluginsInstall(packageName: string): Promise<PluginInstallResult> {
     return ipcRenderer.invoke('plugins:install', packageName) as Promise<PluginInstallResult>;

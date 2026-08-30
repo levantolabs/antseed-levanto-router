@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import type { RoutingDecisionRow } from '@antseed/node';
-import { computeRouterSavings, DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL } from './router-savings.js';
+import { computeRouterSavings, defaultRouterSavingsBaselineModel } from './router-savings.js';
 
 const BASELINE_PRICE = { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 };
 
@@ -20,7 +20,7 @@ function row(overrides: Partial<RoutingDecisionRow> = {}): RoutingDecisionRow {
     predictedOutputTokens: 200,
     cqt: 5,
     routingLatencyMs: 50,
-    baselinePrices: { [DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL]: BASELINE_PRICE },
+    baselinePrices: { [defaultRouterSavingsBaselineModel()]: BASELINE_PRICE },
     ...overrides,
   };
 }
@@ -70,7 +70,7 @@ test('falls back to the input price when cachedInUsdPerM is null', () => {
       actualPromptTokens: 1000,
       actualCachedTokens: 400,
       actualCompletionTokens: 0,
-      baselinePrices: { [DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL]: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: null } },
+      baselinePrices: { [defaultRouterSavingsBaselineModel()]: { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: null } },
     }),
   ]);
   // fresh 600 * 15/1e6 + cached 400 * 15/1e6 (falls back to inUsdPerM) = 0.009 + 0.006 = 0.015

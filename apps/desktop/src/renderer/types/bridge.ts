@@ -183,6 +183,23 @@ export type PluginListResult = {
   error: string | null;
 };
 
+export type RouterPluginInfo = {
+  package: string;
+  version: string;
+  name: string;
+  displayName: string;
+  description: string;
+  autoRouteServiceId?: string;
+  autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
+};
+
+export type RouterPluginListResult = {
+  ok: boolean;
+  routers: RouterPluginInfo[];
+  error: string | null;
+};
+
 export type PluginInstallResult = {
   ok: boolean;
   package: string;
@@ -314,6 +331,7 @@ export type DesktopBridge = {
   clearLogs?: () => Promise<{ ok: true }>;
 
   pluginsList?: () => Promise<PluginListResult>;
+  pluginsListRouters?: () => Promise<RouterPluginListResult>;
   pluginsInstall?: (packageName: string) => Promise<PluginInstallResult>;
 
   getNetwork?: (port?: number) => Promise<{ ok: boolean; peers?: unknown[]; error?: string | null; [key: string]: unknown }>;

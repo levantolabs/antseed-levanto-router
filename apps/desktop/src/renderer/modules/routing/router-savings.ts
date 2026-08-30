@@ -16,22 +16,25 @@
  */
 import type { RoutingDecisionRow } from '@antseed/node';
 import type { MeasuredSavings } from '../catalog/measured-savings.js';
+import { activeAutoRouterSavingsBaselineModel } from './levanto-auto.js';
 
 /**
  * Default reference model for the SS8.4 savings-page dropdown -- "the most
  * expensive, most capable flagship... the top GPT or Claude model." No
  * dropdown UI exists yet to let a buyer pick a different one (SS8.4 is not
  * built), so callers get this default unless/until that UI exists to pass a
- * different `baselineModel` through. Matches (duplicated, not imported)
- * `DEFAULT_BASELINE_MODELS[0]` in `plugins/router-levanto/src/router.ts` --
- * that package is buyer/Node-side and now depends on `node:fs`, no
- * cross-boundary dependency into renderer UI code is intended.
+ * different `baselineModel` through. Sourced from the active router plugin's
+ * own declared `savingsBaselineModel` (packages/node's AntseedRouterPlugin)
+ * when one is active, falling back to Levanto's historical default
+ * otherwise -- see `activeAutoRouterSavingsBaselineModel`.
  */
-export const DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL = 'claude-opus-5';
+export function defaultRouterSavingsBaselineModel(): string {
+  return activeAutoRouterSavingsBaselineModel();
+}
 
 export function computeRouterSavings(
   rows: readonly RoutingDecisionRow[] | undefined,
-  baselineModel: string = DEFAULT_ROUTER_SAVINGS_BASELINE_MODEL,
+  baselineModel: string = defaultRouterSavingsBaselineModel(),
 ): MeasuredSavings | null {
   if (!rows || rows.length === 0) return null;
 

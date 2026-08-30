@@ -110,6 +110,16 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * own, unrelated router preference), and applying the override in only one of
  * them left the other silently winning the race with the wrong router. A
  * single choke point means neither caller needs to know this override exists.
+ *
+ * The dropdown itself now offers any installed router plugin, not just
+ * Levanto (`buyer.routingPreferences.selectedRouterPackage`), but the
+ * devnet/mainnet routing-peer env below is Levanto-specific operational
+ * wiring this override was built to carry -- generalizing *that* would mean
+ * knowing a given plugin's own configSchema values, which is out of scope
+ * here. So: when a non-Levanto package is selected, this only sets
+ * `opts.router` to that package (the CLI loads whatever plugin that names,
+ * using its own config); the env injection and chain-dependent defaults
+ * below apply only when router-levanto specifically is selected.
  */
 /**
  * Reads `buyer.routingPreferences.autoSubscriptionEnabled` straight from disk
@@ -130,6 +140,36 @@ function isLevantoAutoSubscriptionEnabled(): boolean {
     return parsed.buyer?.routingPreferences?.autoSubscriptionEnabled === true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * router-levanto's own package name -- the historical, and still only,
+ * router this override knows how to wire real operational defaults for
+ * (routing-peer URL, seller peer id, devnet isolation flags below). A
+ * different selected plugin still gets its package name passed through as
+ * `opts.router` so the CLI loads it, but none of that Levanto-specific env
+ * injection applies to it; see `applyLevantoRouterDemoOverride`.
+ */
+const LEVANTO_ROUTER_PACKAGE = '@antseed/router-levanto';
+
+/**
+ * Reads `buyer.routingPreferences.selectedRouterPackage` the same way
+ * `isLevantoAutoSubscriptionEnabled` reads the toggle -- straight off disk,
+ * no caching. Defaults to router-levanto on anything missing/unreadable/a
+ * pre-migration config shape, matching preferences.ts's own migration
+ * default so both independent readers of this same config field agree.
+ */
+function resolveSelectedRouterPackage(): string {
+  try {
+    const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      buyer?: { routingPreferences?: { selectedRouterPackage?: unknown } };
+    };
+    const pkg = parsed.buyer?.routingPreferences?.selectedRouterPackage;
+    return typeof pkg === 'string' && pkg.trim().length > 0 ? pkg : LEVANTO_ROUTER_PACKAGE;
+  } catch {
+    return LEVANTO_ROUTER_PACKAGE;
   }
 }
 
@@ -160,9 +200,15 @@ export function applyLevantoRouterDemoOverride(
   opts: StartOptions,
   isEnabled: () => boolean = isLevantoAutoSubscriptionEnabled,
   resolveChainId: () => RoutingPeerChainId = resolveConfiguredChainId,
+  resolveRouterPackage: () => string = resolveSelectedRouterPackage,
 ): StartOptions {
   if (opts.mode !== 'connect') return opts;
   if (!isEnabled()) return opts;
+
+  const selectedPackage = resolveRouterPackage();
+  if (selectedPackage !== LEVANTO_ROUTER_PACKAGE) {
+    return { ...opts, router: selectedPackage };
+  }
 
   if (resolveChainId() === 'base-local') {
     return {

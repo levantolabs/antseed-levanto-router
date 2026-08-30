@@ -36,6 +36,12 @@ function readBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
 }
 
+function readNullableString(value: unknown, fallback: string | null): string | null {
+  if (typeof value === 'string' && value.trim().length > 0) return value;
+  if (value === null) return null;
+  return fallback;
+}
+
 function readNonNegativeFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
 }
@@ -95,6 +101,12 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
     minTrustScore = fallback.minTrustScore;
   }
 
+  // Real-money consent (decisions doc SS14 item 29): defaults to off on any
+  // unrecognized/missing stored value, never on -- readBoolean's `fallback`
+  // here must itself be `false` (see DEFAULT_MODEL_ROUTING_PREFERENCES), not
+  // inherited from some other truthy default.
+  const autoSubscriptionEnabled = readBoolean(parsed.autoSubscriptionEnabled, fallback.autoSubscriptionEnabled ?? false);
+
   return {
     autoRouting: readBoolean(parsed.autoRouting, fallback.autoRouting),
     preferFreePeers: readBoolean(parsed.preferFreePeers, fallback.preferFreePeers),
@@ -110,11 +122,16 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
       ? normalizePeerIdList(parsed.blockedPeerIds)
       : fallback.blockedPeerIds,
     cqt: readCqt(parsed.cqt, fallback.cqt ?? 5),
-    // Real-money consent (decisions doc SS14 item 29): defaults to off on
-    // any unrecognized/missing stored value, never on -- readBoolean's
-    // `fallback` here must itself be `false` (see DEFAULT_MODEL_ROUTING_PREFERENCES),
-    // not inherited from some other truthy default.
-    autoSubscriptionEnabled: readBoolean(parsed.autoSubscriptionEnabled, fallback.autoSubscriptionEnabled ?? false),
+    autoSubscriptionEnabled,
+    // Preferences saved before this field existed have no package recorded.
+    // Default those (and any other autoSubscriptionEnabled=true state with no
+    // package) to router-levanto -- the only router this app has ever
+    // offered until now -- so an upgrade doesn't silently strand an existing
+    // subscriber with an Auto entry that resolves to nothing.
+    selectedRouterPackage: readNullableString(
+      parsed.selectedRouterPackage,
+      fallback.selectedRouterPackage ?? (autoSubscriptionEnabled ? '@antseed/router-levanto' : null),
+    ),
   };
 }
 
@@ -141,6 +158,7 @@ export function buyerModelRoutingPreferences(
     blockedPeerIds: validPeerIds(value.blockedPeerIds),
     cqt: value.cqt,
     autoSubscriptionEnabled: value.autoSubscriptionEnabled,
+    selectedRouterPackage: value.selectedRouterPackage ?? null,
   };
 }
 

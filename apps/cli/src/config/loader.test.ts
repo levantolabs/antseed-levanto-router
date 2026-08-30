@@ -57,6 +57,7 @@ test('createDefaultConfig includes shared model routing preferences', () => {
     blockedPeerIds: [],
     cqt: 5,
     autoSubscriptionEnabled: false,
+    selectedRouterPackage: null,
   });
 });
 

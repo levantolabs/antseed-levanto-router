@@ -82,6 +82,7 @@ test('valid VPR preferences and route selection save and load', () => {
     blockedPeerIds: ['peer-2', 'peer-3'],
     cqt: 7,
     autoSubscriptionEnabled: true,
+    selectedRouterPackage: '@antseed/router-custom',
   };
   const routeSelection: VprRouteSelection = {
     model: {
@@ -110,7 +111,30 @@ test('buyer config projection excludes the Desktop-only auto-routing toggle', ()
     blockedPeerIds: fallbackPreferences.blockedPeerIds,
     cqt: fallbackPreferences.cqt,
     autoSubscriptionEnabled: fallbackPreferences.autoSubscriptionEnabled,
+    selectedRouterPackage: null,
   });
+});
+
+test('buyer config projection forwards which router plugin is selected -- process-manager.ts reads this back to decide which router to start', () => {
+  const projected = buyerModelRoutingPreferences({
+    ...fallbackPreferences,
+    autoSubscriptionEnabled: true,
+    selectedRouterPackage: '@antseed/router-custom',
+  });
+  assert.equal(projected.selectedRouterPackage, '@antseed/router-custom');
+});
+
+test('preferences saved before selectedRouterPackage existed default it to router-levanto once autoSubscriptionEnabled is on -- an upgrade must not strand an existing subscriber', () => {
+  localStorage.setItem(
+    VPR_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ ...fallbackPreferences, autoSubscriptionEnabled: true }),
+  );
+  assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, '@antseed/router-levanto');
+});
+
+test('preferences saved before selectedRouterPackage existed stay unselected when autoSubscriptionEnabled was never on', () => {
+  localStorage.setItem(VPR_PREFERENCES_STORAGE_KEY, JSON.stringify(fallbackPreferences));
+  assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, null);
 });
 
 test('buyer config projection forwards the subscription-enable toggle (decisions doc SS14 item 29) -- real money gate, must not drop silently', () => {

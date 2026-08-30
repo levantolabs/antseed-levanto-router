@@ -94,6 +94,13 @@ test('applyLevantoRouterDemoOverride leaves non-connect modes untouched', () => 
   assert.deepEqual(result, opts);
 });
 
+test('applyLevantoRouterDemoOverride passes a non-Levanto selected router straight through by package name, with none of the Levanto env injection', () => {
+  const opts = { mode: 'connect' as const, router: 'local', env: { EXISTING: '1' } };
+  const result = applyLevantoRouterDemoOverride(opts, () => true, () => 'base-local', () => '@antseed/router-other');
+  assert.equal(result.router, '@antseed/router-other');
+  assert.deepEqual(result.env, { EXISTING: '1' });
+});
+
 test('resolveCommandArgs launches the System Proxy runtime with selected profiles and models', () => {
   const args = resolveCommandArgs({
     mode: 'system-proxy',

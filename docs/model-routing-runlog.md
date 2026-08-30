@@ -2245,3 +2245,78 @@ inference.
 
 **Ground truth reference:** none — this composes three same-session findings (real peer discovery,
 real payment, the newly-found real Sage router) rather than following any of the four docs.
+
+## [2026-08-30] Desktop's router picker generalized to any installed plugin, not just Levanto
+
+**Type:** Decides something the docs are silent on, following up on an earlier audit ("Find
+Levanto-specific hardcoding, propose genericization") that catalogued how much of the desktop's
+"Auto" UI (the model-picker sentinel, the Preferences dropdown, the info dialog, the savings
+baseline, `process-manager.ts`'s startup override) hardcoded router-levanto by name rather than
+reading it from the connected plugin. This entry implements that audit's items 2-5; item 1 (a
+live `/_antseed/router-info` HTTP endpoint on the buyer-proxy) was deliberately skipped.
+
+**Why item 1 was skipped.** `apps/desktop/src/main/runtime/plugins.ts` already installs router
+plugin packages to disk at `~/.antseed/plugins`, and that code runs in the Electron main process,
+which has full filesystem/module access there. The metadata a picker needs (`displayName`,
+`description`, the auto-route sentinel, `configSchema`) is static — declared once on the plugin's
+own exported object, never changing at runtime — so reading it directly off the installed package
+is simpler than standing up a new authenticated local HTTP route on the buyer-proxy child process
+just to serve data that doesn't need a live process to answer. It's also the only option that
+works at all for two of this session's actual call sites: the Preferences dropdown and
+`process-manager.ts`'s startup config both need this metadata *before* the buyer-proxy process is
+even running, since it's an input to how that process gets started, not an output of it.
+
+**New `AntseedRouterPlugin` fields** (`packages/node/src/interfaces/plugin.ts`): `autoRouteServiceId`
+(the sentinel model id a router's `selectRoute` takes over on) and `autoRouteInfo` (title/body for
+a generic "what does Auto do" dialog), both optional. `plugins/router-levanto/src/index.ts`
+populates both with what was previously hardcoded in the desktop app
+(`levanto-auto.ts`/`LevantoRouterInfoDialog.tsx`). A third field, `savingsBaselineModel`, lets a
+plugin declare which flagship model its ranked candidates commonly quote a real price for, so the
+savings dashboard's default comparison model (`router-savings.ts`) can come from the active plugin
+instead of a second hand-duplicated `'claude-opus-5'` constant.
+
+**Desktop wiring:** a new `plugins:list-routers` IPC channel (main: `listInstalledRouterPluginMetadata`
+in `runtime/plugins.ts`, dynamically importing each installed router-type plugin's `dist/index.js`
+the same way the CLI's own plugin loader does) feeds a new `installedRouterPluginsResource`.
+`VprPreferencesView.tsx`'s "Select model router" dropdown now renders one option per plugin that
+declares an `autoRouteServiceId`, instead of a hardcoded 2-option `<select>`. A new
+`selectedRouterPackage` field was added to `ModelRoutingPreferences` (alongside the existing
+`autoSubscriptionEnabled` boolean, which stays as the master on/off switch) recording which
+plugin's package the toggle applies to; preferences saved before this field existed default it to
+`@antseed/router-levanto` once loaded, so an existing subscriber isn't silently stranded by the
+upgrade. `LevantoRouterInfoDialog.tsx` became a generic `RouterInfoDialog.tsx` fed by whichever
+plugin the user just picked.
+
+`levanto-auto.ts`'s hardcoded `LEVANTO_AUTO_PROVIDER`/`SERVICE_ID` constants became a small
+module-level cache (`active`, resolved from `selectedRouterPackage` + the installed-plugin list)
+that `withLevantoAutoCatalogEntry` refreshes on every catalog recompute (`controller.ts`'s three
+call sites, the only caller) — chosen over threading the active plugin through every one of
+`isLevantoAutoEntry`/`isLevantoAutoSelected`'s several other call sites across the UI, which only
+ever need "is this the Auto entry," not "which plugin is active." One correctness detail that cost
+a round of test failures before landing: this identity resolution must NOT gate on
+`autoSubscriptionEnabled` being currently true — `isLevantoAutoEntry` needs to keep recognizing an
+already-selected Auto conversation/model even after the toggle is switched off (so a discovery
+refresh doesn't silently rebind it to a concrete model), only `withLevantoAutoCatalogEntry`'s
+decision to *offer* the entry as pickable is gated on the toggle.
+
+**`process-manager.ts`'s `applyLevantoRouterDemoOverride`** now reads `selectedRouterPackage`
+(same disk-read pattern as its existing `autoSubscriptionEnabled`/chain-id reads) and only applies
+its Levanto-specific env injection (routing-peer URL, seller peer id, the devnet isolation flags)
+when `@antseed/router-levanto` specifically is selected; any other selected package just gets
+passed through as `opts.router` so the CLI loads it with its own config. Generalizing the env
+injection itself — so a different plugin's `configSchema` values get wired in automatically — was
+left undone: that's a real feature (reading `~/.antseed/config.json`'s plugin-instance-config
+store, already noted as unimplemented in an earlier entry) rather than a mechanical rename, and
+this override's real mainnet/devnet operational values are worth keeping intact rather than
+guessing at a generic replacement.
+
+**Verification:** full suites green after the fix above —
+`plugins/router-levanto` (64/64), `packages/node` (1021/1021), `apps/desktop` renderer (370/370)
+and compiled main-process tests (259/259), `apps/cli` (460/462, the 2 failures pre-existing and
+unrelated — a stale `autoSubscriptionEnabled`/`cqt` fixture mismatch present on the unmodified
+base too).
+
+**Ground truth reference:** none of the four docs describe router selection as multi-plugin yet
+(the decisions doc's own router-agnostic-config item is logged as a TODO, not implemented) — this
+is the first real code move in that direction, deliberately scoped to the UI/config-selection layer
+only, not the full plugin-instance-config migration.

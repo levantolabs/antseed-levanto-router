@@ -17,6 +17,7 @@ import {
   getCachedOpenRouterPrices,
 } from '../catalog/openrouter-baseline.js';
 import { isLevantoAutoSelected, withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
+import { installedRouterPluginsResource } from '../app/vpr-resources.js';
 import type {
   DesktopBridge,
   PreparedChatAttachment,
@@ -95,6 +96,19 @@ type ChatModuleOptions = {
 
 const CUMULATIVE_IMAGE_PROMPT_HEADER = 'Generate a new image using the full conversation history below as cumulative instructions.';
 const CUMULATIVE_IMAGE_PROMPT_FOOTER = 'Return only the newly generated image.';
+
+/**
+ * Snapshot of installed router plugins for `withLevantoAutoCatalogEntry`'s
+ * active-router resolution. Reads whatever `installedRouterPluginsResource`
+ * has cached rather than awaiting a fresh fetch here -- every catalog
+ * recompute below is synchronous, and the resource activates/refreshes
+ * itself as soon as any view (e.g. Preferences) mounts, same pattern as the
+ * OpenRouter price cache this same module already reads synchronously via
+ * `getCachedOpenRouterPrices()`.
+ */
+function currentRouterPlugins() {
+  return installedRouterPluginsResource.getSnapshot().data ?? [];
+}
 
 function buildCumulativeImagePrompt(priorPrompts: string[], currentPrompt: string): string {
   const previousPrompt = priorPrompts.at(-1) ?? '';
@@ -1448,7 +1462,7 @@ export function initChatModule({
     uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
       projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
       getCachedOpenRouterPrices(),
-    ), uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false);
+    ), uiState.vprRoutingPreferences, currentRouterPlugins());
 
     // The selected model may only have been offered by a seller the new rules
     // exclude — leaving it selected would strand every send with no route.
@@ -1563,7 +1577,7 @@ export function initChatModule({
         uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
           projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
           getCachedOpenRouterPrices(),
-        ), uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false);
+        ), uiState.vprRoutingPreferences, currentRouterPlugins());
       }
       // Warm the OpenRouter reference-price cache in the background; once it
       // resolves, re-stamp baselines onto the current catalog so the Home
@@ -1572,7 +1586,8 @@ export function initChatModule({
         if (!map) return;
         uiState.vprModelCatalog = withLevantoAutoCatalogEntry(
           applyOpenRouterBaselines(uiState.vprModelCatalog, map),
-          uiState.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+          uiState.vprRoutingPreferences,
+          currentRouterPlugins(),
         );
         notifyUiStateChanged();
       });

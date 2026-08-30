@@ -7,12 +7,15 @@ import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
 import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
 import { AUTO_SUBSCRIPTION_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
+import { useCachedResource } from '../../../modules/app/cached-resource';
+import { installedRouterPluginsResource } from '../../../modules/app/vpr-resources';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
 import { formatUsdShort, VprCard, VprPage, VprSettingRow, VprSlider, VprToggle } from '../vpr/VprKit';
 import { VprPeerAccessDialog } from './VprPeerAccessDialog';
-import { LevantoRouterInfoDialog } from '../chat/LevantoRouterInfoDialog';
+import { RouterInfoDialog } from '../chat/RouterInfoDialog';
+import type { RouterPluginInfo } from '../../../types/bridge';
 import styles from './VprPreferencesView.module.scss';
 
 type Props = { onSelectView?: (view: import('../../types').ViewName) => void };
@@ -29,7 +32,9 @@ export function VprPreferencesView({ onSelectView }: Props) {
   }), shallowEqual);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => activeThemeMode());
   const [accessOpen, setAccessOpen] = useState(false);
-  const [levantoInfoOpen, setLevantoInfoOpen] = useState(false);
+  const [pendingRouterPlugin, setPendingRouterPlugin] = useState<RouterPluginInfo | null>(null);
+  const { data: routerPlugins } = useCachedResource(installedRouterPluginsResource);
+  const availableRouters = routerPlugins ?? [];
 
   const peerOptions = useMemo(
     () => buildVprPeerOptions(snap.lastPeers, snap.discoverRows),
@@ -78,23 +83,27 @@ export function VprPreferencesView({ onSelectView }: Props) {
             control={(
               <select
                 className={styles.select}
-                value={autoSubscriptionEnabled ? 'levanto-auto' : 'none'}
+                value={autoSubscriptionEnabled ? (snap.preferences.selectedRouterPackage ?? 'none') : 'none'}
                 onChange={(event) => {
-                  const next = event.target.value === 'levanto-auto';
-                  if (next) {
-                    // Enabling costs real, recurring money -- explain and
-                    // confirm before it takes effect. The <select> itself
-                    // reverts to "None" on the next render if the user
-                    // cancels, since autoSubscriptionEnabled never changed.
-                    setLevantoInfoOpen(true);
+                  const nextPackage = event.target.value;
+                  if (nextPackage === 'none') {
+                    actions.updateVprRoutingPreferences({ autoSubscriptionEnabled: false, selectedRouterPackage: null });
                     return;
                   }
-                  actions.updateVprRoutingPreferences({ autoSubscriptionEnabled: false });
+                  const plugin = availableRouters.find((router) => router.package === nextPackage);
+                  if (!plugin) return;
+                  // Enabling costs real, recurring money -- explain and
+                  // confirm before it takes effect. The <select> itself
+                  // reverts to "None" on the next render if the user
+                  // cancels, since autoSubscriptionEnabled never changed.
+                  setPendingRouterPlugin(plugin);
                 }}
                 aria-label="Select model router"
               >
                 <option value="none">None</option>
-                <option value="levanto-auto">Levanto Router</option>
+                {availableRouters.filter((router) => router.autoRouteServiceId).map((router) => (
+                  <option key={router.package} value={router.package}>{router.displayName}</option>
+                ))}
               </select>
             )}
           />
@@ -284,17 +293,20 @@ export function VprPreferencesView({ onSelectView }: Props) {
         onClearAllowlist={() => actions.updateVprRoutingPreferences({ allowedPeerIds: [] })}
       />
 
-      <LevantoRouterInfoDialog
-        isOpen={levantoInfoOpen}
-        onClose={() => setLevantoInfoOpen(false)}
+      <RouterInfoDialog
+        isOpen={pendingRouterPlugin !== null}
+        plugin={pendingRouterPlugin}
+        onClose={() => setPendingRouterPlugin(null)}
         onConfirm={() => {
+          if (!pendingRouterPlugin) return;
           actions.updateVprRoutingPreferences({
             autoSubscriptionEnabled: true,
+            selectedRouterPackage: pendingRouterPlugin.package,
             ...(snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
               ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
               : {}),
           });
-          setLevantoInfoOpen(false);
+          setPendingRouterPlugin(null);
         }}
       />
     </section>

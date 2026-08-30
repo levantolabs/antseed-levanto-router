@@ -1,5 +1,5 @@
 import type { AntseedRouterPlugin } from '@antseed/node';
-import { LevantoRouter } from './router.js';
+import { DEFAULT_BASELINE_MODELS, LevantoRouter } from './router.js';
 
 const plugin: AntseedRouterPlugin = {
   name: 'levanto',
@@ -7,6 +7,14 @@ const plugin: AntseedRouterPlugin = {
   version: '0.0.1',
   type: 'router',
   description: 'Routes each chat request to the cheapest capable model, picked by Levanto\'s routing peer',
+  autoRouteServiceId: 'levanto-auto',
+  autoRouteInfo: {
+    title: 'Levanto Router',
+    body: 'Levanto Router picks the best model and seller for every message you send, weighing cost '
+      + 'against quality according to your Cost / quality tradeoff preference. No need to switch '
+      + 'models by hand as prices and availability change.',
+  },
+  savingsBaselineModel: DEFAULT_BASELINE_MODELS[0],
   configSchema: [
     {
       key: 'LEVANTO_ROUTING_PEER_URL',

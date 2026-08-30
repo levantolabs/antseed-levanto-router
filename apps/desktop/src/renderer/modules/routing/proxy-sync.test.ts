@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { createInitialUiState, type DiscoverRow, type VprRouteSelection } from '../../core/state.js';
 import { buyerDefaultRoutePayload, syncBuyerDefaultRoute, type VprRouteTarget } from './proxy-sync.js';
-import { LEVANTO_AUTO_CATALOG_ENTRY } from './levanto-auto.js';
+import { currentAutoRouteEntry } from './levanto-auto.js';
 
 const model = {
   provider: 'openai',
@@ -124,7 +124,7 @@ test('desktop never syncs a peer-pinned default route while Auto is selected, ev
   // without the Auto guard, resolveRouteTarget's peerId fallback would still
   // produce a target and post `<peerId>@levanto-auto` to the buyer proxy.
   uiState.vprRouteSelection = {
-    model: LEVANTO_AUTO_CATALOG_ENTRY,
+    model: currentAutoRouteEntry(),
     mode: 'pinned-peer',
     peerId: 'a'.repeat(40),
   };
@@ -142,7 +142,7 @@ test('desktop never syncs a peer-pinned default route while Auto is selected, ev
 
 test('desktop clears the buyer default route while Auto is selected', async () => {
   const uiState = createInitialUiState();
-  uiState.vprRouteSelection = { model: LEVANTO_AUTO_CATALOG_ENTRY, mode: 'auto', peerId: null };
+  uiState.vprRouteSelection = { model: currentAutoRouteEntry(), mode: 'auto', peerId: null };
   let clearCalls = 0;
   const setPayloads: unknown[] = [];
 

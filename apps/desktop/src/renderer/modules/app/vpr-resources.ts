@@ -1,6 +1,7 @@
 import type {
   BuyerConversationSummary,
   InstalledAppEntry,
+  RouterPluginInfo,
   RuntimeProcessState,
   SystemProxyProfileSummary,
 } from '../../types/bridge';
@@ -65,6 +66,22 @@ export const subscriptionPriceResource = createCachedResource<SubscriptionPriceO
   async load() {
     const result = await window.antseedDesktop?.chatAiGetSubscriptionPrice?.();
     return result?.data ?? null;
+  },
+});
+
+/**
+ * Router-type plugins installed on disk (packages/node's AntseedRouterPlugin
+ * metadata), for Preferences' "Select model router" dropdown -- driven by
+ * whatever's actually installed rather than a hardcoded option list. Not
+ * polled as aggressively as live runtime state since installed plugins
+ * change only on an explicit install/reinstall.
+ */
+export const installedRouterPluginsResource = createCachedResource<RouterPluginInfo[]>({
+  pollMs: 30_000,
+  async load() {
+    const result = await window.antseedDesktop?.pluginsListRouters?.();
+    if (!result?.ok) throw new Error(result?.error ?? 'Could not list router plugins');
+    return result.routers ?? [];
   },
 });
 

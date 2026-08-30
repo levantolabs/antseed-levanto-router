@@ -31,6 +31,23 @@ export interface AntseedProviderPlugin extends AntseedPluginBase {
 export interface AntseedRouterPlugin extends AntseedPluginBase {
   type: 'router'
   createRouter(config: Record<string, string>): Router | Promise<Router>
+  /**
+   * The `serviceId` this router's "auto" model-picker entry responds to --
+   * what a host UI shows as a synthetic catalog entry, and what
+   * `Router.selectRoute` checks the requested model against to decide
+   * whether to take over routing at all. Omit if this plugin has no
+   * dedicated auto-routing sentinel model.
+   */
+  autoRouteServiceId?: string
+  /** Display copy for a generic "what does auto-routing do" info dialog. */
+  autoRouteInfo?: { title: string; body: string }
+  /**
+   * A flagship model id this router's ranked candidates commonly quote a
+   * real price for, suitable as a host UI's default "what would this have
+   * cost at retail" comparison when no more specific one is picked. Omit if
+   * this plugin doesn't have an opinion.
+   */
+  savingsBaselineModel?: string
 }
 
 export interface ClaimResult {

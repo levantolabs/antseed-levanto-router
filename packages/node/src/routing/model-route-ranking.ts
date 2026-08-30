@@ -23,6 +23,14 @@ export type ModelRoutingPreferences = {
    * consent. Optional so existing routers that don't read it are unaffected.
    */
   autoSubscriptionEnabled?: boolean;
+  /**
+   * npm package name of the router plugin `autoSubscriptionEnabled` applies
+   * to (e.g. '@antseed/router-levanto'), chosen from whichever router-type
+   * plugins are actually installed. Optional/nullable so a preferences
+   * object from before this field existed, or a host with exactly one
+   * router plugin, still behaves the same as it always did.
+   */
+  selectedRouterPackage?: string | null;
 };
 
 export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
@@ -33,6 +41,7 @@ export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
   blockedPeerIds: [],
   cqt: 5,
   autoSubscriptionEnabled: false,
+  selectedRouterPackage: null,
 };
 
 export type ModelRouteCandidate = {
