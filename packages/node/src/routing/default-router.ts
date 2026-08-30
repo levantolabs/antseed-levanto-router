@@ -8,6 +8,8 @@ export interface DefaultRouterConfig {
 }
 
 export class DefaultRouter implements Router {
+  private static readonly MAX_LATENCY_ENTRIES = 500;
+
   private _minReputation: number;
   private _latencyMap = new Map<string, number>();
 
@@ -38,7 +40,12 @@ export class DefaultRouter implements Router {
   onResult(peer: PeerInfo, result: { success: boolean; latencyMs: number; tokens: number }): void {
     if (result.success) {
       const prev = this._latencyMap.get(peer.peerId) ?? result.latencyMs;
+      this._latencyMap.delete(peer.peerId);
       this._latencyMap.set(peer.peerId, prev * 0.7 + result.latencyMs * 0.3);
+      if (this._latencyMap.size > DefaultRouter.MAX_LATENCY_ENTRIES) {
+        const oldest = this._latencyMap.keys().next().value;
+        if (oldest !== undefined) this._latencyMap.delete(oldest);
+      }
     }
   }
 

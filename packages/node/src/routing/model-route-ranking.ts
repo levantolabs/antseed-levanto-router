@@ -66,7 +66,6 @@ export type ScoredModelRoute<T extends ModelRouteCandidate> = {
 const UNKNOWN_PRICE_PENALTY = 10;
 const COOLING_DOWN_PENALTY = 1000;
 const FAILURE_STREAK_PENALTY = 3;
-const MAX_COOLDOWN_MS = 8 * 60_000;
 
 function normalizedPeerId(peerId: string): string {
   return peerId.trim().toLowerCase().replace(/^0x/, '');
@@ -83,23 +82,23 @@ export function modelRouteReputationScore(route: ModelRouteCandidate): number | 
 }
 
 export function modelRouteTotalPrice(route: ModelRouteCandidate): number | null {
+  const input = route.inputUsdPerMillion;
+  const output = route.outputUsdPerMillion;
+  if (
+    typeof input === 'number'
+    && Number.isFinite(input)
+    && input >= 0
+    && typeof output === 'number'
+    && Number.isFinite(output)
+    && output >= 0
+  ) {
+    return input + output;
+  }
   const imagePrice = route.minImageUsdPerImage;
   if (typeof imagePrice === 'number' && Number.isFinite(imagePrice) && imagePrice >= 0) {
     return imagePrice;
   }
-  const input = route.inputUsdPerMillion;
-  const output = route.outputUsdPerMillion;
-  if (
-    typeof input !== 'number'
-    || !Number.isFinite(input)
-    || input < 0
-    || typeof output !== 'number'
-    || !Number.isFinite(output)
-    || output < 0
-  ) {
-    return null;
-  }
-  return input + output;
+  return null;
 }
 
 export function isModelRouteCoolingDown(
@@ -107,8 +106,7 @@ export function isModelRouteCoolingDown(
   now: number = Date.now(),
 ): boolean {
   const until = route.peerCooldownUntil;
-  if (typeof until !== 'number' || !Number.isFinite(until) || until <= now) return false;
-  return until - now <= MAX_COOLDOWN_MS;
+  return typeof until === 'number' && Number.isFinite(until) && until > now;
 }
 
 export function isModelRoutePeerAllowed(
