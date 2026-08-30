@@ -3230,7 +3230,7 @@ export class BuyerProxy {
               body: Buffer.concat(adaptedChunks.map((adaptedChunk) => Buffer.from(adaptedChunk.data))),
             }
           } else if (adaptResponse) {
-            responseForClient = adaptResponse(response)
+            responseForClient = adaptResponse(responseForClient)
           }
         }
         responseForClient = adaptOpenAICompatibleErrorResponse(responseForClient, requestProtocol)

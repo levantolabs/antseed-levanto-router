@@ -309,8 +309,12 @@ test('an expired or absent cooldown is ignored', () => {
   assert.equal(isRowCoolingDown(discoverRow({ peerCooldownUntil: NOW + 1_000 }), NOW), true);
 });
 
-test('an impossibly distant cooldown is treated as no cooldown', () => {
-  assert.equal(isRowCoolingDown(discoverRow({ peerCooldownUntil: NOW + 86_400_000 }), NOW), false);
+test('a distant cooldown still counts as cooling down', () => {
+  // isModelRouteCoolingDown used to gate on an upper bound (MAX_COOLDOWN_MS)
+  // and call anything past it "not cooling down" -- backwards, since that let
+  // the worst-offending peers (the ones with the longest backoffs) skip the
+  // cooldown penalty entirely. Any future cooldown now counts, however far out.
+  assert.equal(isRowCoolingDown(discoverRow({ peerCooldownUntil: NOW + 86_400_000 }), NOW), true);
 });
 
 test('failure streak breaks a tie between otherwise identical peers', () => {
