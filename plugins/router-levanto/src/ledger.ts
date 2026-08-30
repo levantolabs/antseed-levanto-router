@@ -38,6 +38,16 @@ export interface PendingDecision {
 /** File name within the plugin's data directory -- one JSON row per line, append-only. */
 export const ROUTING_DECISIONS_FILE = 'routing-decisions.jsonl';
 
+/**
+ * Flat cap on in-flight pending decisions retained at once -- oldest is
+ * evicted first. A pending entry is normally removed by its matching
+ * recordResult, but a request that never resolves (every peer attempt
+ * fails, or an older caller's result omits requestId) would otherwise sit
+ * in the map forever; this bounds that growth the same way
+ * BuyerProxy._trackRequestConversation bounds _requestConversations.
+ */
+const MAX_PENDING_DECISIONS = 500;
+
 function num(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -146,6 +156,11 @@ export class RoutingLedger {
 
   recordPending(requestId: string, pending: PendingDecision): void {
     this.pendingByRequestId.set(requestId, pending);
+    while (this.pendingByRequestId.size > MAX_PENDING_DECISIONS) {
+      const oldestKey = this.pendingByRequestId.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.pendingByRequestId.delete(oldestKey);
+    }
   }
 
   recordResult(

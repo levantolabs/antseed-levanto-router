@@ -207,6 +207,7 @@ export class LevantoRouter {
   private readonly conversations = new ConversationState();
   private readonly ledger: RoutingLedger;
   private lastSignedDayKey: string | null = null;
+  private signingInFlight: Promise<void> | null = null;
   private lastDigestSentDayKey: string | null = null;
   /**
    * Most recently seen `routingPreferences` -- kept fresh from two paths:
@@ -302,8 +303,19 @@ export class LevantoRouter {
     if (!this.config.signDailyIfNeeded || !this.config.sellerPeerId) return;
     const todayKey = calendarDayKey();
     if (this.lastSignedDayKey === todayKey) return;
-    await this.config.signDailyIfNeeded(this.config.sellerPeerId);
-    this.lastSignedDayKey = todayKey;
+    if (!this.signingInFlight) {
+      const signDailyIfNeeded = this.config.signDailyIfNeeded;
+      const sellerPeerId = this.config.sellerPeerId;
+      this.signingInFlight = signDailyIfNeeded(sellerPeerId)
+        .then(() => {
+          this.lastSignedDayKey = todayKey;
+        })
+        .catch(() => {})
+        .finally(() => {
+          this.signingInFlight = null;
+        });
+    }
+    await this.signingInFlight;
   }
 
   /**
@@ -332,6 +344,9 @@ export class LevantoRouter {
     const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const digest = buildDigest(this.ledger.all(), periodKey(yesterday));
     const doFetch = this.config.fetchImpl ?? fetch;
+    const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
+    const timeoutController = new AbortController();
+    const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
     try {
       // Explicit suffix path (decisions doc SS13 item 20, resolved) -- states
       // intent via the URL rather than relying on the routing peer to
@@ -343,10 +358,13 @@ export class LevantoRouter {
           ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
         },
         body: JSON.stringify(digest),
+        signal: timeoutController.signal,
       });
       if (res.ok) this.lastDigestSentDayKey = todayKey;
     } catch {
-      // Routing peer unreachable -- try again next call, same as a skipped day's stats.
+      // Routing peer unreachable or unresponsive -- try again next call, same as a skipped day's stats.
+    } finally {
+      clearTimeout(timeoutHandle);
     }
   }
 
@@ -558,6 +576,9 @@ export class LevantoRouter {
     }
 
     const parsed = (await res.json()) as RouteResponseBody;
+    if (!Array.isArray(parsed?.ranked) || parsed.ranked.some((entry) => !entry?.price || !entry?.estimate)) {
+      throw new RoutingPeerError('rejected', `Levanto routing peer at ${this.config.routingPeerUrl} returned a malformed response.`, res.status);
+    }
     const peerById = new Map(peers.map((p) => [p.peerId, p] as const));
     // One snapshot per response, not per candidate -- decisions doc SS13
     // item 10, resolved. Duplicated onto every PinnedDecision below the same

@@ -53,6 +53,9 @@ const CACHE_DECAY_MS = 3 * 60 * 1000;
 /** EMA smoothing for the observed cache ratio. */
 const CACHE_RATIO_EMA_ALPHA = 0.5;
 
+/** Flat cap on distinct conversations retained at once -- least-recently-routed is evicted first. */
+const MAX_CONVERSATIONS = 500;
+
 function modelPeerKey(model: string, peerId: string): string {
   return `${model}::${peerId}`;
 }
@@ -62,10 +65,17 @@ export class ConversationState {
 
   private getOrCreate(key: string): ConversationEntry {
     let entry = this.entries.get(key);
-    if (!entry) {
-      entry = { lastRoutedUserText: '', pinned: null, cacheByModelPeer: new Map() };
+    if (entry) {
+      this.entries.delete(key);
       this.entries.set(key, entry);
+      return entry;
     }
+    if (this.entries.size >= MAX_CONVERSATIONS) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey !== undefined) this.entries.delete(oldestKey);
+    }
+    entry = { lastRoutedUserText: '', pinned: null, cacheByModelPeer: new Map() };
+    this.entries.set(key, entry);
     return entry;
   }
 

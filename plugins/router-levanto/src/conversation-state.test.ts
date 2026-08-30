@@ -80,4 +80,21 @@ describe('ConversationState gate + pin', () => {
     const state = new ConversationState();
     expect(state.getPinned('conv-1')).toBeNull();
   });
+
+  it('evicts the least-recently-routed conversation once the cap is exceeded', () => {
+    const state = new ConversationState();
+    const pinned = {
+      peer: { peerId: '0xAAA' } as never, peerId: '0xAAA', serviceId: 'gpt-5.6-luna',
+      reputation: 0, hasCachedInputPricing: false, inputUsdPerMillion: null, outputUsdPerMillion: null, minImageUsdPerImage: null,
+    };
+    for (let i = 0; i < 500; i++) {
+      state.recordDecision(`conv-${i}`, 'hello', pinned as never);
+    }
+    expect(state.isNewUserMessage('conv-0', 'hello')).toBe(false);
+
+    state.recordDecision('conv-500', 'hello', pinned as never);
+
+    expect(state.isNewUserMessage('conv-0', 'hello')).toBe(true);
+    expect(state.isNewUserMessage('conv-500', 'hello')).toBe(false);
+  });
 });
