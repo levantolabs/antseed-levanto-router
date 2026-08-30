@@ -2320,3 +2320,60 @@ base too).
 (the decisions doc's own router-agnostic-config item is logged as a TODO, not implemented) — this
 is the first real code move in that direction, deliberately scoped to the UI/config-selection layer
 only, not the full plugin-instance-config migration.
+
+## [2026-08-30] Robustness/failure-safety audit across the whole VPR surface
+
+**Type:** Fills in ground the docs don't cover — none of the four docs specify failure-mode
+handling (timeouts, races, unbounded caches) at this level of detail; this is a sweep for that
+class of bug, not a feature decision.
+
+An 8-agent audit (router-levanto plugin, packages/node's routing/interfaces layer, CLI
+buyer-proxy dispatch, CLI peer/payment support, desktop main's chat engine, desktop main's
+runtime/process supervision, desktop renderer's routing modules, desktop renderer's chat
+controller/UI) each read their subsystem for concrete failure scenarios — not style nits — and a
+second pass re-verified every candidate finding against the current code before touching anything.
+19 confirmed and fixed; several more were investigated and deliberately left alone because the
+fix needs a product decision, not a mechanical patch (see below).
+
+**Fixed** (grouped by area — see the five commits immediately following the router-genericization
+commit above for the exact diffs): a no-timeout digest fetch and a TOCTOU double-signing race in
+`router-levanto/router.ts`; unbounded maps in `ledger.ts` (pending decisions) and
+`conversation-state.ts` (per-conversation cache), now capped/LRU; an inverted cooldown-severity
+check and an unbounded latency map in `packages/node`'s routing layer; `buyer-proxy.ts` not
+reporting a connection-throw peer failure to the router (only HTTP-error failures were reported
+before); a stack-overflow-by-deep-nesting bug in `count-tokens.ts`; a re-entrancy race in
+`deposit-watcher.ts`'s balance poll that could fabricate a duplicate "deposit received" event; a
+process-start TOCTOU race and a stuck-forever state on a SIGKILL-immune child in
+`process-manager.ts`; no recovery path for a corrupted `config.json`; several un-timed-out fetches
+from the desktop main process to the local buyer proxy; a conversation delete that didn't abort
+its in-flight stream (letting it resurrect the "deleted" session file); a route-sync ordering race
+and two conversation-switch races in the renderer.
+
+**Deliberately left alone, flagged for a real decision:** no cap on inbound request-body size in
+`buyer-proxy.ts` (the endpoint legitimately carries large proxied payloads, and there's no
+existing buyer-side "max body" concept to reuse); `_requestConversations`'s eviction can drop an
+in-flight request's spend attribution under high concurrency (the obvious fix reintroduces a
+different silent-undercount bug per `conversation-store.ts`'s own doc comment — needs a real
+lifecycle-aware TTL, not an insertion-order tweak); two independent writers can race on the
+system-proxy active-profile list (`connectVprProfile` vs `VprToolsView.tsx`'s own `startProfiles`
+— the server-side API is replace-not-additive, so fixing this needs either a new remove endpoint
+or a shared mutex across two independently-owned modules, either way a product call); no
+cross-process lock on `config.json` (a second desktop instance, or a concurrent CLI `saveConfig`,
+can clobber a change — needs a decided second-instance/CLI-concurrency policy first).
+
+**One regression the fix pass introduced and caught before committing:** the new
+`buyer-proxy.ts` → `router.onResult` failure report initially fired for every dispatch failure,
+including a directly pinned peer (`x-antseed-pin-peer`) that the router never selected in the
+first place — an existing test (`an untagged transport failure records a streak without evicting
+the peer`) encoded that pinned-peer dispatches must never notify the router, and caught it. Fixed
+by gating the new call on `routeAlternatives` being present — already documented elsewhere in the
+file as "undefined/null for a directly pinned peer" — instead of firing on any router-configured
+dispatch.
+
+**Verification:** full suites run per area at time of fix (`plugins/router-levanto` 65/65,
+`packages/node` 1021/1021, `apps/desktop` renderer 367/367 and compiled main-process tests
+258/258, `apps/cli` 460/462 — the 2 failures are the same pre-existing, unrelated
+`autoSubscriptionEnabled`/`cqt` fixture mismatch noted in the entry above).
+
+**Ground truth reference:** none — this is defensive-engineering sweep work orthogonal to the
+docs' feature/protocol content, not something any of the four docs specify either way.
