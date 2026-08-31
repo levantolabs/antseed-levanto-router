@@ -34,6 +34,13 @@ export type StoredConversation = {
   peerSource: 'auto' | 'user'
   /** Model that served the most recent request (`<peerId>@<service>`), for display. */
   lastModel: string | null
+  /** Cost and latency of the single most recent request -- not cumulative
+      (see spentUsdc for that). Surfaced to the desktop's per-turn routing
+      badge, which has no other source for real per-request cost/latency
+      once the request has already completed (apps/desktop's chat SDK
+      abstraction exposes no response-header hook during streaming). */
+  lastCostUsd: number | null
+  lastLatencyMs: number | null
   /** USDC base units authorized for this chat's requests (bigint as string).
       Subagent traffic rolls up into the parent chat, same as everything else
       here. This is what the chat has cost, not what has settled on-chain. */
@@ -93,6 +100,8 @@ function sanitizeRecord(value: unknown): StoredConversation | null {
     pinnedModel: typeof record.pinnedModel === 'string' && record.pinnedModel.length > 0 ? record.pinnedModel : null,
     peerSource: record.peerSource === 'user' ? 'user' : 'auto',
     lastModel: typeof record.lastModel === 'string' && record.lastModel.length > 0 ? record.lastModel : null,
+    lastCostUsd: typeof record.lastCostUsd === 'number' && Number.isFinite(record.lastCostUsd) ? record.lastCostUsd : null,
+    lastLatencyMs: typeof record.lastLatencyMs === 'number' && Number.isFinite(record.lastLatencyMs) ? record.lastLatencyMs : null,
     spentUsdc: sanitizeCounter(record.spentUsdc),
     inputTokens: sanitizeCounter(record.inputTokens),
     cachedInputTokens: sanitizeCounter(record.cachedInputTokens),
@@ -224,6 +233,8 @@ export class ConversationStore {
         pinnedModel: null,
         peerSource: 'auto',
         lastModel: input.lastModel ?? null,
+        lastCostUsd: null,
+        lastLatencyMs: null,
         spentUsdc: '0',
         inputTokens: '0',
         cachedInputTokens: '0',
@@ -306,12 +317,18 @@ export class ConversationStore {
    * its sentinel model on every request; continuation stability within one
    * tool-loop is the router plugin's job, not this store's.
    */
-  recordRoutedModel(id: string, routedModel: string): StoredConversation | null {
+  recordRoutedModel(
+    id: string,
+    routedModel: string,
+    turn?: { costUsd?: number | null; latencyMs?: number | null },
+  ): StoredConversation | null {
     const existing = this._byId.get(id)
     if (!existing) return null
     const record = {
       ...existing,
       lastModel: routedModel,
+      lastCostUsd: turn?.costUsd ?? null,
+      lastLatencyMs: turn?.latencyMs ?? null,
       lastActiveAt: Date.now(),
     }
     this._byId.set(id, record)

@@ -2763,6 +2763,7 @@ export class BuyerProxy {
               this._conversations.recordRoutedModel(
                 trackedConversationId,
                 `${selected.peer.peerId}@${selected.serviceId}`,
+                { costUsd: result.costUsd, latencyMs: result.latencyMs },
               )
               if (routeAlternatives) {
                 this._recordRouteAlternatives(trackedConversationId, routeAlternatives)
@@ -3003,6 +3004,7 @@ export class BuyerProxy {
       this._conversations.recordRoutedModel(
         trackedConversationId,
         `${selectedPeer.peerId}@${pinnedServiceId}`,
+        { costUsd: result.costUsd, latencyMs: result.latencyMs },
       )
     }
     if (!result.done) {
@@ -3129,7 +3131,7 @@ export class BuyerProxy {
      *  null for a non-conversation request (no `conversation` to key by). */
     conversation?: ConversationIdentity | null,
   ): Promise<
-    | { done: true }
+    | { done: true; costUsd?: number | null; latencyMs?: number }
     | { done: false; statusCode: number; responseBody: Buffer; responseHeaders: Record<string, string>; errorMessage: string | null }
   > {
     const selectedRoutePlan = routePlanByPeerId.get(selectedPeer.peerId)
@@ -3384,7 +3386,7 @@ export class BuyerProxy {
           if (!res.writableEnded) {
             res.end()
           }
-          return { done: true }
+          return { done: true, costUsd: telemetry.estimatedCostUsd, latencyMs }
         }
 
         // Non-streamed response — check if retryable
@@ -3408,7 +3410,7 @@ export class BuyerProxy {
 
         res.writeHead(responseForClient.statusCode, responseHeaders)
         res.end(Buffer.from(responseForClient.body))
-        return { done: true }
+        return { done: true, costUsd: telemetry.estimatedCostUsd, latencyMs }
       } else {
         const upstreamResponse = await this._node.sendRequest(selectedPeer, requestForPeer, {
           signal: requestSignal,
@@ -3498,7 +3500,7 @@ export class BuyerProxy {
         // Forward response headers and body to the HTTP client
         res.writeHead(response.statusCode, responseHeaders)
         res.end(Buffer.from(response.body))
-        return { done: true }
+        return { done: true, costUsd: telemetry.estimatedCostUsd, latencyMs }
       }
     } catch (err) {
       const latencyMs = Date.now() - startTime

@@ -115,26 +115,55 @@ function parseRouteAlternatives(value: unknown): RouteAlternative[] | undefined 
 export async function fetchProxyConversationRoute(
   port: number,
   conversationId: string,
-): Promise<{ peerId: string; service: string; routeAlternatives?: RouteAlternative[] } | null> {
+  onError?: (message: string) => void,
+): Promise<{ peerId: string; service: string; estimatedCostUsd?: number; latencyMs?: number; routeAlternatives?: RouteAlternative[] } | null> {
   try {
     const id = encodeURIComponent(`vpr:${conversationId}`);
     const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/conversations/${id}`, {
       signal: AbortSignal.timeout(2_000),
     });
-    if (!response.ok) return null;
-    const payload = await response.json() as { conversation?: { lastModel?: unknown }; routeAlternatives?: unknown };
+    if (!response.ok) {
+      onError?.(
+        `fetchProxyConversationRoute(${conversationId.slice(0, 8)}...): proxy returned ${response.status}`,
+      );
+      return null;
+    }
+    const payload = await response.json() as {
+      conversation?: { lastModel?: unknown; lastCostUsd?: unknown; lastLatencyMs?: unknown };
+      routeAlternatives?: unknown;
+    };
     const lastModel = typeof payload.conversation?.lastModel === 'string'
       ? payload.conversation.lastModel.trim()
       : '';
     const separator = lastModel.indexOf('@');
-    if (separator <= 0 || separator === lastModel.length - 1) return null;
+    if (separator <= 0 || separator === lastModel.length - 1) {
+      onError?.(
+        `fetchProxyConversationRoute(${conversationId.slice(0, 8)}...): no usable lastModel yet (got "${lastModel}")`,
+      );
+      return null;
+    }
     const routeAlternatives = parseRouteAlternatives(payload.routeAlternatives);
+    const estimatedCostUsd = typeof payload.conversation?.lastCostUsd === 'number' && Number.isFinite(payload.conversation.lastCostUsd)
+      ? payload.conversation.lastCostUsd
+      : undefined;
+    const latencyMs = typeof payload.conversation?.lastLatencyMs === 'number' && Number.isFinite(payload.conversation.lastLatencyMs)
+      ? payload.conversation.lastLatencyMs
+      : undefined;
     return {
       peerId: lastModel.slice(0, separator),
       service: lastModel.slice(separator + 1),
+      ...(estimatedCostUsd !== undefined ? { estimatedCostUsd } : {}),
+      ...(latencyMs !== undefined ? { latencyMs } : {}),
       ...(routeAlternatives ? { routeAlternatives } : {}),
     };
-  } catch {
+  } catch (err) {
+    // Previously silent -- a timeout (2s AbortSignal), a network error, or a
+    // JSON parse failure here all fell back to the raw SDK's own meta with
+    // no peerId/routeAlternatives and no trace of why, indistinguishable
+    // from "the proxy genuinely has nothing to report yet."
+    onError?.(
+      `fetchProxyConversationRoute(${conversationId.slice(0, 8)}...) failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return null;
   }
 }

@@ -739,12 +739,14 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
 
       const completedAssistantMessage = pendingAssistantMessage as AiChatMessage | null;
       if (completedAssistantMessage) {
-        const routed = await fetchProxyConversationRoute(proxyPort, conversationId);
+        const routed = await fetchProxyConversationRoute(proxyPort, conversationId, appendSystemLog);
         if (routed?.peerId) {
           completedAssistantMessage.meta = {
             ...(completedAssistantMessage.meta ?? {}),
             peerId: routed.peerId,
             service: routed.service,
+            ...(routed.estimatedCostUsd !== undefined ? { estimatedCostUsd: routed.estimatedCostUsd } : {}),
+            ...(routed.latencyMs !== undefined ? { latencyMs: routed.latencyMs } : {}),
             ...(routed.routeAlternatives ? { routeAlternatives: routed.routeAlternatives } : {}),
           };
           preferredPeerByConversationId.set(conversationId, routed.peerId);

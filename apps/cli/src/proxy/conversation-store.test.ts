@@ -96,6 +96,40 @@ test('recordRoutedModel never populates pinnedModel for an auto-routed chat, onl
   }
 })
 
+test('recordRoutedModel stores the last turn\'s cost/latency, not a cumulative total', async () => {
+  const dir = await makeDir()
+  try {
+    const store = new ConversationStore(dir)
+    const id = conversationId('codex', 's1')
+    store.touch({ tool: 'codex', sessionKey: 's1' })
+
+    const withoutTurnData = store.recordRoutedModel(id, 'a'.repeat(40) + '@gpt-5.4')
+    assert.equal(withoutTurnData?.lastCostUsd, null)
+    assert.equal(withoutTurnData?.lastLatencyMs, null)
+
+    const firstTurn = store.recordRoutedModel(id, 'a'.repeat(40) + '@gpt-5.4', { costUsd: 0.0012, latencyMs: 842 })
+    assert.equal(firstTurn?.lastCostUsd, 0.0012)
+    assert.equal(firstTurn?.lastLatencyMs, 842)
+
+    // A later turn overwrites, it doesn't accumulate -- these fields answer
+    // "what did the most recent request cost," not "what has this chat cost
+    // in total" (that's spentUsdc).
+    const secondTurn = store.recordRoutedModel(id, 'b'.repeat(40) + '@glm-5', { costUsd: 0.0004, latencyMs: 210 })
+    assert.equal(secondTurn?.lastCostUsd, 0.0004)
+    assert.equal(secondTurn?.lastLatencyMs, 210)
+
+    // Omitting turn data (e.g. an aborted-locally dispatch with no real
+    // telemetry) clears the fields rather than leaving the prior turn's
+    // stale numbers attached to a new lastModel.
+    const cleared = store.recordRoutedModel(id, 'c'.repeat(40) + '@gpt-5.4')
+    assert.equal(cleared?.lastCostUsd, null)
+    assert.equal(cleared?.lastLatencyMs, null)
+    await store.flush()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('persists to conversations.json and reloads across instances', async () => {
   const dir = await makeDir()
   try {
@@ -103,6 +137,7 @@ test('persists to conversations.json and reloads across instances', async () => 
     store.touch({ tool: 'opencode', sessionKey: 'ses_a', snippet: 'hello there' })
     store.setLabel(conversationId('opencode', 'ses_a'), '  My   renamed chat  ')
     store.setPinnedModel(conversationId('opencode', 'ses_a'), 'b'.repeat(40) + '@glm-5')
+    store.recordRoutedModel(conversationId('opencode', 'ses_a'), 'b'.repeat(40) + '@glm-5', { costUsd: 0.0009, latencyMs: 512 })
     await store.flush()
 
     const raw = JSON.parse(await readFile(join(dir, CONVERSATIONS_FILE), 'utf8')) as { conversations: unknown[] }
@@ -114,6 +149,8 @@ test('persists to conversations.json and reloads across instances', async () => 
     assert.equal(record.label, 'My renamed chat')
     assert.equal(record.snippet, 'hello there')
     assert.equal(reloaded.getPinnedModel('opencode', 'ses_a'), 'b'.repeat(40) + '@glm-5')
+    assert.equal(record.lastCostUsd, 0.0009)
+    assert.equal(record.lastLatencyMs, 512)
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
