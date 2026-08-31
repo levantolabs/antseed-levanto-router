@@ -983,7 +983,7 @@ export class BuyerPaymentManager {
     // else in this path naming which of the two sources (an explicit caller
     // amount vs. the configured default) produced it.
     console.warn(
-      `[BuyerPayment] reserve: seller=${sellerPeerId.slice(0, 12)}... maxAmount=${maxAmount} `
+      `[BuyerPayment] reserve: channel=${channelId.slice(0, 18)}... seller=${sellerPeerId.slice(0, 12)}... maxAmount=${maxAmount} `
       + `explicit=${typeof reserveAmountOrPricing === 'bigint'} configDefault=${this._config.maxReserveAmountUsdc}`,
     );
     const reserveMsg: ReserveAuthMessage = {
