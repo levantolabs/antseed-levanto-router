@@ -69,6 +69,14 @@ export interface DailySigningNode {
 const MS_PER_DAY = 24 * 60 * 60 * 1000
 /** Bounds the preemptive top-up loop below (SS6.7's catch-up burst normally needs exactly one). */
 const MAX_PREEMPTIVE_TOPUPS = 5
+/**
+ * Renew the reserve deadline once less than this much validity remains, not
+ * only once it has already lapsed -- a real signing cycle (this function
+ * plus its own async work) takes nonzero time, and the whole point is to
+ * never let signCumulativeAuth produce a signature the seller can no longer
+ * settle by the time it lands.
+ */
+const RESERVE_DEADLINE_RENEWAL_MARGIN_MS = 5 * 60 * 1000
 
 /**
  * How long, and how often, to poll for a top-up's on-chain confirmation
@@ -154,7 +162,19 @@ export function createSignDailyIfNeeded(
     }
     const paymentMux = await node.getOrConnectPaymentMux(sellerPeerId)
 
-    const existingSession = buyer.getActiveSession(sellerPeerId)
+    let existingSession = buyer.getActiveSession(sellerPeerId)
+    if (existingSession && node.channelsClient) {
+      // The local store can say ACTIVE long after the channel was
+      // cooperatively closed, settled, or timed out on-chain -- checked
+      // before ever signing into it, or a dead channel gets signed into
+      // forever with no self-heal (real bug found live: a settled channel
+      // kept receiving fresh cumulative signatures on every retry).
+      const onChainStatus = await buyer.reconcileOnChainChannelStatus(sellerPeerId, node.channelsClient, paymentMux)
+      if (onChainStatus === 'retired') {
+        log(`subscription channel with routing peer ${sellerPeerId.slice(0, 12)}... was closed on-chain -- retired locally, opening a fresh one`)
+        existingSession = buyer.getActiveSession(sellerPeerId)
+      }
+    }
     if (!existingSession) {
       // Bootstrap (SS6.3, SS6.5): reserve exactly one day's charge, not
       // maxed at FIRST_SIGN_CAP -- settling 100% of a one-day deposit
@@ -202,10 +222,25 @@ export function createSignDailyIfNeeded(
       + options.dailyAmountUsdc * BigInt(Math.min(daysSinceLastSign, options.catchUpCapDays))
 
     let ceiling = buyer.getReserveCeiling(sellerPeerId)
+    // The ceiling and the reserve's on-chain deadline are independent -- the
+    // ceiling can be perfectly sufficient (no top-up ever triggered by the
+    // check below) while the deadline covering it has quietly lapsed, since
+    // nothing else refreshes the deadline for a channel with no other
+    // per-request activity. signCumulativeAuth has no notion of this at all,
+    // so left unchecked it "succeeds" locally while the seller can no longer
+    // settle the result.
+    let reserveDeadlineExpiring = typeof existingSession.deadline === 'number'
+      && existingSession.deadline * 1000 <= Date.now() + RESERVE_DEADLINE_RENEWAL_MARGIN_MS
     let preemptiveTopUps = 0
-    while (trueTarget > ceiling && preemptiveTopUps < MAX_PREEMPTIVE_TOPUPS) {
-      log(`ceiling too low to cover what's owed for ${sellerPeerId.slice(0, 12)}... (need ${trueTarget}, have ${ceiling}) -- topping up before signing (SS6.7 catch-up burst)`)
-      await topUpAndReconcile(node, sellerPeerId)
+    while ((trueTarget > ceiling || reserveDeadlineExpiring) && preemptiveTopUps < MAX_PREEMPTIVE_TOPUPS) {
+      if (reserveDeadlineExpiring) {
+        log(`reserve deadline for ${sellerPeerId.slice(0, 12)}... has lapsed or is about to -- renewing before signing`)
+        await buyer.renewReserveDeadline(sellerPeerId, paymentMux)
+        reserveDeadlineExpiring = false
+      } else {
+        log(`ceiling too low to cover what's owed for ${sellerPeerId.slice(0, 12)}... (need ${trueTarget}, have ${ceiling}) -- topping up before signing (SS6.7 catch-up burst)`)
+        await topUpAndReconcile(node, sellerPeerId)
+      }
       ceiling = buyer.getReserveCeiling(sellerPeerId)
       preemptiveTopUps += 1
     }

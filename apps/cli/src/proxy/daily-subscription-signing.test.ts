@@ -68,6 +68,12 @@ function createScriptedChannelsClient(initialDeposit: bigint) {
   let deposit = initialDeposit
   let pendingBump: bigint | null = null
   let readsSincePendingBump = 0
+  // status 1 = ACTIVE (classifyOnChainChannel) -- a genuinely existing,
+  // active on-chain channel by default, since reconcileOnChainChannelStatus
+  // now consults this on every signDailyIfNeeded call. buyer/seller must be
+  // real-looking (non-zero-address) too, or classifyOnChainChannel reads the
+  // channel as not existing at all regardless of `status`.
+  let status = 1
   const client = {
     getSession: async (_id: string) => {
       if (pendingBump !== null) {
@@ -77,13 +83,25 @@ function createScriptedChannelsClient(initialDeposit: bigint) {
           pendingBump = null
         }
       }
-      return { buyer: '0x0', seller: '0x0', deposit, settled: 0n, metadataHash: '0x0', deadline: 0n, settledAt: 0n, closeRequestedAt: 0n, status: 0 }
+      return {
+        buyer: '0x' + '11'.repeat(20),
+        seller: '0x' + '22'.repeat(20),
+        deposit,
+        settled: 0n,
+        metadataHash: '0x0',
+        deadline: 0n,
+        settledAt: 0n,
+        closeRequestedAt: 0n,
+        status,
+      }
     },
   }
   return {
     client: client as unknown as ChannelsClient,
     bumpTo: (value: bigint) => { deposit = value },
     bumpAfterOneRead: (value: bigint) => { pendingBump = value; readsSincePendingBump = 0 },
+    /** Simulate the channel being cooperatively/seller closed on-chain (status 2 = SETTLED). */
+    settleOnChain: () => { status = 2 },
   }
 }
 
@@ -166,8 +184,16 @@ test('ordinary day: signs exactly one more day\'s increment, no top-up when ther
     await signDailyIfNeeded(SELLER_PEER_ID)
 
     const newAuths = mux.sent.slice(afterDay1)
-    assert.equal(newAuths.length, 1, 'ordinary day signs exactly once, no extra top-up round')
-    assert.equal(BigInt(newAuths[0]!.cumulativeAmount), DAILY_AMOUNT * 2n, 'exactly one more day, not a bonus day from calling twice')
+    // A full day is well past this test's defaultAuthDurationSecs (3600s),
+    // so the reserve deadline has genuinely lapsed by "the next day" even
+    // though the ceiling itself has comfortable headroom -- the renewal
+    // this now correctly triggers is a second, legitimate message
+    // alongside the real day-2 sign, not a bug.
+    const renewals = newAuths.filter((a) => a.reserveMaxAmount)
+    const realSigns = newAuths.filter((a) => !a.reserveMaxAmount)
+    assert.equal(renewals.length, 1, 'the lapsed reserve deadline is renewed once')
+    assert.equal(realSigns.length, 1, 'ordinary day signs exactly once, no extra ceiling top-up round')
+    assert.equal(BigInt(realSigns[0]!.cumulativeAmount), DAILY_AMOUNT * 2n, 'exactly one more day, not a bonus day from calling twice')
   })
 })
 
@@ -244,6 +270,94 @@ test('catch-up: a multi-day gap tops up before signing, then captures the full b
     const realSigns = catchUpAuths.filter((a) => !a.reserveMaxAmount)
     assert.equal(realSigns.length, 1, 'the backlog is captured in a single real signature, not split or duplicated')
     assert.equal(BigInt(realSigns[0]!.cumulativeAmount), DAILY_AMOUNT * 10n, 'day 1 + 9 missed days = 10 total, independently bounded by real elapsed time')
+  })
+})
+
+test('on-chain settlement: a channel closed on-chain (local store still says active) is retired and re-bootstrapped', async () => {
+  // Regression for a real bug found live: signDailyIfNeeded only ever
+  // consulted the LOCAL store (getActiveSession), which still says ACTIVE
+  // long after the channel was cooperatively closed on-chain -- it kept
+  // signing fresh cumulative amounts into a dead channel forever, with no
+  // self-heal, no matter how many retries.
+  await withBuyer(DAILY_AMOUNT * 5n, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 20n)
+    const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+
+    await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
+    const firstSessionId = buyer.getActiveSession(SELLER_PEER_ID)!.sessionId
+    const sentBeforeClose = mux.sent.length
+
+    // The seller settles/closes the channel on-chain (cooperative close,
+    // seller-side close, or timeout) -- the local store still says ACTIVE
+    // until the next on-chain reconcile notices.
+    scripted.settleOnChain()
+
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    const session = buyer.getActiveSession(SELLER_PEER_ID)!
+    assert.notEqual(session.sessionId, firstSessionId, 'a fresh channel was bootstrapped, not the dead one reused')
+    assert.equal(BigInt(session.authMax), DAILY_AMOUNT, 'the fresh channel starts at exactly one day, like any ordinary bootstrap')
+
+    const newMessages = mux.sent.slice(sentBeforeClose)
+    assert.ok(newMessages.length > 0, 'the rebootstrap actually sent something, not a silent no-op that leaves the buyer stuck')
+    assert.equal(BigInt(newMessages[0]!.cumulativeAmount), 0n, 'the rebootstrap starts with a fresh reserve proof, like any ordinary bootstrap')
+  })
+})
+
+test('reserve deadline renewal: an expired deadline with a healthy ceiling renews before signing, without re-charging the already-signed day', async (t) => {
+  // Regression for a real bug found live on mainnet: the reserve ceiling and
+  // its on-chain deadline are independent, and only the ceiling was checked
+  // before signing. A channel with comfortable ceiling headroom but a
+  // lapsed deadline never got the deadline refreshed at all -- signCumulativeAuth
+  // has no notion of the reserve deadline, so it "succeeded" locally while
+  // the seller could no longer settle the result. This must renew the
+  // reserve WITHOUT re-charging the day that was already correctly signed.
+  t.mock.timers.enable({ apis: ['Date'] })
+  await withBuyer(DAILY_AMOUNT * 5n, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 20n)
+    const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+
+    await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
+    const sentAfterDay1 = mux.sent.length
+    assert.equal(BigInt(buyer.getActiveSession(SELLER_PEER_ID)!.authMax), DAILY_AMOUNT)
+    const ceilingAfterDay1 = buyer.getReserveCeiling(SELLER_PEER_ID)
+
+    // Past the reserve's defaultAuthDurationSecs (3600s in this test config)
+    // but nowhere near a full day -- the ceiling has 5x headroom, so the
+    // pre-existing ceiling-only check would never trigger anything here.
+    t.mock.timers.tick(2 * 60 * 60 * 1000) // 2 hours
+    const sessionWithLapsedDeadline = buyer.getActiveSession(SELLER_PEER_ID)!
+    assert.ok(
+      sessionWithLapsedDeadline.deadline * 1000 <= Date.now(),
+      'sanity: the reserve deadline has genuinely lapsed by now',
+    )
+
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    const newMessages = mux.sent.slice(sentAfterDay1)
+    const renewalMessages = newMessages.filter((m) => m.reserveMaxAmount)
+    const realSigns = newMessages.filter((m) => !m.reserveMaxAmount)
+
+    assert.equal(renewalMessages.length, 1, 'exactly one reserve renewal went out')
+    assert.equal(
+      renewalMessages[0]!.reserveMaxAmount, ceilingAfterDay1.toString(),
+      'the renewal keeps the ceiling unchanged -- only the deadline moves, this is not a top-up',
+    )
+
+    assert.equal(realSigns.length, 1, 'signCumulativeAuth still runs exactly once')
+    assert.equal(
+      BigInt(realSigns[0]!.cumulativeAmount), DAILY_AMOUNT,
+      'still exactly one day\'s worth -- renewing the reserve must not re-charge or double-count the day already signed',
+    )
+
+    assert.ok(
+      buyer.getActiveSession(SELLER_PEER_ID)!.deadline * 1000 > Date.now(),
+      'the deadline is valid again after renewal',
+    )
   })
 })
 

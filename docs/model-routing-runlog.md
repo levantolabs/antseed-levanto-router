@@ -2546,3 +2546,79 @@ harness existed for this component before).
 passed (384 baseline + 4 new). `tsc --noEmit -p tsconfig.renderer.json` surfaces one pre-existing,
 unrelated error in `VprActivityView.tsx` (confirmed present before this change too, from the
 per-session-history work) -- not touched, out of scope here.
+
+## [2026-08-31] Daily subscription signing didn't check the reserve deadline or on-chain channel status before signing
+
+**Type:** Fixes a real bug found live on mainnet (a blocked buyer), root-caused in two separate
+passes as a second, more severe defect surfaced during the first fix's own live testing.
+
+**Bug 1 -- deadline and ceiling are independent, only the ceiling was checked.**
+`daily-subscription-signing.ts`'s pre-sign reconciliation only ever asked "is the ceiling high
+enough for what's owed" (the 65%-threshold catch-up loop); it never asked "is the reserve backing
+that ceiling still within its deadline." `signCumulativeAuth` has no notion of the reserve deadline
+at all -- it "succeeds" locally (the local cumulative amount advances, `updatedAt` moves) while the
+seller can no longer settle a claim against an expired reserve, so the signature never lands.
+Nothing else refreshes the deadline for a channel with comfortable ceiling headroom and no other
+per-request traffic (exactly a low-activity subscription's shape), so it can sit expired
+indefinitely. Fixed with a new `BuyerPaymentManager.renewReserveDeadline` (deliberately distinct
+from `topUpReserve`: same ceiling, only the deadline moves -- reusing `topUpReserve` would inflate
+the ceiling by a full `maxReserveAmountUsdc` step just to keep a deadline alive), triggered by
+`signDailyIfNeeded` whenever the existing session's deadline is expired or within a 5-minute
+margin, independent of the ceiling check.
+
+**A second, real bug found while fixing the first**: `upsertChannel`'s SQL (`packages/node`'s
+sqlite `ChannelStore`) never included `deadline` in its `ON CONFLICT ... DO UPDATE SET` clause --
+only the very first `INSERT` ever wrote it. Every later update (both `renewReserveDeadline` and
+the pre-existing `topUpReserve`) was silently a no-op for that one column on disk, even though the
+in-memory ceiling map updated correctly and the renewed signature reached the seller over the
+wire. Caught by this fix's own regression test (the persisted deadline didn't actually move
+forward), not by any live symptom -- the live blocker's channel was in a different, worse state
+(see below) where this specific gap wasn't the proximate cause. Fixed by adding `deadline =
+@deadline` to the UPDATE clause. Out of scope, left for a follow-up: several *other*
+`StoredChannel` fields (`reserveSalt`, `initialReserveAmount`, `reserveMaxAmount`,
+`latestReserveAuthSig`, `latestReserveDeadline`, `reserveAuthPending`, `confirmedReserveAmount`)
+aren't in this SQL statement's INSERT *or* UPDATE columns at all -- they never persist to this
+store regardless of what's written to the in-memory `StoredChannel` object, a materially bigger
+gap than the one line fixed here.
+
+**Bug 2 -- found live, more severe, while testing bug 1's fix**: `signDailyIfNeeded` branches
+purely on the LOCAL store (`getActiveSession`); it never checks on-chain channel status at all.
+Once a channel is settled/closed on-chain by any route (cooperative close, seller-side close,
+timeout), the local store still says ACTIVE, so the client keeps signing fresh cumulative amounts
+into a dead channel forever -- no retry count self-heals this, since the local state never changes.
+Confirmed live: a buyer's channel was cooperatively closed, a fresh bootstrap channel opened and
+was itself settled+closed again minutes later, and every subsequent sign attempt kept taking the
+"existing session" branch. Fixed by adding `BuyerPaymentManager.reconcileOnChainChannelStatus`,
+called before any ceiling/deadline logic runs whenever a channelsClient is available: it classifies
+the channel via the same `classifyOnChainChannel` helper and the same retire semantics
+`BuyerPaymentNegotiator._recoverExistingSession` already uses for the normal per-request path (not
+a bespoke reimplementation -- deliberately the same classification+retire primitives), retiring the
+session locally on `!exists`/`SETTLED`/`TIMEOUT`/non-active status so `signDailyIfNeeded` falls
+through to its existing bootstrap branch and opens a fresh channel. Left undone: the negotiator's
+own `_recoverExistingSession` still duplicates this ladder inline rather than calling the new
+shared method -- consolidating it was judged a real regression risk to the well-tested per-request
+path to take on under this fix's time pressure, and is a reasonable follow-up rather than a gap in
+this fix's own correctness.
+
+**Verification:** two new regression tests in `daily-subscription-signing.test.ts` construct each
+scenario directly (a healthy ceiling with a lapsed deadline; a locally-active session the scripted
+on-chain client reports as settled) and assert the specific failure mode is closed -- including
+that the deadline renewal does NOT re-charge or double-count a day already signed (verified by
+holding `cumulativeAmount` constant across the renewal). Also updated: the existing "ordinary day"
+test now asserts two messages (a renewal plus the real sign) instead of one, since a full day
+genuinely exceeds this test's configured `defaultAuthDurationSecs` -- a correctly-detected case the
+test's original assertion simply predated. Full suites: `apps/cli` 475/477 (2 pre-existing,
+unrelated fixture-mismatch failures, confirmed present on unmodified base), `packages/node`
+1023/1023 (including `buyer-payment-manager.test.ts`'s 72 tests and `channel-store.test.ts`),
+`packages/buyer-core` 11/11.
+
+**Live status**: the buyer who was blocked was NOT unblocked by this fix today -- once local/chain
+state was made consistent (a manual DB intervention, with the user's explicit authorization, done
+by a peer session outside this fix), `signDailyIfNeeded` correctly bootstrapped a fresh channel and
+signed a fresh ReserveAuth exactly as intended, but the routing peer's seller-side infrastructure
+(outside this repo entirely) never called `reserve()` on-chain in response. That is a seller-side
+gap this buyer-side fix cannot close.
+
+**Ground truth reference:** none of the four docs specify reserve-deadline or on-chain-status
+handling at this level of detail -- this is defensive/correctness work orthogonal to their
+protocol-level content.

@@ -26,6 +26,8 @@ import { peerIdToAddress, type PeerId } from '@antseed/protocol/peer-id';
 import type { SellerAddressResolver } from './seller-address-resolver.js';
 import type { PeerMetadata } from '@antseed/protocol/peer-metadata';
 import { BuyerChannelStore, CHANNEL_ROLE, CHANNEL_STATUS, type StoredChannel } from './channel-store-types.js';
+import { classifyOnChainChannel } from './channel-session-state.js';
+import type { ChannelsClient } from './channels-client.js';
 import {
   advanceUsageMetadata,
   CountedRequestTracker,
@@ -1885,6 +1887,133 @@ export class BuyerPaymentManager {
       initialReserveAmount: session.initialReserveAmount ?? prevCeiling.toString(),
     });
     debugLog(`[BuyerPayment] topUpReserve sent: newCeiling=${newCeiling}`);
+  }
+
+  /**
+   * Sign a fresh ReserveAuth at the SAME maxAmount as the current ceiling,
+   * purely to push the deadline out -- unlike topUpReserve, this never grows
+   * the ceiling. A channel with infrequent activity (a daily subscription
+   * with no other per-request traffic to this seller) can otherwise sit on
+   * an expired deadline indefinitely: topUpReserve/the ceiling-shortfall
+   * check that calls it only ever fires when the ceiling itself is running
+   * low, which has nothing to do with whether the deadline covering that
+   * ceiling has lapsed. Once expired, signCumulativeAuth still "succeeds"
+   * locally (it has no notion of the reserve deadline at all) but the seller
+   * can no longer settle against it, so the signature never lands.
+   *
+   * No on-chain confirmation to wait for here (unlike topUpReserve): the
+   * deposit backing this channel doesn't change, so there is nothing new for
+   * a channelsClient poll to observe on-chain -- the new signature just needs
+   * to reach the seller, which sendSpendingAuth already does.
+   */
+  async renewReserveDeadline(
+    sellerPeerId: string,
+    paymentMux: PaymentMux,
+  ): Promise<void> {
+    const session = this.getActiveSession(sellerPeerId);
+    if (!session) {
+      debugWarn(`[BuyerPayment] renewReserveDeadline: no active session for ${sellerPeerId.slice(0, 12)}...`);
+      return;
+    }
+
+    const ceiling = this._getCeiling(sellerPeerId);
+    const deadline = Math.floor(Date.now() / 1000) + this._config.defaultAuthDurationSecs;
+
+    const channelsDomain = this._channelsDomain;
+    const reserveMsg: ReserveAuthMessage = {
+      channelId: session.sessionId,
+      maxAmount: ceiling,
+      deadline: BigInt(deadline),
+    };
+    const reserveAuthSig = await signReserveAuth(this._signer, channelsDomain, reserveMsg);
+
+    const currentCumulative = this._cumulativeAmount.get(sellerPeerId) ?? 0n;
+    const salt = this._reserveSalt.get(sellerPeerId) ?? '0x' + '00'.repeat(32);
+    const pending: PendingReserveAuthorization = {
+      signature: reserveAuthSig,
+      salt,
+      maxAmount: ceiling,
+      deadline,
+      // Not a growth: the amount was already reserved before this renewal,
+      // so there's no new deposit for an on-chain read to confirm.
+      confirmedAmount: ceiling,
+    };
+
+    await this._commitAndSendReserveAuth(session, sellerPeerId, pending, paymentMux, {
+      cumulativeAmount: currentCumulative.toString(),
+      initialReserveAmount: session.initialReserveAmount ?? ceiling.toString(),
+    });
+    debugLog(`[BuyerPayment] renewReserveDeadline sent: channel=${session.sessionId.slice(0, 18)}... ceiling unchanged at ${ceiling}, deadline=${deadline}`);
+  }
+
+  /**
+   * Check the seller's channel against on-chain truth before signing
+   * anything more into it, retiring it locally if on-chain state says it's
+   * dead. Mirrors BuyerPaymentNegotiator._recoverExistingSession's
+   * on-chain-status ladder -- same classifyOnChainChannel classification,
+   * same retire semantics -- scoped down to just "is this channel still
+   * usable," since a caller like the daily-subscription-signing path has no
+   * per-request budget/lock-confirmation concerns of its own.
+   *
+   * Real bug found live: signDailyIfNeeded only ever consulted the LOCAL
+   * store (getActiveSession), which still says "active" long after the
+   * channel was cooperatively closed on-chain -- it kept signing into a
+   * dead channel forever with no self-heal, no matter how many retries.
+   *
+   * Returns 'no-session' if there's nothing to check, 'active' if the
+   * channel is genuinely usable (its ceiling has also been reconciled from
+   * the on-chain deposit), or 'retired' if it was dead and has now been
+   * retired locally -- callers should treat 'retired' the same as
+   * 'no-session' and bootstrap a fresh channel.
+   */
+  async reconcileOnChainChannelStatus(
+    sellerPeerId: string,
+    channelsClient: ChannelsClient,
+    paymentMux: PaymentMux,
+  ): Promise<'active' | 'no-session' | 'retired'> {
+    const session = this.getActiveSession(sellerPeerId);
+    if (!session) return 'no-session';
+
+    let onChain: ReturnType<typeof classifyOnChainChannel>;
+    try {
+      onChain = classifyOnChainChannel(await channelsClient.getSession(session.sessionId));
+    } catch (err) {
+      debugWarn(
+        `[BuyerPayment] reconcileOnChainChannelStatus: failed to read on-chain channel ` +
+        `${session.sessionId.slice(0, 18)}...: ${err instanceof Error ? err.message : err}`,
+      );
+      // Can't tell -- assume active rather than retiring a possibly-healthy
+      // channel on a transient RPC hiccup. Matches _recoverExistingSession's
+      // own `onChain === null` short-circuit (it returns false/no-op there).
+      return 'active';
+    }
+
+    if (!onChain.exists) {
+      if (this.canReplayReserveAuth(sellerPeerId)) {
+        await this.resendReserveAuth(sellerPeerId, paymentMux);
+        return 'active';
+      }
+      this.retireSession(sellerPeerId, CHANNEL_STATUS.GHOST);
+      return 'retired';
+    }
+
+    if (onChain.status === CHANNEL_STATUS.SETTLED) {
+      this.retireSession(sellerPeerId, CHANNEL_STATUS.SETTLED, onChain.channel.settled);
+      return 'retired';
+    }
+
+    if (onChain.status === CHANNEL_STATUS.TIMEOUT) {
+      this.retireSession(sellerPeerId, CHANNEL_STATUS.TIMEOUT);
+      return 'retired';
+    }
+
+    if (onChain.status !== CHANNEL_STATUS.ACTIVE) {
+      this.retireSession(sellerPeerId, CHANNEL_STATUS.GHOST);
+      return 'retired';
+    }
+
+    await this.reconcileReserveAmount(sellerPeerId, onChain.channel.deposit);
+    return 'active';
   }
 
   // ── Queries ───────────────────────────────────────────────────
