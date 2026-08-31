@@ -40,6 +40,7 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
     --border-light: #e4e9e5;
     --danger: #ef4444;
     --font-sans: 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --font-mono: 'Geist Mono', ui-monospace, SFMono-Regular, monospace;
     --radius: 16px;
     --radius-sm: 8px;
   }
@@ -98,6 +99,16 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
   td { padding: 9px 10px; border-bottom: 1px solid var(--border-light); }
   tr[data-session] { cursor: pointer; }
+  tr.turn-row { cursor: pointer; }
+  tr.turn-expansion td { padding: 14px 16px; background: var(--bg-primary); border-bottom: 1px solid var(--border); cursor: default; }
+  .expansion-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin: 12px 0 6px; }
+  .expansion-label:first-child { margin-top: 0; }
+  table.considered { margin-bottom: 4px; }
+  table.considered th { padding: 0 8px 6px; font-size: 10px; }
+  table.considered td { padding: 6px 8px; font-size: 13px; }
+  table.considered tr.picked td { font-weight: 600; color: var(--accent); }
+  .prompt-preview { white-space: pre-wrap; word-break: break-word; font-family: var(--font-mono); font-size: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 10px 12px; margin: 0; max-height: 220px; overflow-y: auto; }
+  .empty-inline { color: var(--text-muted); font-size: 13px; margin: 0; }
   tr:hover td { background: rgba(var(--accent-rgb), 0.05); }
   .empty, .error { color: var(--text-muted); padding: 40px 0; text-align: center; }
   .error { color: var(--danger); }
@@ -151,6 +162,19 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   function fmtDate(ms) {
     return new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
   }
+  function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.textContent = text == null ? '' : String(text);
+    // textContent -> innerHTML escapes &, <, > but NOT " -- browsers only
+    // quote-escape inside an actual attribute-value serialization, not text
+    // nodes. This helper is used inside a title="..." attribute value too
+    // (the baseline-price hover), so it must be safe there as well.
+    return div.innerHTML.replace(/"/g, '&quot;');
+  }
+  function fmtPricePair(price) {
+    if (!price) return null;
+    return '$' + price.inUsdPerM.toFixed(2) + ' in / $' + price.outUsdPerM.toFixed(2) + ' out per M tokens';
+  }
   function computeSavings(rows, baselineModel) {
     var actualUsd = 0, baselineUsd = 0, models = {};
     for (var i = 0; i < rows.length; i++) {
@@ -202,6 +226,15 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   var allRows = [];
   var currentBaseline = null;
+  var allConversations = [];
+  var expandedTurnIndex = -1;
+
+  function findConversation(conversationKey) {
+    for (var i = 0; i < allConversations.length; i++) {
+      if (allConversations[i].sessionKey === conversationKey) return allConversations[i];
+    }
+    return null;
+  }
 
   function renderStats(rows, baselineModel) {
     var now = Date.now();
@@ -237,28 +270,71 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
       tr.addEventListener('click', function () { renderSessionDetail(tr.getAttribute('data-session')); });
     });
   }
+  function renderTurnExpansion(row) {
+    var baselinePrice = row.baselinePrices && row.baselinePrices[currentBaseline];
+    var html = '<tr class="turn-expansion"><td colspan="5">';
+    if (row.consideredCandidates && row.consideredCandidates.length) {
+      html += '<div class="expansion-label">Considered</div>' +
+        '<table class="considered"><thead><tr><th>Model</th><th>Seller</th><th class="num">In</th><th class="num">Out</th></tr></thead><tbody>';
+      row.consideredCandidates.forEach(function (c) {
+        html += '<tr' + (c.model === row.actualModel && c.peer === row.actualPeer ? ' class="picked"' : '') + '>' +
+          '<td>' + escapeHtml(c.model) + '</td>' +
+          '<td>' + escapeHtml(c.peer.slice(0, 8)) + '&hellip;</td>' +
+          '<td class="num">$' + c.inUsdPerM.toFixed(2) + '</td>' +
+          '<td class="num">$' + c.outUsdPerM.toFixed(2) + '</td>' +
+          '</tr>';
+      });
+      html += '</tbody></table>';
+    } else {
+      html += '<div class="expansion-label">Considered</div><p class="empty-inline">No candidate data for this turn (reused a prior routing decision, or predates this feature).</p>';
+    }
+    html += '<div class="expansion-label">Baseline</div><p>' +
+      (baselinePrice ? escapeHtml(currentBaseline) + ' &mdash; ' + fmtPricePair(baselinePrice) : 'No baseline price recorded for ' + escapeHtml(currentBaseline || 'this model') + ' on this turn.') +
+      '</p>';
+    html += '<div class="expansion-label">Prompt</div>' +
+      (row.inputMessagePreview ? '<pre class="prompt-preview">' + escapeHtml(row.inputMessagePreview) + '</pre>' : '<p class="empty-inline">No prompt recorded for this turn.</p>');
+    html += '</td></tr>';
+    return html;
+  }
   function renderSessionDetail(conversationKey) {
     var rows = allRows.filter(function (r) { return r.conversationKey === conversationKey; }).sort(function (a, b) { return a.atMs - b.atMs; });
     var savings = computeSavings(rows, currentBaseline);
     renderStats(rows, currentBaseline);
+    var conv = findConversation(conversationKey);
+    var metaParts = [rows.length + ' turn' + (rows.length === 1 ? '' : 's')];
+    if (savings) metaParts.push('saved ' + fmtUsd(savings.savedUsd));
+    if (conv && conv.tool) metaParts.push('via ' + escapeHtml(conv.tool));
+    var titleLabel = (conv && conv.label) ? escapeHtml(conv.label) : (conversationKey.slice(0, 24) + '&hellip;');
     var html = '<a class="back" id="back-link">&larr; All sessions</a>' +
-      '<h2>' + conversationKey.slice(0, 24) + '&hellip; &mdash; ' + rows.length + ' turn' + (rows.length === 1 ? '' : 's') +
-      (savings ? ', saved ' + fmtUsd(savings.savedUsd) : '') + '</h2>' +
+      '<h2>' + titleLabel + ' &mdash; ' + metaParts.join(', ') + '</h2>' +
       '<table><thead><tr><th>Time</th><th>Model</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Saved</th></tr></thead><tbody>';
-    rows.forEach(function (row) {
+    rows.forEach(function (row, index) {
       var rowSavings = computeSavings([row], currentBaseline);
       var tokens = (row.actualPromptTokens || 0) + (row.actualCompletionTokens || 0);
-      html += '<tr>' +
+      var baselinePrice = row.baselinePrices && row.baselinePrices[currentBaseline];
+      var hoverTitle = baselinePrice ? 'vs ' + currentBaseline + ': ' + fmtPricePair(baselinePrice) : '';
+      html += '<tr class="turn-row" data-turn-index="' + index + '"' + (hoverTitle ? ' title="' + escapeHtml(hoverTitle) + '"' : '') + '>' +
         '<td>' + fmtDate(row.atMs) + '</td>' +
         '<td>' + (row.actualModel || '&mdash;') + '</td>' +
         '<td class="num">' + tokens + '</td>' +
         '<td class="num">' + fmtUsd(row.actualUsdcPaid || 0) + '</td>' +
         '<td class="num">' + (rowSavings ? fmtUsd(rowSavings.savedUsd) : '&mdash;') + '</td>' +
         '</tr>';
+      if (index === expandedTurnIndex) html += renderTurnExpansion(row);
     });
     html += '</tbody></table>';
     document.getElementById('content').innerHTML = html;
-    document.getElementById('back-link').addEventListener('click', renderSessionList);
+    document.getElementById('back-link').addEventListener('click', function () {
+      expandedTurnIndex = -1;
+      renderSessionList();
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('tr.turn-row'), function (tr) {
+      tr.addEventListener('click', function () {
+        var index = Number(tr.getAttribute('data-turn-index'));
+        expandedTurnIndex = expandedTurnIndex === index ? -1 : index;
+        renderSessionDetail(conversationKey);
+      });
+    });
   }
   function populateBaselineSelect(rows, storedBaseline) {
     var select = document.getElementById('baseline-select');
@@ -279,8 +355,9 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
       }).catch(function () {});
     });
   }
-  function render(rows, storedBaseline) {
+  function render(rows, storedBaseline, conversations) {
     allRows = rows;
+    allConversations = conversations || [];
     if (!rows.length) {
       document.getElementById('stats').innerHTML = '';
       document.getElementById('content').innerHTML = '<p class="empty">No auto-routed sessions yet.</p>';
@@ -293,11 +370,17 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   Promise.all([
     fetch('/_antseed/routing-decisions').then(function (res) { return res.json(); }),
     fetch('/_antseed/routing-decisions/baseline').then(function (res) { return res.json(); }).catch(function () { return null; }),
+    // Session metadata (which tool/harness, a user-given label) isn't on the
+    // ledger row itself -- conversationKey is deliberately the bare
+    // sessionKey, not tool-qualified (see RoutingDecisionRow's own doc
+    // comment), so it's matched up client-side by sessionKey instead.
+    fetch('/_antseed/conversations').then(function (res) { return res.json(); }).catch(function () { return null; }),
   ])
     .then(function (results) {
       var body = results[0];
       var baselineBody = results[1];
-      render((body && body.rows) || [], baselineBody && baselineBody.baseline);
+      var conversationsBody = results[2];
+      render((body && body.rows) || [], baselineBody && baselineBody.baseline, conversationsBody && conversationsBody.conversations);
     })
     .catch(function (err) {
       document.getElementById('content').innerHTML = '<p class="error">Could not load routing data: ' + (err && err.message ? err.message : err) + '</p>';

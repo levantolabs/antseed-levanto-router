@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTING_DECISIONS_FILE, RoutingLedger } from './ledger.js';
 
-function pending(overrides: Partial<{ model: string; predictedCostUsd: number | null; conversationKey: string | null }> = {}) {
+function pending(overrides: Partial<{
+  model: string;
+  predictedCostUsd: number | null;
+  conversationKey: string | null;
+  consideredCandidates: Array<{ model: string; peer: string; inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
+  inputMessagePreview: string | null;
+}> = {}) {
   return {
     model: overrides.model ?? 'gpt-5.6-luna',
     predictedCostUsd: overrides.predictedCostUsd ?? 0.001,
@@ -16,6 +22,8 @@ function pending(overrides: Partial<{ model: string; predictedCostUsd: number | 
     atMs: Date.now(),
     baselinePrices: { 'claude-opus-5': { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 } },
     conversationKey: overrides.conversationKey ?? null,
+    consideredCandidates: overrides.consideredCandidates ?? [],
+    inputMessagePreview: overrides.inputMessagePreview ?? null,
   };
 }
 
@@ -135,6 +143,66 @@ describe('RoutingLedger (decisions doc SS13 item 12)', () => {
         })}\n`);
         const ledger = new RoutingLedger(dir);
         expect(ledger.all()[0]?.conversationKey).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('consideredCandidates / inputMessagePreview', () => {
+    it('carries the pending decision\'s considered candidates and prompt preview through to the persisted row', () => {
+      const ledger = new RoutingLedger();
+      const candidates = [
+        { model: 'gpt-5.6-luna', peer: '0xAAA', inUsdPerM: 5, outUsdPerM: 20, cachedInUsdPerM: 1.25 },
+        { model: 'kimi-k3', peer: '0xBBB', inUsdPerM: 0.6, outUsdPerM: 2.5, cachedInUsdPerM: null },
+      ];
+      ledger.recordPending('req-1', pending({ consideredCandidates: candidates, inputMessagePreview: 'what is 2+2?' }));
+      const row = ledger.recordResult('req-1', '0xAAA', actual());
+      expect(row?.consideredCandidates).toEqual(candidates);
+      expect(row?.inputMessagePreview).toBe('what is 2+2?');
+    });
+
+    it('defaults to an empty list and null preview for a reused/pinned dispatch with nothing to report', () => {
+      const ledger = new RoutingLedger();
+      ledger.recordPending('req-1', pending());
+      const row = ledger.recordResult('req-1', '0xAAA', actual());
+      expect(row?.consideredCandidates).toEqual([]);
+      expect(row?.inputMessagePreview).toBeNull();
+    });
+
+    it('sanitizes a missing/malformed consideredCandidates and inputMessagePreview on reload, not a crash', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'routing-ledger-considered-'));
+      try {
+        writeFileSync(join(dir, ROUTING_DECISIONS_FILE), `${JSON.stringify({
+          atMs: Date.now(), actualModel: 'kimi-k3', actualPeer: '0xCCC', actualPromptTokens: 1, actualCachedTokens: 0,
+          actualCompletionTokens: 1, actualUsdcPaid: 0.0001, predictedCostUsd: null, predictedInputTokens: null,
+          predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
+          consideredCandidates: 'not-an-array', inputMessagePreview: 42,
+        })}\n`);
+        const ledger = new RoutingLedger(dir);
+        expect(ledger.all()[0]?.consideredCandidates).toEqual([]);
+        expect(ledger.all()[0]?.inputMessagePreview).toBeNull();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('drops a malformed entry within an otherwise-valid consideredCandidates array on reload', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'routing-ledger-considered-partial-'));
+      try {
+        writeFileSync(join(dir, ROUTING_DECISIONS_FILE), `${JSON.stringify({
+          atMs: Date.now(), actualModel: 'kimi-k3', actualPeer: '0xCCC', actualPromptTokens: 1, actualCachedTokens: 0,
+          actualCompletionTokens: 1, actualUsdcPaid: 0.0001, predictedCostUsd: null, predictedInputTokens: null,
+          predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
+          consideredCandidates: [
+            { model: 'kimi-k3', peer: '0xCCC', inUsdPerM: 0.6, outUsdPerM: 2.5, cachedInUsdPerM: null },
+            { model: 'missing-peer-field' },
+          ],
+        })}\n`);
+        const ledger = new RoutingLedger(dir);
+        expect(ledger.all()[0]?.consideredCandidates).toEqual([
+          { model: 'kimi-k3', peer: '0xCCC', inUsdPerM: 0.6, outUsdPerM: 2.5, cachedInUsdPerM: null },
+        ]);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

@@ -702,6 +702,33 @@ describe('LevantoRouter.selectRoute', () => {
       expect(row?.baselinePrices['gpt-5.6-sol']).toBeUndefined(); // never offered -- absent, not fabricated
     });
 
+    it('records the top considered candidates in the peer\'s own ranked order, and a trimmed input-message preview', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => rankedResponse({
+          ranked: [
+            { model: 'gpt-5.6-luna', peer: '0xAAA', estimate: { costUsd: 0.0012, inputTokens: 100, cachedInputTokens: 20, outputTokens: 45 },
+              price: { inUsdPerM: 5, outUsdPerM: 20, cachedInUsdPerM: 1.25 } },
+            { model: 'kimi-k3', peer: '0xBBB', estimate: { costUsd: 0.0002, inputTokens: 100, cachedInputTokens: 0, outputTokens: 45 },
+              price: { inUsdPerM: 0.6, outUsdPerM: 2.5, cachedInUsdPerM: 0 } },
+          ],
+        }),
+      });
+      const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+
+      await router.selectRoute(req('levanto-auto', 'what is the capital of France?'), [peer('0xAAA'), peer('0xBBB')], null, null);
+      router.onResult(peer('0xAAA'), { success: true, latencyMs: 10, tokens: 10, requestId: 'r1' });
+
+      const row = router.getLedgerRows()[0];
+      // Peer's own order preserved, not re-sorted by price (0xAAA first even
+      // though its input price is higher than 0xBBB's).
+      expect(row?.consideredCandidates).toEqual([
+        { model: 'gpt-5.6-luna', peer: '0xAAA', inUsdPerM: 5, outUsdPerM: 20, cachedInUsdPerM: 1.25 },
+        { model: 'kimi-k3', peer: '0xBBB', inUsdPerM: 0.6, outUsdPerM: 2.5, cachedInUsdPerM: null }, // 0 -> null
+      ]);
+      expect(row?.inputMessagePreview).toBe('what is the capital of France?');
+    });
+
     it('does not write a row for a failed dispatch', async () => {
       const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
       const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
@@ -801,6 +828,12 @@ describe('LevantoRouter.selectRoute', () => {
       // ...but records its OWN actual outcome, and null latency (gate skipped the call).
       expect(pinnedRow?.actualUsdcPaid).toBe(0.0003);
       expect(pinnedRow?.routingLatencyMs).toBeNull();
+      // No fresh routing call to draw candidates from -- honest empty, not a
+      // stale copy of the real decision's ranked response.
+      expect(pinnedRow?.consideredCandidates).toEqual([]);
+      // The prompt itself is still known (same last user message, no network
+      // call needed to read it), so the preview is still recorded.
+      expect(pinnedRow?.inputMessagePreview).toBe('hello');
     });
   });
 

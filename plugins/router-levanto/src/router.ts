@@ -118,6 +118,7 @@ interface RouteResponseBody {
 export const DEFAULT_BASELINE_MODELS: readonly string[] = ['claude-opus-5', 'gpt-5.6-sol'];
 
 type BaselinePrices = Record<string, { inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
+type ConsideredCandidates = Array<{ model: string; peer: string; inUsdPerM: number; outUsdPerM: number; cachedInUsdPerM: number | null }>;
 
 /**
  * One entry per DISTINCT model actually present in this decision's ranked
@@ -148,6 +149,25 @@ function computeBaselinePrices(ranked: RouteResponseBody['ranked']): BaselinePri
     }
   }
   return out;
+}
+
+/** Bounds how many candidates a ledger row retains -- generous for a "top few options" drill-down, small enough the on-disk ledger doesn't balloon per row. */
+const MAX_CONSIDERED_CANDIDATES = 10;
+
+/**
+ * The routing peer's own top candidates, in its own ranked order (not
+ * re-sorted here) -- so a host UI can show "what else was considered" for
+ * a historical decision. Capped, not the full response: `ranked` can be
+ * arbitrarily long, and nothing downstream needs more than a handful.
+ */
+function topConsideredCandidates(ranked: RouteResponseBody['ranked']): ConsideredCandidates {
+  return ranked.slice(0, MAX_CONSIDERED_CANDIDATES).map((entry) => ({
+    model: entry.model,
+    peer: entry.peer,
+    inUsdPerM: entry.price.inUsdPerM,
+    outUsdPerM: entry.price.outUsdPerM,
+    cachedInUsdPerM: entry.price.cachedInUsdPerM > 0 ? entry.price.cachedInUsdPerM : null,
+  }));
 }
 
 /** Head+tail trim, matching the "trimmed last user turn" shape inputMessage expects. */
@@ -518,6 +538,11 @@ export class LevantoRouter {
           atMs: Date.now(),
           baselinePrices: pinned.baselinePrices,
           conversationKey: conversation?.sessionKey ?? null,
+          // No fresh routing call on a reused/pinned dispatch, so no ranked
+          // response to draw candidates from -- honest empty, not a stale
+          // copy of the original decision's list.
+          consideredCandidates: [],
+          inputMessagePreview: trimForInputMessage(lastUserText) || null,
         });
         return [pinnedToRouteCandidate(pinned, substituteModel(req, pinned.serviceId))];
       }
@@ -649,6 +674,7 @@ export class LevantoRouter {
     // item 10, resolved. Duplicated onto every PinnedDecision below the same
     // way cqt already is, since it's a request-level value.
     const baselinePrices = computeBaselinePrices(parsed.ranked);
+    const consideredCandidates = topConsideredCandidates(parsed.ranked);
 
     let ranked: PinnedDecision[] = [];
     for (const entry of parsed.ranked) {
@@ -740,6 +766,12 @@ export class LevantoRouter {
       atMs: Date.now(),
       baselinePrices: winner.baselinePrices,
       conversationKey: conversation?.sessionKey ?? null,
+      // Independent of allowedPeerIds re-filtering above -- what the peer
+      // actually offered, not what survived the client-side filter, so a
+      // "what else was considered" view isn't silently missing candidates
+      // the buyer's own preferences excluded.
+      consideredCandidates,
+      inputMessagePreview: trimForInputMessage(lastUserText) || null,
     });
 
     return ranked.map((c) => pinnedToRouteCandidate(c, substituteModel(req, c.serviceId)));

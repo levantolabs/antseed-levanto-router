@@ -21,6 +21,7 @@ import type { RoutingDecisionRow } from '@antseed/node';
 export type { RoutingDecisionRow } from '@antseed/node';
 
 type BaselinePrices = RoutingDecisionRow['baselinePrices'];
+type ConsideredCandidates = RoutingDecisionRow['consideredCandidates'];
 
 /** The predicted half of a row, captured at selectRoute time -- consumed by the matching onResult. */
 export interface PendingDecision {
@@ -34,6 +35,8 @@ export interface PendingDecision {
   atMs: number;
   baselinePrices: BaselinePrices;
   conversationKey: string | null;
+  consideredCandidates: ConsideredCandidates;
+  inputMessagePreview: string | null;
 }
 
 /** File name within the plugin's data directory -- one JSON row per line, append-only. */
@@ -89,6 +92,20 @@ function sanitizeBaselinePrices(value: unknown): BaselinePrices {
   return out;
 }
 
+/** Reload-time validation for consideredCandidates -- absent/malformed (rows persisted before this field existed) sanitizes to []. */
+function sanitizeConsideredCandidates(value: unknown): ConsideredCandidates {
+  if (!Array.isArray(value)) return [];
+  const out: ConsideredCandidates = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.model !== 'string' || typeof e.peer !== 'string') continue;
+    if (typeof e.inUsdPerM !== 'number' || typeof e.outUsdPerM !== 'number') continue;
+    out.push({ model: e.model, peer: e.peer, inUsdPerM: e.inUsdPerM, outUsdPerM: e.outUsdPerM, cachedInUsdPerM: numOrNull(e.cachedInUsdPerM) });
+  }
+  return out;
+}
+
 /** Reload-time validation, same spirit as ConversationStore's sanitizeRecord (apps/cli/src/proxy/conversation-store.ts) -- a corrupt or partially-written line is skipped, not fatal. */
 function sanitizeRow(value: unknown): RoutingDecisionRow | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
@@ -110,6 +127,8 @@ function sanitizeRow(value: unknown): RoutingDecisionRow | null {
     routingLatencyMs: numOrNull(r.routingLatencyMs),
     baselinePrices: sanitizeBaselinePrices(r.baselinePrices),
     conversationKey: strOrNull(r.conversationKey),
+    consideredCandidates: sanitizeConsideredCandidates(r.consideredCandidates),
+    inputMessagePreview: strOrNull(r.inputMessagePreview),
   };
 }
 
@@ -214,6 +233,8 @@ export class RoutingLedger {
       routingLatencyMs: pending.routingLatencyMs,
       baselinePrices: pending.baselinePrices,
       conversationKey: pending.conversationKey,
+      consideredCandidates: pending.consideredCandidates,
+      inputMessagePreview: pending.inputMessagePreview,
     };
     this.rows.push(row);
     if (this.rows.length > MAX_LEDGER_ROWS) this.rows.shift();

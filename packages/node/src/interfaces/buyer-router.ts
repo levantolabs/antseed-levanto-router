@@ -91,6 +91,32 @@ export type RoutingDecisionRow = {
    * `null` on rows persisted before this field existed.
    */
   conversationKey: string | null;
+  /**
+   * The top few candidates the routing peer actually offered for this
+   * decision, in the peer's own ranked order (not re-sorted) -- lets a host
+   * UI show "what else was considered" for a historical turn, not just the
+   * winner. Capped to a small number by the router before this is recorded
+   * (not this type's concern how many); empty for a reused/pinned dispatch
+   * that never made a fresh routing call, and for rows persisted before
+   * this field existed.
+   */
+  consideredCandidates: Array<{
+    model: string;
+    peer: string;
+    inUsdPerM: number;
+    outUsdPerM: number;
+    cachedInUsdPerM: number | null;
+  }>;
+  /**
+   * The same trimmed excerpt of the last user turn already sent to the
+   * routing peer as `RouteRequestBody.inputMessage` -- recording it locally
+   * is not a new exposure (it already left the machine over the wire), just
+   * new local retention, so a host UI can show what prompt a historical
+   * decision was actually made for. `null` when unavailable (no
+   * conversation content to trim) or for rows persisted before this field
+   * existed.
+   */
+  inputMessagePreview: string | null;
 };
 
 /**
