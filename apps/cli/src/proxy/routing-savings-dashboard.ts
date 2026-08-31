@@ -19,55 +19,120 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
 <meta charset="utf-8">
 <title>Auto-routing savings</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-  :root { color-scheme: light dark; }
+  /* Same token set as apps/desktop/src/renderer/global.scss -- this page
+     lives outside the Electron renderer (opened via shell.openExternal), so
+     the tokens are copied rather than shared, but the values are the
+     AntSeed brand palette, not a page-local invention. */
+  :root {
+    color-scheme: light dark;
+    --bg-primary: #fbf9f4;
+    --bg-card: #ffffff;
+    --text-primary: #111714;
+    --text-secondary: #4b5450;
+    --text-muted: #6b7570;
+    --accent: #008359;
+    --accent-rgb: 0, 131, 89;
+    --border: #d4dbd7;
+    --border-light: #e4e9e5;
+    --danger: #ef4444;
+    --font-sans: 'Geist', system-ui, -apple-system, 'Segoe UI', sans-serif;
+    --radius: 16px;
+    --radius-sm: 8px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg-primary: #1c1c1e;
+      --bg-card: #2a2a2c;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --text-muted: #8b949e;
+      --accent: #1fd87a;
+      --accent-rgb: 31, 216, 122;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-light: rgba(255, 255, 255, 0.04);
+      --danger: #ff7b72;
+    }
+  }
+  * { box-sizing: border-box; }
   body {
-    font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font: 14px/1.5 var(--font-sans);
     max-width: 900px;
     margin: 0 auto;
     padding: 32px 20px 64px;
-    color: #1a1a1a;
-    background: #fff;
+    color: var(--text-primary);
+    background: var(--bg-primary);
+    -webkit-font-smoothing: antialiased;
   }
-  @media (prefers-color-scheme: dark) {
-    body { color: #e6e6e6; background: #16171a; }
-    .card { background: #1f2023 !important; border-color: #303136 !important; }
-    th { color: #9a9ba0 !important; border-color: #303136 !important; }
-    td { border-color: #26272b !important; }
-    tr:hover td { background: #202124 !important; }
-  }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .subtitle { color: #767680; margin: 0 0 24px; font-size: 13px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand svg { flex: none; color: var(--accent); }
+  h1 { font-size: 20px; font-weight: 600; margin: 0; }
+  .subtitle { color: var(--text-muted); margin: 0 0 24px; font-size: 13px; }
   .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
   .card {
     flex: 1 1 160px;
-    background: #f7f7f8;
-    border: 1px solid #e5e5e7;
-    border-radius: 10px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     padding: 14px 16px;
   }
-  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: #767680; margin-bottom: 4px; }
-  .card .value { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
-  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 13px; color: #767680; }
+  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
+  .card .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 13px; color: var(--text-muted); }
   .toolbar select {
-    font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 7px;
-    border: 1px solid #d0d0d5; background: #fff; color: #1a1a1a;
+    appearance: none;
+    font: inherit; font-size: 13px; padding: 6px 28px 6px 10px; border-radius: var(--radius-sm);
+    border: 1px solid var(--border); background-color: var(--bg-card); color: var(--text-primary);
+    background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%236b7570' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
   }
-  .back { display: inline-block; margin-bottom: 14px; font-size: 13px; color: #4a7fd6; cursor: pointer; text-decoration: none; }
+  .toolbar select:focus { outline: none; border-color: var(--accent); }
+  .back { display: inline-block; margin-bottom: 14px; font-size: 13px; font-weight: 500; color: var(--accent); cursor: pointer; text-decoration: none; }
   .back:hover { text-decoration: underline; }
   table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em; color: #767680; font-weight: 400; padding: 0 10px 8px; border-bottom: 1px solid #e5e5e7; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); font-weight: 600; padding: 0 10px 8px; border-bottom: 1px solid var(--border); }
   th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  td { padding: 9px 10px; border-bottom: 1px solid #eee; }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--border-light); }
   tr[data-session] { cursor: pointer; }
-  tr:hover td { background: #fafafa; }
-  .empty, .error { color: #767680; padding: 40px 0; text-align: center; }
-  .error { color: #c0392b; }
-  h2 { font-size: 15px; margin: 0 0 12px; }
+  tr:hover td { background: rgba(var(--accent-rgb), 0.05); }
+  .empty, .error { color: var(--text-muted); padding: 40px 0; text-align: center; }
+  .error { color: var(--danger); }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
 </style>
 </head>
 <body>
-<h1>Auto-routing savings</h1>
+<div class="brand">
+  <svg width="24" height="24" viewBox="0 -1.5 28 28" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <path d="M14 9.62502C14.9665 9.62502 15.75 8.76317 15.75 7.70002C15.75 6.63688 14.9665 5.77502 14 5.77502C13.0335 5.77502 12.25 6.63688 12.25 7.70002C12.25 8.76317 13.0335 9.62502 14 9.62502Z" fill="currentColor"/>
+    <path d="M13.9998 15.4C15.3529 15.4 16.4498 14.1464 16.4498 12.6C16.4498 11.0537 15.3529 9.80005 13.9998 9.80005C12.6467 9.80005 11.5498 11.0537 11.5498 12.6C11.5498 14.1464 12.6467 15.4 13.9998 15.4Z" fill="currentColor"/>
+    <path d="M14.0001 23.45C15.7398 23.45 17.1501 21.5696 17.1501 19.25C17.1501 16.9305 15.7398 15.05 14.0001 15.05C12.2604 15.05 10.8501 16.9305 10.8501 19.25C10.8501 21.5696 12.2604 23.45 14.0001 23.45Z" fill="currentColor"/>
+    <path opacity="0.7" d="M12.9498 5.94998L9.7998 2.09998" stroke="currentColor" stroke-width="0.6" stroke-linecap="round"/>
+    <path opacity="0.7" d="M15.0498 5.94998L18.1998 2.09998" stroke="currentColor" stroke-width="0.6" stroke-linecap="round"/>
+    <path d="M9.7998 2.97498C10.283 2.97498 10.6748 2.58322 10.6748 2.09998C10.6748 1.61673 10.283 1.22498 9.7998 1.22498C9.31655 1.22498 8.9248 1.61673 8.9248 2.09998C8.9248 2.58322 9.31655 2.97498 9.7998 2.97498Z" fill="currentColor"/>
+    <path d="M18.2002 2.97498C18.6835 2.97498 19.0752 2.58322 19.0752 2.09998C19.0752 1.61673 18.6835 1.22498 18.2002 1.22498C17.717 1.22498 17.3252 1.61673 17.3252 2.09998C17.3252 2.58322 17.717 2.97498 18.2002 2.97498Z" fill="currentColor"/>
+    <path opacity="0.5" d="M12.25 11.2001L6.125 7.70007" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.5" d="M15.75 11.2001L21.875 7.70007" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path d="M6.2998 8.57495C6.78305 8.57495 7.1748 8.1832 7.1748 7.69995C7.1748 7.2167 6.78305 6.82495 6.2998 6.82495C5.81655 6.82495 5.4248 7.2167 5.4248 7.69995C5.4248 8.1832 5.81655 8.57495 6.2998 8.57495Z" fill="currentColor"/>
+    <path d="M21.7002 8.57495C22.1835 8.57495 22.5752 8.1832 22.5752 7.69995C22.5752 7.2167 22.1835 6.82495 21.7002 6.82495C21.217 6.82495 20.8252 7.2167 20.8252 7.69995C20.8252 8.1832 21.217 8.57495 21.7002 8.57495Z" fill="currentColor"/>
+    <path opacity="0.5" d="M11.5499 13.3L4.8999 14" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.5" d="M16.4502 13.3L23.1002 14" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path d="M4.8999 14.875C5.38315 14.875 5.7749 14.4832 5.7749 14C5.7749 13.5168 5.38315 13.125 4.8999 13.125C4.41666 13.125 4.0249 13.5168 4.0249 14C4.0249 14.4832 4.41666 14.875 4.8999 14.875Z" fill="currentColor"/>
+    <path d="M23.1001 14.875C23.5833 14.875 23.9751 14.4832 23.9751 14C23.9751 13.5168 23.5833 13.125 23.1001 13.125C22.6168 13.125 22.2251 13.5168 22.2251 14C22.2251 14.4832 22.6168 14.875 23.1001 14.875Z" fill="currentColor"/>
+    <path opacity="0.5" d="M11.9001 18.2L5.6001 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.5" d="M16.1001 18.2L22.4001 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path d="M5.6001 21.875C6.08334 21.875 6.4751 21.4832 6.4751 21C6.4751 20.5168 6.08334 20.125 5.6001 20.125C5.11685 20.125 4.7251 20.5168 4.7251 21C4.7251 21.4832 5.11685 21.875 5.6001 21.875Z" fill="currentColor"/>
+    <path d="M22.3999 21.875C22.8832 21.875 23.2749 21.4832 23.2749 21C23.2749 20.5168 22.8832 20.125 22.3999 20.125C21.9167 20.125 21.5249 20.5168 21.5249 21C21.5249 21.4832 21.9167 21.875 22.3999 21.875Z" fill="currentColor"/>
+    <path opacity="0.15" d="M6.2999 7.69995L4.8999 14" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.15" d="M21.7002 7.69995L23.1002 14" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.15" d="M4.8999 14L5.5999 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+    <path opacity="0.15" d="M23.0999 14L22.3999 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
+  </svg>
+  <h1>Auto-routing savings</h1>
+</div>
 <p class="subtitle">Every session routed through your model router, with savings vs. retail pricing.</p>
 <div class="toolbar">
   <label for="baseline-select">Comparing against</label>
