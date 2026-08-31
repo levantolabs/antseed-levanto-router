@@ -2711,3 +2711,57 @@ earlier in this log).
 
 **Ground truth reference:** none of the four docs specify where routing-savings UI should
 live at this granularity.
+
+## [2026-08-31] Host-side conversation store no longer duplicates the router plugin's own pin
+
+**Type:** Fixes a real bug: an auto-routed chat's model could get permanently stuck on
+whatever peer/model first served it, with no way back to fresh per-turn routing.
+
+**Root cause:** `ConversationStore` (`apps/cli/src/proxy/conversation-store.ts`) and
+`BuyerProxy` (`apps/cli/src/proxy/buyer-proxy.ts`) kept their own host-side notion of a
+conversation "pin" -- `touch()` seeded `pinnedModel` from the first resolved model, and
+`recordRoutedModel()` kept overwriting it with whatever model most recently served the
+chat, all under `peerSource: 'auto'`. `chatPinnedModel` in `buyer-proxy.ts` then read that
+value back and substituted it straight into `effectiveRoutedModel` -- for an auto-routed
+(`ROUTED_MODEL_ALIAS`) chat, this ran the request against a fixed seller *before* the router
+plugin ever saw the alias, permanently bypassing the plugin's own, correct continuation
+logic (`ConversationState.isNewUserMessage`/`getPinned` in
+`plugins/router-levanto/src/conversation-state.ts`, consulted by
+`LevantoRouter.selectRoute`). Once a tool-loop's later turns weren't a fresh user message,
+the host had already substituted a concrete model, so the plugin's own same-turn logic
+never got a chance to run fresh. That's the "apex-crypto-agent" pin-poisoning symptom: a
+chat that should route fresh every user turn instead calcified onto its first answer.
+
+**The fix:** `pinnedModel` is now written exactly once, only via
+`setPinnedModel(id, model, 'user')` -- either a genuine user pin from the desktop, or the
+pre-existing explicit-pin paths in `buyer-proxy.ts` (a raw request body already naming a
+concrete `<peerId>@<service>`, an alias substitution, or a system-proxy pin override).
+`touch()` no longer seeds it from `lastModel`, and `recordRoutedModel()` no longer touches
+it at all -- both now only ever move `lastModel` forward, which is display/history data,
+not a routing input. `chatPinnedModel` is gated strictly on `peerSource === 'user'`, with no
+fallback to a stale `pinnedModel`, so an already-poisoned on-disk record self-heals on its
+next `peerSource: 'auto'` request rather than needing a migration.
+
+**Not the same bug, kept separate:** a model-only request (no alias, a concrete model named
+directly) never touched the router plugin at all, and had its own legitimate soft
+peer-affinity -- stick with whichever peer last served this exact conversation, purely to
+pick among candidates for whatever model this turn already resolved to, with normal
+failover if that peer's gone. That lived on `preferredConversationPeerId`, sourced from the
+same `pinnedModel` field the fix above just stopped writing, so removing it outright would
+have silently killed a real feature (a passing regression test,
+`'conversation routing keeps the actual peer as a soft preference and fails over when
+needed'`, would have gone from green to a changed premise, undetected). Re-pointed
+`preferredConversationPeerId` at `lastModel` instead -- the field that still updates on
+every request regardless of `peerSource` -- so peer-level stickiness for model-only
+requests, and for the (harmless) case of a peer matching the router's own auto-selected
+candidates, survives untouched. `chatPinnedModel`'s model-level substitution and
+`preferredConversationPeerId`'s peer-only reordering are now fully decoupled: the former can
+only ever come from a genuine pin, the latter never substitutes a model.
+
+**Verification:** `apps/cli` full suite 477/479 (the 2 failures are the pre-existing
+`autoSubscriptionEnabled`/`cqt` fixture mismatch already documented earlier in this log,
+confirmed unchanged against clean `HEAD` via `git stash`). `plugins/router-levanto`'s own
+suite, which owns the continuation logic this fix now defers to, 69/69 unaffected.
+
+**Ground truth reference:** none of the four docs specify host-vs-plugin ownership of
+continuation state at this level of detail.

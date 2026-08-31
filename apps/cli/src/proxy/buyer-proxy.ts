@@ -2306,14 +2306,27 @@ export class BuyerProxy {
     const storedConversation = conversationIdentity && trackedConversationKey
       ? this._conversations.get(`${conversationIdentity.tool}:${trackedConversationKey}`)
       : null
-    const storedAutoRoute = storedConversation?.peerSource === 'auto' && storedConversation.pinnedModel
-      ? parsePeerPinnedService(storedConversation.pinnedModel)
-      : null
+    // Only a genuine user pin (peerSource === 'user') ever substitutes a
+    // concrete model in here. An auto-routed chat keeps sending its sentinel
+    // model through untouched on every request -- substituting the
+    // previously-routed model here would run the request against a fixed
+    // seller before the router plugin ever saw it, permanently bypassing its
+    // own (correct) continuation logic. See model-routing-runlog.md.
     const chatPinnedModel = storedConversation?.peerSource === 'user'
       ? storedConversation.pinnedModel
-      : storedAutoRoute?.service ?? storedConversation?.pinnedModel ?? null
+      : null
+    // Separately, and only at the peer level: remember whichever peer last
+    // actually served this conversation, as a soft preference for whatever
+    // model this request (or the router, for an auto-routed chat) ends up
+    // asking for. This never substitutes a model -- it only nudges peer
+    // selection among candidates for an already-decided model, with normal
+    // failover if that peer is no longer viable. A genuine user pin already
+    // carries its own peer via chatPinnedModel, so it's excluded here.
+    const lastRoutedPeer = storedConversation?.peerSource !== 'user' && storedConversation?.lastModel
+      ? parsePeerPinnedService(storedConversation.lastModel)
+      : null
     const preferredPeerHeader = normalizePeerId(serializedReq.headers['x-antseed-prefer-peer'] ?? '')
-    const preferredConversationPeerId = preferredPeerHeader ?? storedAutoRoute?.peerId ?? null
+    const preferredConversationPeerId = preferredPeerHeader ?? lastRoutedPeer?.peerId ?? null
     const effectiveRoutedModel = chatPinnedModel ?? this._defaultRoutedModel
     let trackedConversationId: string | null = storedConversation?.id ?? null
 

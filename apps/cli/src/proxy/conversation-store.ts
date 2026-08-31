@@ -22,14 +22,15 @@ export type StoredConversation = {
   snippet: string
   /** User-assigned name; overrides the snippet for display when set. */
   label: string | null
-  /** Per-chat route as `<peerId>@<service>`. Automatic routes are soft
-      affinity; user-selected routes are hard pins. Null only until the
-      chat's first resolved request. */
+  /** Per-chat route as `<peerId>@<service>`, only ever set for a genuine
+      user pin (via setPinnedModel(id, model, 'user')). Null for an
+      auto-routed chat -- that continuation stability lives in the router
+      plugin's own ConversationState, not here (model-routing-runlog.md). */
   pinnedModel: string | null
-  /** How the route's peer was chosen. 'auto' means routing picked it (first
-      request affinity, or the desktop re-pointing chats when a seller is
-      pinned for the model); 'user' means the user chose this seller for this
-      specific chat, which nothing overrides until they clear it. */
+  /** How the route's peer was chosen. 'auto' means the chat has never been
+      explicitly pinned (routing decides fresh every request); 'user' means
+      the user chose this seller for this specific chat, which nothing
+      overrides until they clear it. */
   peerSource: 'auto' | 'user'
   /** Model that served the most recent request (`<peerId>@<service>`), for display. */
   lastModel: string | null
@@ -194,9 +195,12 @@ export class ConversationStore {
    * Record activity for a conversation, creating it on first sight. The
    * snippet only sticks at creation — later turns keep the original label.
    *
-   * The first model that actually serves the chat becomes its pin: the
-   * session default only steers chats that haven't resolved a request yet,
-   * so changing the default never re-routes an existing conversation.
+   * `pinnedModel` is never seeded or touched here for an auto-routed chat --
+   * only `setPinnedModel(id, model, 'user')` may set it. Auto continuation
+   * stability (staying on the same seller mid tool-loop) is the router
+   * plugin's own job via its ConversationState.isNewUserMessage/getPinned,
+   * not this store's; a host-side pin here previously raced and permanently
+   * overrode it (model-routing-runlog.md has the writeup).
    */
   touch(input: { tool: string; sessionKey: string; snippet?: string | null; lastModel?: string | null }): StoredConversation {
     const id = conversationId(input.tool, input.sessionKey)
@@ -208,7 +212,6 @@ export class ConversationStore {
         ...existing,
         lastActiveAt: now,
         lastModel: input.lastModel ?? existing.lastModel,
-        pinnedModel: existing.pinnedModel ?? input.lastModel ?? null,
         snippet: existing.snippet || (input.snippet ?? ''),
       }
     } else {
@@ -218,7 +221,7 @@ export class ConversationStore {
         sessionKey: input.sessionKey,
         snippet: input.snippet ?? '',
         label: null,
-        pinnedModel: input.lastModel ?? null,
+        pinnedModel: null,
         peerSource: 'auto',
         lastModel: input.lastModel ?? null,
         spentUsdc: '0',
@@ -296,14 +299,18 @@ export class ConversationStore {
     return this._byId.get(conversationId(tool, sessionKey))?.pinnedModel ?? null
   }
 
+  /**
+   * Records what actually served this chat, for display/history only.
+   * Never touches `pinnedModel` -- a genuine pin only ever comes from
+   * `setPinnedModel(id, model, 'user')`. An auto-routed chat keeps sending
+   * its sentinel model on every request; continuation stability within one
+   * tool-loop is the router plugin's job, not this store's.
+   */
   recordRoutedModel(id: string, routedModel: string): StoredConversation | null {
     const existing = this._byId.get(id)
     if (!existing) return null
     const record = {
       ...existing,
-      pinnedModel: existing.peerSource === 'user' && existing.pinnedModel
-        ? existing.pinnedModel
-        : routedModel,
       lastModel: routedModel,
       lastActiveAt: Date.now(),
     }

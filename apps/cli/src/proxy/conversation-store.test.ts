@@ -28,7 +28,7 @@ test('touch creates a conversation and keeps the original snippet', async () => 
   }
 })
 
-test('first resolved model becomes the pin and later touches never replace it', async () => {
+test('touch never sets pinnedModel from a resolved model — only a genuine user pin does', async () => {
   const dir = await makeDir()
   try {
     const store = new ConversationStore(dir)
@@ -39,19 +39,57 @@ test('first resolved model becomes the pin and later touches never replace it', 
     const created = store.touch({ tool: 'codex', sessionKey: 's1' })
     assert.equal(created.pinnedModel, null)
 
-    // The first request that resolves a model pins the chat to it.
-    const pinned = store.touch({ tool: 'codex', sessionKey: 's1', lastModel: firstModel })
-    assert.equal(pinned.pinnedModel, firstModel)
+    // The first request that resolves a model does NOT pin the chat to it —
+    // continuation stability within a tool-loop is the router plugin's job
+    // (ConversationState.isNewUserMessage/getPinned), not this store's. A
+    // host-side pin here previously overrode the plugin's own logic on every
+    // later turn (model-routing-runlog.md).
+    const touched1 = store.touch({ tool: 'codex', sessionKey: 's1', lastModel: firstModel })
+    assert.equal(touched1.pinnedModel, null)
+    assert.equal(touched1.lastModel, firstModel)
 
-    // A later request served by a different route (default changed) keeps
-    // the original pin — the default only steers chats that haven't started.
-    const touched = store.touch({ tool: 'codex', sessionKey: 's1', lastModel: laterModel })
-    assert.equal(touched.pinnedModel, firstModel)
-    assert.equal(touched.lastModel, laterModel)
+    // A later request served by a different route still leaves pinnedModel
+    // untouched — an auto-routed chat keeps sending its sentinel model
+    // fresh on every request, so it can genuinely re-route.
+    const touched2 = store.touch({ tool: 'codex', sessionKey: 's1', lastModel: laterModel })
+    assert.equal(touched2.pinnedModel, null)
+    assert.equal(touched2.lastModel, laterModel)
 
-    // A brand-new chat pins to its first model immediately.
+    // A brand-new chat never starts pinned either.
     const fresh = store.touch({ tool: 'codex', sessionKey: 's2', lastModel: laterModel })
-    assert.equal(fresh.pinnedModel, laterModel)
+    assert.equal(fresh.pinnedModel, null)
+    await store.flush()
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('recordRoutedModel never populates pinnedModel for an auto-routed chat, only lastModel', async () => {
+  const dir = await makeDir()
+  try {
+    const store = new ConversationStore(dir)
+    const id = conversationId('codex', 's1')
+    store.touch({ tool: 'codex', sessionKey: 's1' })
+
+    const firstRoute = 'a'.repeat(40) + '@gpt-5.4'
+    const routed1 = store.recordRoutedModel(id, firstRoute)
+    assert.equal(routed1?.pinnedModel, null)
+    assert.equal(routed1?.lastModel, firstRoute)
+    assert.equal(routed1?.peerSource, 'auto')
+
+    // A second, differently-routed request still leaves pinnedModel alone —
+    // the chat keeps sending its sentinel model fresh every time.
+    const secondRoute = 'b'.repeat(40) + '@glm-5'
+    const routed2 = store.recordRoutedModel(id, secondRoute)
+    assert.equal(routed2?.pinnedModel, null)
+    assert.equal(routed2?.lastModel, secondRoute)
+
+    // A genuine user pin is untouched by recordRoutedModel.
+    store.setPinnedModel(id, 'c'.repeat(40) + '@claude-opus-4-8', 'user')
+    const routedAfterPin = store.recordRoutedModel(id, 'd'.repeat(40) + '@gpt-5.4')
+    assert.equal(routedAfterPin?.pinnedModel, 'c'.repeat(40) + '@claude-opus-4-8')
+    assert.equal(routedAfterPin?.peerSource, 'user')
+    assert.equal(routedAfterPin?.lastModel, 'd'.repeat(40) + '@gpt-5.4')
     await store.flush()
   } finally {
     await rm(dir, { recursive: true, force: true })
@@ -150,7 +188,7 @@ test('peerSource marks user-chosen pins, resets on clear, survives reload', asyn
     const store = new ConversationStore(dir)
     const id = conversationId('codex', 's1')
 
-    // Auto-pinned on first request: source is 'auto'.
+    // A resolved first request never pins — source defaults to 'auto'.
     const pinned = store.touch({ tool: 'codex', sessionKey: 's1', lastModel: 'a'.repeat(40) + '@gpt-5.4' })
     assert.equal(pinned.peerSource, 'auto')
 

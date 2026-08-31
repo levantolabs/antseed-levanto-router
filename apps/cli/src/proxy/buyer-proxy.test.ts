@@ -761,7 +761,9 @@ test('conversation routing keeps the actual peer as a soft preference and fails 
   assert.deepEqual(attempts, [preferred.peerId, rankedFirst.peerId])
 
   const stored = (proxy as any)._conversations.get('vpr:conversation-soft-affinity')
-  assert.equal(stored?.pinnedModel, `${rankedFirst.peerId}@Kimi K3`)
+  // A model-only request never pins -- soft peer affinity below is derived
+  // from lastModel, not pinnedModel.
+  assert.equal(stored?.pinnedModel, null)
   assert.equal(stored?.lastModel, `${rankedFirst.peerId}@Kimi K3`)
 
   attempts.length = 0
