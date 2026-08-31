@@ -105,6 +105,7 @@ import { PeerAttributionTracker, HEARTBEAT_MS } from './peer-attribution.js'
 import { estimateAnthropicPromptTokens, isCountTokensPath } from './count-tokens.js'
 import { getCachedVerdict, runVerifier, verifierSupportFingerprint, type CachedVerdict, type VerifierPolicy, type SellerReach, type VerifyOutcome } from '../plugins/verifier.js'
 import { loadConfig } from '../config/loader.js'
+import { ROUTING_SAVINGS_DASHBOARD_HTML } from './routing-savings-dashboard.js'
 
 // Re-export for backward compatibility (used by tests and other consumers)
 export { selectCandidatePeersForRouting, type CandidatePeerRouteSelection } from './routing.js'
@@ -1934,6 +1935,17 @@ export class BuyerProxy {
       const rows = router?.getRoutingDecisions?.() ?? []
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, rows }))
+      return
+    }
+
+    if (path === '/_antseed/routing-decisions/dashboard' && method === 'GET') {
+      // A real, standalone HTML page over the same data as the JSON route
+      // above -- opened in the user's browser from the desktop app's Profile
+      // pill (payments:open-savings-page). Not part of apps/payments' web
+      // SPA: that app is deliberately retired down to wallet-signing pages
+      // only (its own App.tsx says so), and this needs no wallet at all.
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end(ROUTING_SAVINGS_DASHBOARD_HTML)
       return
     }
 

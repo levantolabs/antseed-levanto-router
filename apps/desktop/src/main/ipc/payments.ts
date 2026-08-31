@@ -12,6 +12,7 @@ import {
   ensureSecureIdentity,
   getSecureIdentity,
 } from '../identity.js';
+import { resolveBuyerProxyPort } from '../runtime/active-config.js';
 import {
   BYTES32_RE,
   type DesktopBuyerUsageTotals,
@@ -115,6 +116,29 @@ export function registerPaymentsIpc(): void {
       return { ok: true, url: fallbackUrl };
     } catch (err) {
       console.error('[payments] open-pay-page failed:', err instanceof Error ? err.message : String(err));
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  // Read-only sessions/metrics page -- unlike open-pay-page, this needs no
+  // wallet signature and no bearer-token portal, so it opens a page served
+  // directly by the already-running, already-unauthenticated buyer-proxy
+  // control plane instead of starting the (deliberately wallet-signing-only)
+  // payments portal.
+  ipcMain.handle('payments:open-savings-page', async () => {
+    try {
+      const port = await resolveBuyerProxyPort();
+      const url = `${LOCALHOST_URL}:${port}/_antseed/routing-decisions/dashboard`;
+      try {
+        await shell.openExternal(url);
+        return { ok: true, url };
+      } catch (err) {
+        console.warn('[payments] system browser launch failed:', err instanceof Error ? err.message : String(err));
+      }
+      console.log('[payments] no system browser available — using Electron popup');
+      openPaymentsPopup(url);
+      return { ok: true, url };
+    } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
