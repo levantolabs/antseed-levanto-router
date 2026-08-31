@@ -12,7 +12,6 @@ import {
   Mic01Icon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
-  RouteIcon,
   Search01Icon,
   SecurityWarningIcon,
   Shield01Icon
@@ -20,13 +19,10 @@ import {
 import { displayModelLabel } from '../../../modules/catalog/model-identity';
 import { findCatalogEntry } from '../../../modules/catalog/model-catalog';
 import { isLevantoAutoSelected, LEVANTO_AUTO_LABEL } from '../../../modules/routing/levanto-auto';
-import { useCachedResource } from '../../../modules/app/cached-resource';
-import { routingDecisionsResource } from '../../../modules/app/vpr-resources';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { useRetainedState } from '../../hooks/useRetainedState';
 import { ChatBubble } from '../chat/ChatBubble';
-import { ConversationRoutingHistory } from '../chat/ConversationRoutingHistory';
 import { isImageRequestPhase } from '../chat/chat-shared';
 import { hasSearchPhraseMatch, isToolResultOnlyMessage } from '../chat/chat-utils.js';
 import { WalkingAnt } from '../chat/WalkingAnt';
@@ -583,26 +579,6 @@ export function ChatView({ onSelectView }: ChatViewProps) {
   // subsequent send. Gated on the global selection also currently being
   // Auto so an explicitly pinned chat (`peerSource: 'user'`) is unaffected.
   const isAutoModeActive = !imageMode && !currentServiceOption && isLevantoAutoSelected(snap.vprRouteSelection.model);
-
-  // Per-conversation routing history (a drill-down alongside the aggregate
-  // savings dashboard) -- filtered client-side from the same cached resource
-  // VprActivityView/VprHomeView already poll, on RoutingDecisionRow.conversationKey,
-  // which is exactly this conversation's own id for VPR chats (see that
-  // field's doc comment in packages/node/src/interfaces/buyer-router.ts).
-  // Gated on the conversation actually HAVING routed turns, not on Auto
-  // being the live selection right now, so history survives switching away
-  // from Auto for this chat.
-  const allRoutingDecisions = useCachedResource(routingDecisionsResource, true).data;
-  const conversationRoutingRows = useMemo(() => {
-    const convId = snap.chatActiveConversation;
-    if (!convId || !allRoutingDecisions) return [];
-    return allRoutingDecisions.filter((row) => row.conversationKey === convId);
-  }, [allRoutingDecisions, snap.chatActiveConversation]);
-  const [routingHistoryOpen, setRoutingHistoryOpen] = useState(false);
-  useEffect(() => {
-    setRoutingHistoryOpen(false);
-  }, [snap.chatActiveConversation]);
-
   // displayModelLabel keeps human text as-is and prettifies raw service keys.
   const currentServiceLabel = isAutoModeActive
     ? LEVANTO_AUTO_LABEL
@@ -1228,19 +1204,6 @@ export function ChatView({ onSelectView }: ChatViewProps) {
         )}
         {snap.chatActiveConversation && (
           <div className={`${styles.pageHeaderRight}${searchOnlyHeader ? ` ${styles.pageHeaderRightSearchOnly}` : ''}`}>
-            {!searchOnlyHeader && conversationRoutingRows.length > 0 && (
-              <button
-                type="button"
-                className={`${styles.headerActionButton}${snap.chatPanelExpanded ? '' : ` ${styles.headerActionButtonIconOnly}`}`}
-                onClick={() => setRoutingHistoryOpen((open) => !open)}
-                aria-expanded={routingHistoryOpen}
-                title="Show this chat's routing history"
-                aria-label="Show this chat's routing history"
-              >
-                <HugeiconsIcon icon={RouteIcon} size={12} strokeWidth={2} />
-                {snap.chatPanelExpanded && <span>Routing history ({conversationRoutingRows.length})</span>}
-              </button>
-            )}
             {!searchOnlyHeader && snap.chatActiveConversation && currentPeerId && (
               <button
                 type="button"
@@ -1335,8 +1298,6 @@ export function ChatView({ onSelectView }: ChatViewProps) {
           <HugeiconsIcon icon={ArrowRight01Icon} size={12} strokeWidth={1.5} />
         </button>
       )}
-
-      {routingHistoryOpen && <ConversationRoutingHistory rows={conversationRoutingRows} />}
 
       <div className={styles.chatContainer} ref={containerRef}>
         <div
