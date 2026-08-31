@@ -2797,6 +2797,32 @@ test('route control endpoint sets, persists, and returns the default routed mode
   assert.deepEqual(JSON.parse(cleared.body), { ok: true, model: null })
 })
 
+test('savings-baseline endpoint sets, persists, and returns the chosen baseline model', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'antseed-buyer-baseline-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: dir,
+    node: { router: null } as any,
+  })
+
+  const initial = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions/baseline' }))
+  assert.deepEqual(JSON.parse(initial.body), { ok: true, baseline: null })
+
+  const set = await invokeProxy(proxy, makeProxyRequest({ path: '/_antseed/routing-decisions/baseline', body: { baseline: 'gpt-5.6-sol' } }))
+  assert.equal(set.statusCode, 200)
+  assert.deepEqual(JSON.parse(set.body), { ok: true, baseline: 'gpt-5.6-sol' })
+
+  const get = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions/baseline' }))
+  assert.deepEqual(JSON.parse(get.body), { ok: true, baseline: 'gpt-5.6-sol' })
+
+  const persisted = JSON.parse(await readFile(join(dir, 'buyer.state.json'), 'utf-8')) as Record<string, unknown>
+  assert.equal(persisted['savingsBaselineModel'], 'gpt-5.6-sol')
+
+  const cleared = await invokeProxy(proxy, makeProxyRequest({ path: '/_antseed/routing-decisions/baseline', body: { baseline: '' } }))
+  assert.deepEqual(JSON.parse(cleared.body), { ok: true, baseline: null })
+})
+
 test('buyer-usage endpoint reports lastActivityAt, null until a request is dispatched', async () => {
   const proxy = new BuyerProxy({
     port: 0,

@@ -456,6 +456,25 @@ export function registerPiChatHandlers({
     }
   });
 
+  ipcMain.handle('chat:ai-get-routing-savings-baseline', async () => {
+    // The model id last chosen in the savings dashboard's baseline dropdown
+    // (apps/cli/src/proxy/buyer-proxy.ts's `_savingsBaselineModel`), so the
+    // Profile view's "Auto-routing savings" text compares against the same
+    // model the user picked there instead of silently using its own default.
+    // `null` (not an error) whenever no explicit choice has been made yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions/baseline`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: null };
+      const body = await response.json() as { ok?: boolean; baseline?: string | null };
+      return { ok: true, data: body.baseline ?? null };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
   ipcMain.handle('api:try-proxy-request', async (
     _event,
     params: { port: number; path: string; method: string; headers: Record<string, string>; body: string },

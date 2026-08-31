@@ -767,6 +767,16 @@ export class BuyerProxy {
    * selection) and persisted in buyer.state.json like the session peer pin.
    */
   private _defaultRoutedModel: string | null = null
+  /**
+   * The model id last chosen in the savings dashboard's baseline dropdown
+   * (`GET`/`POST /_antseed/routing-decisions/baseline`) -- shared, via this
+   * one persisted value, between that standalone browser page and the
+   * desktop app's own "Auto-routing savings" text (VprCreditsView), which
+   * would otherwise have no way to see a choice made in a different process.
+   * `null` means "no explicit choice yet," not "zero baseline" -- callers
+   * fall back to their own auto-picked default.
+   */
+  private _savingsBaselineModel: string | null = null
   private _conversations!: ConversationStore
   /**
    * Last router-ranked candidate list per conversation, for client disclosure
@@ -1074,6 +1084,8 @@ export class BuyerProxy {
       }
       const routedModel = typeof parsed.defaultRoutedModel === 'string' ? parsed.defaultRoutedModel.trim() : ''
       this._defaultRoutedModel = routedModel.length > 0 && isValidRoutedModelTarget(routedModel) ? routedModel : null
+      const savingsBaseline = typeof parsed.savingsBaselineModel === 'string' ? parsed.savingsBaselineModel.trim() : ''
+      this._savingsBaselineModel = savingsBaseline.length > 0 ? savingsBaseline : null
       log(`Session overrides reloaded: peer=${this._pinnedPeer ?? 'none'} route=${this._defaultRoutedModel ?? 'none'}`)
     } catch {
       // state file unreadable; keep current values
@@ -1156,7 +1168,11 @@ export class BuyerProxy {
     // in the file — the debounce may have been cancelled before
     // _reloadSessionOverrides could commit the latest CLI-written values.
     const sessionOverrides = state === 'connected'
-      ? { pinnedPeerId: this._pinnedPeer, defaultRoutedModel: this._defaultRoutedModel }
+      ? {
+        pinnedPeerId: this._pinnedPeer,
+        defaultRoutedModel: this._defaultRoutedModel,
+        savingsBaselineModel: this._savingsBaselineModel,
+      }
       : {}
     await this._mergeStateFile({
       state,
@@ -1935,6 +1951,43 @@ export class BuyerProxy {
       const rows = router?.getRoutingDecisions?.() ?? []
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, rows }))
+      return
+    }
+
+    if (path === '/_antseed/routing-decisions/baseline' && method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, baseline: this._savingsBaselineModel }))
+      return
+    }
+
+    if (path === '/_antseed/routing-decisions/baseline' && method === 'POST') {
+      // Persists the savings dashboard's baseline-dropdown choice so the
+      // desktop app's own savings text (VprCreditsView) can show the same
+      // model -- see `_savingsBaselineModel`'s doc comment.
+      const chunks: Buffer[] = []
+      let totalSize = 0
+      for await (const chunk of req) {
+        totalSize += (chunk as Buffer).length
+        if (totalSize > 8192) {
+          res.writeHead(413, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: false, error: 'Request body too large' }))
+          return
+        }
+        chunks.push(chunk as Buffer)
+      }
+      let baseline: string
+      try {
+        const body = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>
+        baseline = typeof body.baseline === 'string' ? body.baseline.trim() : ''
+      } catch {
+        res.writeHead(400, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, error: 'Invalid JSON body' }))
+        return
+      }
+      this._savingsBaselineModel = baseline.length > 0 ? baseline : null
+      await this._mergeStateFile({ savingsBaselineModel: this._savingsBaselineModel })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, baseline: this._savingsBaselineModel }))
       return
     }
 

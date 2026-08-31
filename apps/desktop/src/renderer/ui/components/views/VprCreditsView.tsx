@@ -8,7 +8,7 @@ import { formatCompactTokens, VprCard, VprPage, VprStatRow, VprStatTile } from '
 import { BalanceSummaryCard } from './BalanceSummaryCard';
 import { ExportSignerKeyDialog, ImportSignerKeyDialog } from './SignerKeyDialogs';
 import { useCachedResource } from '../../../modules/app/cached-resource';
-import { routingDecisionsResource } from '../../../modules/app/vpr-resources';
+import { routingDecisionsResource, savingsBaselineModelResource } from '../../../modules/app/vpr-resources';
 import { computeRecentRouterSavings, SEVEN_DAYS_MS } from '../../../modules/routing/router-savings';
 import { formatSavedUsd } from '../../../modules/catalog/measured-savings';
 import styles from './VprCreditsView.module.scss';
@@ -62,9 +62,10 @@ export function VprCreditsView({ onSelectView }: Props) {
   // Only polled while a router is actually selected -- the pill itself is
   // hidden otherwise, so there's nothing for this data to feed.
   const routingDecisions = useCachedResource(routingDecisionsResource, snap.autoSubscriptionEnabled).data;
+  const savingsBaselineModel = useCachedResource(savingsBaselineModelResource, snap.autoSubscriptionEnabled).data;
   const last7DaysSavings = useMemo(
-    () => computeRecentRouterSavings(routingDecisions, SEVEN_DAYS_MS, Date.now()),
-    [routingDecisions],
+    () => computeRecentRouterSavings(routingDecisions, SEVEN_DAYS_MS, Date.now(), savingsBaselineModel ?? undefined),
+    [routingDecisions, savingsBaselineModel],
   );
 
   const balanceValues = {
@@ -156,7 +157,8 @@ export function VprCreditsView({ onSelectView }: Props) {
             <span className={styles.rewardsText}>
               <strong>Auto-routing savings</strong>{' '}
               {last7DaysSavings
-                ? `You've saved ${formatSavedUsd(last7DaysSavings.baselineUsd - last7DaysSavings.actualUsd)} in the past 7 days.`
+                ? `You've saved ${formatSavedUsd(last7DaysSavings.baselineUsd - last7DaysSavings.actualUsd)} in the past 7 days`
+                  + (savingsBaselineModel ? `, vs. ${savingsBaselineModel}.` : '.')
                 : 'No routed savings to show yet.'}
             </span>
             <button

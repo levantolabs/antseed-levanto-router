@@ -293,6 +293,9 @@ const api = {
   chatAiGetSubscriptionPrice(): Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }> {
     return ipcRenderer.invoke('chat:ai-get-subscription-price');
   },
+  chatAiGetRoutingSavingsBaseline(): Promise<{ ok: boolean; data?: string | null; error?: string }> {
+    return ipcRenderer.invoke('chat:ai-get-routing-savings-baseline');
+  },
   chatAiDeleteConversation(id: string): Promise<{ ok: boolean }> {
     return ipcRenderer.invoke('chat:ai-delete-conversation', id);
   },

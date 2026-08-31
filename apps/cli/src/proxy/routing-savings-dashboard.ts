@@ -128,7 +128,6 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
       return { conversationKey: key, rows: sessionRows, turnCount: sessionRows.length, lastActiveAt: lastActiveAt };
     }).sort(function (a, b) { return b.lastActiveAt - a.lastActiveAt; });
   }
-  var STORAGE_KEY = 'antseed-dashboard-baseline';
   var allRows = [];
   var currentBaseline = null;
 
@@ -189,21 +188,26 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
     document.getElementById('content').innerHTML = html;
     document.getElementById('back-link').addEventListener('click', renderSessionList);
   }
-  function populateBaselineSelect(rows) {
+  function populateBaselineSelect(rows, storedBaseline) {
     var select = document.getElementById('baseline-select');
     var models = allBaselineModels(rows);
-    var stored = localStorage.getItem(STORAGE_KEY);
-    currentBaseline = (stored && models.indexOf(stored) !== -1) ? stored : models[0];
+    currentBaseline = (storedBaseline && models.indexOf(storedBaseline) !== -1) ? storedBaseline : models[0];
     select.innerHTML = models.map(function (m) {
       return '<option value="' + m + '"' + (m === currentBaseline ? ' selected' : '') + '>' + m + '</option>';
     }).join('');
     select.addEventListener('change', function () {
       currentBaseline = select.value;
-      localStorage.setItem(STORAGE_KEY, currentBaseline);
       renderSessionList();
+      // Shared with the desktop app's own savings text -- see
+      // _savingsBaselineModel in apps/cli/src/proxy/buyer-proxy.ts.
+      fetch('/_antseed/routing-decisions/baseline', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ baseline: currentBaseline }),
+      }).catch(function () {});
     });
   }
-  function render(rows) {
+  function render(rows, storedBaseline) {
     allRows = rows;
     if (!rows.length) {
       document.getElementById('stats').innerHTML = '';
@@ -211,12 +215,18 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
       document.querySelector('.toolbar').style.display = 'none';
       return;
     }
-    populateBaselineSelect(rows);
+    populateBaselineSelect(rows, storedBaseline);
     renderSessionList();
   }
-  fetch('/_antseed/routing-decisions')
-    .then(function (res) { return res.json(); })
-    .then(function (body) { render((body && body.rows) || []); })
+  Promise.all([
+    fetch('/_antseed/routing-decisions').then(function (res) { return res.json(); }),
+    fetch('/_antseed/routing-decisions/baseline').then(function (res) { return res.json(); }).catch(function () { return null; }),
+  ])
+    .then(function (results) {
+      var body = results[0];
+      var baselineBody = results[1];
+      render((body && body.rows) || [], baselineBody && baselineBody.baseline);
+    })
     .catch(function (err) {
       document.getElementById('content').innerHTML = '<p class="error">Could not load routing data: ' + (err && err.message ? err.message : err) + '</p>';
     });

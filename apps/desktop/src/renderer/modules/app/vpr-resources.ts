@@ -70,6 +70,21 @@ export const subscriptionPriceResource = createCachedResource<SubscriptionPriceO
 });
 
 /**
+ * The baseline model last chosen in the savings dashboard's dropdown
+ * (apps/cli's `/_antseed/routing-decisions/baseline`), so the Profile view's
+ * "Auto-routing savings" text stays in sync with that choice instead of
+ * silently falling back to its own default. `null` when nothing has been
+ * explicitly chosen there yet.
+ */
+export const savingsBaselineModelResource = createCachedResource<string | null>({
+  pollMs: POLL_MS,
+  async load() {
+    const result = await window.antseedDesktop?.chatAiGetRoutingSavingsBaseline?.();
+    return result?.data ?? null;
+  },
+});
+
+/**
  * Router-type plugins installed on disk (packages/node's AntseedRouterPlugin
  * metadata), for Preferences' "Select model router" dropdown -- driven by
  * whatever's actually installed rather than a hardcoded option list. Not

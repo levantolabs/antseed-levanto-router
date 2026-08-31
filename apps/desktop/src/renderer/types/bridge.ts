@@ -353,6 +353,7 @@ export type DesktopBridge = {
   chatAiListDiscoverRows?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
   chatAiListRoutingDecisions?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
   chatAiGetSubscriptionPrice?: () => Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }>;
+  chatAiGetRoutingSavingsBaseline?: () => Promise<{ ok: boolean; data?: string | null; error?: string }>;
   chatAiGetConversation?: (id: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiCreateConversation?: (service: string, provider?: string, peerId?: string, routeMode?: 'auto' | 'pinned') => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiDeleteConversation?: (id: string) => Promise<{ ok: boolean }>;
