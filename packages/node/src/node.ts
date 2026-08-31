@@ -185,6 +185,20 @@ export interface NodePaymentsConfig {
   /** Minimum unsettled delta (base units) required before idle settle submits a tx. Default: "2000" (~$0.002). */
   minSettleDelta?: string;
   /**
+   * Seller-side: rejects any single SpendingAuth whose cumulativeAmount jumps
+   * more than this many base units above the previously accepted cumulative
+   * for that channel. Undefined (default) means no cap -- ordinary metered
+   * per-request billing can legitimately jump by any amount in a burst of
+   * real usage, so this must stay opt-in, not a blanket default. A seller
+   * offering a flat daily/periodic subscription price should set this to
+   * that price: it closes the seller-side half of a real incident (a client-
+   * side arithmetic bug let a single signature claim six days' worth of a
+   * $0.59/day subscription in one call) -- fixed client-side already, this
+   * is the independent server-side backstop so the seller never has to trust
+   * the buyer's arithmetic alone, in case that class of bug ever recurs.
+   */
+  maxCumulativeIncreasePerAuth?: string;
+  /**
    * Seller-side: settle and close a channel the instant its buyer's live
    * connection drops. Default: true — correct for ordinary per-session
    * inference, where a dropped connection means the conversation is over.
@@ -2213,6 +2227,7 @@ export class AntseedNode extends EventEmitter {
         ...(payments.minBudgetPerRequest ? { minBudgetPerRequest: payments.minBudgetPerRequest } : {}),
         ...(payments.minSettleDelta ? { minSettleDelta: payments.minSettleDelta } : {}),
         ...(payments.settleOnDisconnect !== undefined ? { settleOnDisconnect: payments.settleOnDisconnect } : {}),
+        ...(payments.maxCumulativeIncreasePerAuth ? { maxCumulativeIncreasePerAuth: payments.maxCumulativeIncreasePerAuth } : {}),
       };
       this._sellerPaymentManager = new SellerPaymentManager(this._identity, sellerConfig, this._channelStore);
       debugLog(`[Node] SellerPaymentManager initialized`);

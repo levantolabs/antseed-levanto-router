@@ -1340,6 +1340,45 @@ describe('SellerPaymentManager', () => {
     expect(manager.getAcceptedCumulative(channelId)).toBe(200_000n);
   });
 
+  it('rejects a SpendingAuth jump exceeding maxCumulativeIncreasePerAuth, independent of the buyer\'s own day-counting', async () => {
+    // Regression for a real incident: a client-side arithmetic bug let a
+    // single SpendingAuth claim six days of a $0.59/day subscription in one
+    // signature. Fixed client-side already -- this is the seller's own,
+    // independent backstop, so accepting an overcharge never depends on the
+    // buyer's arithmetic being right.
+    const cappedConfig: SellerPaymentConfig = {
+      rpcUrl: 'http://127.0.0.1:8545',
+      channelsContractAddress: CONTRACT_ADDR,
+      chainId: CHAIN_ID,
+      dataDir: tempDir,
+      maxCumulativeIncreasePerAuth: '590000', // one day at $0.59/day
+    };
+    const cappedManager = new SellerPaymentManager(sellerIdentity, cappedConfig, store);
+    vi.spyOn(cappedManager.channelsClient, 'reserve').mockResolvedValue('0xreserve-hash');
+
+    const channelId = makeChannelId(41);
+    const payload1 = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, { isReserve: true });
+    await cappedManager.handleSpendingAuth(buyerIdentity.peerId, payload1, mux);
+
+    // Day 1: exactly one day's worth -- must be accepted (the initial
+    // SpendingAuth path is never capped; day 1 is one day by construction).
+    const day1 = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, { cumulativeAmount: 590_000n });
+    expect(await cappedManager.handleSpendingAuth(buyerIdentity.peerId, day1, mux)).toBe('accepted');
+    expect(cappedManager.getAcceptedCumulative(channelId)).toBe(590_000n);
+
+    // An attempted six-day jump in one signature -- must be rejected, even
+    // though it's within the on-chain deposit ceiling and otherwise
+    // well-formed.
+    const sixDayJump = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, { cumulativeAmount: 3_540_000n });
+    expect(await cappedManager.handleSpendingAuth(buyerIdentity.peerId, sixDayJump, mux)).toBe('rejected');
+    expect(cappedManager.getAcceptedCumulative(channelId)).toBe(590_000n);
+
+    // A legitimate next-day increment (exactly one more day) is still accepted.
+    const day2 = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, { cumulativeAmount: 1_180_000n });
+    expect(await cappedManager.handleSpendingAuth(buyerIdentity.peerId, day2, mux)).toBe('accepted');
+    expect(cappedManager.getAcceptedCumulative(channelId)).toBe(1_180_000n);
+  });
+
   it('accepts SpendingAuth within deposit ceiling', async () => {
     const channelId = makeChannelId(41);
 

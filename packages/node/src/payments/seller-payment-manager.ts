@@ -38,6 +38,18 @@ export interface SellerPaymentConfig {
    * the full amount so no dust is left behind. Default: "2000" (~$0.002).
    */
   minSettleDelta?: string;
+  /**
+   * Rejects any single SpendingAuth whose cumulativeAmount jumps more than
+   * this many base units above the previously accepted cumulative for that
+   * channel. Undefined (default) means no cap. See node.ts's
+   * NodePaymentsConfig.maxCumulativeIncreasePerAuth for the full rationale --
+   * this is the independent seller-side backstop for a real incident where a
+   * client-side bug (fixed separately) let one signature claim several days
+   * of a flat daily subscription at once. Applies only to the "subsequent
+   * SpendingAuth" path, not the initial one -- day 1's own charge is exactly
+   * one day's worth by construction, nothing to cap there.
+   */
+  maxCumulativeIncreasePerAuth?: string;
 }
 
 /** Default minimum budget per request: $0.50 USDC (base units). */
@@ -766,6 +778,26 @@ export class SellerPaymentManager {
             `${pendingTopUpForCheck ? ` (pending topUp to ${pendingTopUpForCheck.newMaxAmount})` : ''} channel=${channelId.slice(0, 18)}...`,
           );
           return 'rejected';
+        }
+
+        // Independent backstop against a buyer-side arithmetic bug claiming
+        // more than one legitimate cadence's worth in a single signature
+        // (real incident: a $0.59/day subscription client-side bug let one
+        // call claim six days at once -- fixed there, but the seller should
+        // never have to trust the buyer's day-counting alone for something
+        // this consequential). Opt-in: undefined config means no cap, so
+        // ordinary metered per-request billing (which can legitimately jump
+        // by any amount in a burst of real usage) is unaffected.
+        if (this._config.maxCumulativeIncreasePerAuth) {
+          const maxIncrease = BigInt(this._config.maxCumulativeIncreasePerAuth);
+          const increase = cumulativeAmount - existingCumulative;
+          if (increase > maxIncrease) {
+            debugWarn(
+              `[SellerPayment] Rejecting SpendingAuth exceeding max per-auth increase: ` +
+              `increase=${increase} > cap=${maxIncrease} (existing=${existingCumulative} new=${cumulativeAmount}) channel=${channelId.slice(0, 18)}...`,
+            );
+            return 'rejected';
+          }
         }
 
         // Update tracking
