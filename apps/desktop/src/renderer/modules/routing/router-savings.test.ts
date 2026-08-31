@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import type { RoutingDecisionRow } from '@antseed/node';
-import { computeRouterSavings, defaultRouterSavingsBaselineModel, groupRoutingDecisionsByConversation } from './router-savings.js';
+import { computeRecentRouterSavings, computeRouterSavings, defaultRouterSavingsBaselineModel, groupRoutingDecisionsByConversation, SEVEN_DAYS_MS } from './router-savings.js';
 
 const BASELINE_PRICE = { inUsdPerM: 15, outUsdPerM: 75, cachedInUsdPerM: 1.5 };
 
@@ -131,4 +131,25 @@ test('groupRoutingDecisionsByConversation sorts most-recently-active first and r
     2,
   );
   assert.deepEqual(groups.map((g) => g.conversationKey), ['new', 'mid']);
+});
+
+test('computeRecentRouterSavings only counts rows within the window', () => {
+  const now = 10_000_000;
+  const rows = [
+    row({ atMs: now - 1000, actualUsdcPaid: 0.001 }), // inside a 7-day window
+    row({ atMs: now - SEVEN_DAYS_MS - 1, actualUsdcPaid: 0.001 }), // just outside
+  ];
+  const withinWindow = computeRecentRouterSavings(rows, SEVEN_DAYS_MS, now);
+  const oneRowOnly = computeRouterSavings([rows[0]!]);
+  assert.deepEqual(withinWindow, oneRowOnly);
+});
+
+test('computeRecentRouterSavings returns null with no rows in the window', () => {
+  const now = 10_000_000;
+  const rows = [row({ atMs: now - SEVEN_DAYS_MS - 1 })];
+  assert.equal(computeRecentRouterSavings(rows, SEVEN_DAYS_MS, now), null);
+});
+
+test('computeRecentRouterSavings returns null for undefined rows', () => {
+  assert.equal(computeRecentRouterSavings(undefined, SEVEN_DAYS_MS, Date.now()), null);
 });

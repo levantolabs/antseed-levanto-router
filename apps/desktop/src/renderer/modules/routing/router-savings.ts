@@ -32,6 +32,25 @@ export function defaultRouterSavingsBaselineModel(): string {
   return activeAutoRouterSavingsBaselineModel();
 }
 
+export const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * `computeRouterSavings` over just the rows within `windowMs` of `nowMs` --
+ * the Profile view's "saved $X in the past 7 days" pill. `nowMs` is a
+ * parameter rather than an internal `Date.now()` call so this stays a pure,
+ * directly-testable function.
+ */
+export function computeRecentRouterSavings(
+  rows: readonly RoutingDecisionRow[] | undefined,
+  windowMs: number,
+  nowMs: number,
+  baselineModel: string = defaultRouterSavingsBaselineModel(),
+): MeasuredSavings | null {
+  if (!rows) return null;
+  const cutoff = nowMs - windowMs;
+  return computeRouterSavings(rows.filter((row) => row.atMs >= cutoff), baselineModel);
+}
+
 export function computeRouterSavings(
   rows: readonly RoutingDecisionRow[] | undefined,
   baselineModel: string = defaultRouterSavingsBaselineModel(),
