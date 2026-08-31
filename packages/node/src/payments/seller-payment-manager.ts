@@ -669,6 +669,44 @@ export class SellerPaymentManager {
             return 'accepted';
           }
 
+          // `_classifyTopUpFailure`'s three recognized shapes don't cover
+          // every way a topUp() submission can throw -- a plain RPC timeout
+          // on the confirmation wait (observed live: "timeout
+          // (operation=\"request.send\"...)" from the exact RPC this ran
+          // against) falls through to here as 'non-retryable' even though
+          // the transaction can have genuinely landed on-chain. Closing an
+          // active, already-paying channel on a confirmation timeout is a
+          // real transaction with real money behind it -- worth one more
+          // on-chain read before treating it as failed, the same
+          // verify-before-acting idiom checkTimeouts() already uses
+          // elsewhere in this file, rather than trusting error-text
+          // classification alone.
+          try {
+            const onChain = await this._channelsClient.getSession(channelId);
+            if (onChain.deposit >= newMaxAmount) {
+              debugWarn(
+                `[SellerPayment] Top-up error was transient: channel=${channelId.slice(0, 18)}... ` +
+                `kind=${failureKind} error=${this._formatError(topUpErr)} — but on-chain deposit ` +
+                `${onChain.deposit} already reflects the new ceiling ${newMaxAmount}; treating as succeeded`,
+              );
+              this._hydratedChannelIds.delete(channelId);
+              this._reserveMax.set(channelId, newMaxAmount);
+              const session = this._channelStore.getChannel(channelId);
+              if (session) {
+                session.previousConsumption = newMaxAmount.toString();
+                session.deadline = topUpDeadline;
+                session.updatedAt = Date.now();
+                this._channelStore.upsertChannel(session);
+              }
+              return 'accepted';
+            }
+          } catch (verifyErr) {
+            debugWarn(
+              `[SellerPayment] Could not verify top-up on-chain for ${channelId.slice(0, 18)}...: ` +
+              `${verifyErr instanceof Error ? verifyErr.message : verifyErr} — proceeding as failed`,
+            );
+          }
+
           debugWarn(
             `[SellerPayment] Top-up on-chain failed permanently: channel=${channelId.slice(0, 18)}... ` +
             `kind=${failureKind} error=${this._formatError(topUpErr)} — closing latest auth and rejecting topUp`,

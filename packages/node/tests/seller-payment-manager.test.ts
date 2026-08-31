@@ -706,6 +706,53 @@ describe('SellerPaymentManager', () => {
     expect(store.getChannel(channelId)!.status).toBe(CHANNEL_STATUS.SETTLED);
   });
 
+  it('treats an unclassified top-up error as success when the chain shows it already landed', async () => {
+    const channelId = makeChannelId(104);
+
+    const reservePayload = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, {
+      isReserve: true,
+      reserveMaxAmount: '1000000',
+    });
+    await manager.handleSpendingAuth(buyerIdentity.peerId, reservePayload, mux);
+
+    const auth900k = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, {
+      cumulativeAmount: 900_000n,
+      reserveMaxAmount: '1000000',
+    });
+    await manager.handleSpendingAuth(buyerIdentity.peerId, auth900k, mux);
+    manager.recordSpend(channelId, 900_000n);
+
+    // Not any of _classifyTopUpFailure's three recognized shapes -- a plain
+    // RPC confirmation timeout, exactly the error text observed live from a
+    // real RPC provider, which can throw after the transaction has already
+    // been mined.
+    vi.spyOn(manager.channelsClient, 'topUp')
+      .mockRejectedValue(new Error('timeout (operation="request.send", reason="timeout")'));
+    vi.spyOn(manager.channelsClient, 'getSession').mockResolvedValue({
+      buyer: buyerIdentity.wallet.address,
+      seller: sellerIdentity.wallet.address,
+      deposit: 2_000_000n,
+      settled: 900_000n,
+      metadataHash: ZERO_METADATA_HASH,
+      deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
+      settledAt: 0n,
+      closeRequestedAt: 0n,
+      status: 1,
+    });
+
+    const topUp2m = await buildSpendingAuth(buyerIdentity, sellerIdentity, channelId, {
+      isReserve: true,
+      reserveMaxAmount: '2000000',
+      salt: '0x' + '09'.repeat(32),
+    });
+
+    expect(await manager.handleSpendingAuth(buyerIdentity.peerId, topUp2m, mux)).toBe('accepted');
+    expect(manager.channelsClient.close).not.toHaveBeenCalled();
+    expect(manager.getReserveMax(channelId)).toBe(2_000_000n);
+    expect(manager.hasSession(buyerIdentity.peerId)).toBe(true);
+    expect(store.getChannel(channelId)!.status).toBe(CHANNEL_STATUS.ACTIVE);
+  });
+
   it('blocks the channel if permanent top-up failure cannot close immediately', async () => {
     const channelId = makeChannelId(105);
 
