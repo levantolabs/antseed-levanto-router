@@ -8,18 +8,44 @@ import { LOCALHOST_URL } from '../constants.js';
 import type { ChatServiceProtocol } from './service-catalog.js';
 import { PROXY_RUNTIME_API_KEY } from './proxy-service.js';
 
+/**
+ * A seller's model can ignore the "return only a 3-6 word title" system
+ * prompt entirely and answer with its own unrelated persona instead (found
+ * live: a seller that always opens with "Hello! I'm Apex Crypto Agent... "
+ * regardless of what's actually asked, including this exact request). This
+ * was blindly truncated to 60 chars and used as the conversation's title,
+ * silently renaming an unrelated chat to that seller's own persona intro.
+ * A real compliant title is short and reads as a phrase, not a sentence --
+ * reject anything that looks like running prose instead (multiple sentence
+ * boundaries, or just too long for 3-6 words even accounting for a longer
+ * single phrase) and let the caller fall back to the legacy local title
+ * instead of trusting an uncooperative seller's own words.
+ */
+function looksLikeRunningProse(text: string): boolean {
+  const sentenceEndings = text.match(/[.!?](?:\s|$)/g)?.length ?? 0;
+  if (sentenceEndings >= 2) return true;
+  if (text.length > 80) return true;
+  if (text.split(/\s+/).length > 14) return true;
+  return false;
+}
+
 export function sanitizeGeneratedConversationTitle(value: unknown): string | null {
   const cleaned = String(value ?? '')
     .trim()
     .replace(/^```(?:text)?/i, '')
     .replace(/```$/i, '')
-    .replace(/^Title:\s*/i, '')
-    .replace(/^['\"]|['\"]$/g, '')
+    // Collapse whitespace (fence-stripping above can leave stray leading/
+    // trailing newlines, e.g. "```text\nTitle: ...\n```") before the
+    // anchored Title:/quote strips below, or those anchors miss.
     .replace(/[\r\n]+/g, ' ')
     .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^Title:\s*/i, '')
+    .replace(/^['\"]|['\"]$/g, '')
     .trim();
 
   if (!cleaned) return null;
+  if (looksLikeRunningProse(cleaned)) return null;
   return cleaned.slice(0, 60).trim();
 }
 
