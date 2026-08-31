@@ -319,9 +319,19 @@ export class LevantoRouter {
    * wired but `updateRoutingPreferences` never called, or a CLI-only caller
    * with no preferences UI at all) is treated the same as "no": this must
    * never default to signing.
+   *
+   * ALSO gated on `autoRouting !== false` -- found live: a buyer trying to
+   * stop billing reasonably reached for the standing "Auto select seller"
+   * switch (a different, more prominent control than the one that actually
+   * owns autoSubscriptionEnabled), and billing kept running because nothing
+   * checked it. `autoRouting` defaults to `undefined`/absent meaning "on"
+   * (unlike autoSubscriptionEnabled's opt-in default), so only an EXPLICIT
+   * `false` stops signing here -- a caller that never sends this field at
+   * all is unaffected.
    */
   private async ensureSignedToday(): Promise<void> {
     if (!this.cachedRoutingPreferences?.autoSubscriptionEnabled) return;
+    if (this.cachedRoutingPreferences.autoRouting === false) return;
     if (!this.config.signDailyIfNeeded || !this.config.sellerPeerId) return;
     const todayKey = calendarDayKey();
     if (this.lastSignedDayKey === todayKey) return;

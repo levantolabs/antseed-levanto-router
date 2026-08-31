@@ -19,6 +19,47 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-31] `autoRouting: false` now also stops subscription signing, alongside `autoSubscriptionEnabled`
+
+**Type:** Decision, filling a gap the docs are silent on -- found live, not theoretical.
+
+**What happened.** Dawid tried to stop real-money subscription billing by turning off
+"Auto select seller" (`autoRouting`) in Preferences -- a prominent standing toggle whose
+own UI copy says "Off pauses routing everywhere." Billing kept running: `~/.antseed/config.json`
+still showed `autoSubscriptionEnabled: true` afterward, and the peer confirmed the sync
+pipeline (renderer -> IPC -> config.json -> the buyer-proxy's own file watcher ->
+`Router.updateRoutingPreferences`) was working correctly end to end -- `autoRouting`
+simply was never part of what got pushed to the router at all, and `ensureSignedToday()`
+only ever checked `autoSubscriptionEnabled`. The toggle he reached for, reasonably, does
+not and never did control billing; the one that does (`selectedRouterPackage` via the
+separate "Select model router" dropdown, set to "None") is a different, less obvious
+control.
+
+**Decision:** `ModelRoutingPreferences` gains `autoRouting?: boolean` (packages/node),
+threaded through `buyerModelRoutingPreferences` (previously explicitly excluded --
+`preferences.test.ts` had a test titled "buyer config projection excludes the
+Desktop-only auto-routing toggle," now rewritten). `router-levanto`'s `ensureSignedToday`
+now returns early on `autoRouting === false`, same as `autoSubscriptionEnabled` falsy --
+checked as a strict `=== false` (not falsy/absent), so a caller that never sends this
+field is unaffected, matching `autoSubscriptionEnabled`'s existing "unknown must not
+imply consent, but also must not spuriously block hosts that don't use it" pattern. Also
+corrected the toggle's own UI copy to say it also pauses billing, so the two controls no
+longer disagree about what "off" means.
+
+**Not addressed:** whether the "Select model router" dropdown should also visually make
+clear it's the actual subscription on/off switch, or whether the two controls should be
+unified into one. Left as a product/UX question, not resolved here -- this decision only
+makes the more prominent, already-existing control also actually stop billing, on the
+principle that a payment kill-switch should fail toward stopping money, not toward a
+UI inconsistency silently deciding it for the user.
+
+**Ground truth reference:** none -- `docs/model-routing-architecture-and-open-decisions.md`
+§14 item 29 establishes `autoSubscriptionEnabled` as the consent gate but says nothing
+about `autoRouting`'s relationship to it; this fills that silence rather than deviating
+from anything stated.
+
+---
+
 ## [2026-08-31] The toggle-on-gap catch-up burst is removed; a single call never grants more than one day, deviating from §6.7/§9.1's ~30-day backlog design
 
 **Type:** Deviation from the ground truth, forced by a real live incident, not a preference.

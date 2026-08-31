@@ -102,7 +102,7 @@ test('valid VPR preferences and route selection save and load', () => {
   assert.deepEqual(loadVprRouteSelection(fallbackRouteSelection), routeSelection);
 });
 
-test('buyer config projection excludes the Desktop-only auto-routing toggle', () => {
+test('buyer config projection includes every field the router-levanto payment gate reads', () => {
   assert.deepEqual(buyerModelRoutingPreferences(fallbackPreferences), {
     preferFreePeers: fallbackPreferences.preferFreePeers,
     maxInputUsdPerMillion: fallbackPreferences.maxInputUsdPerMillion,
@@ -112,7 +112,17 @@ test('buyer config projection excludes the Desktop-only auto-routing toggle', ()
     cqt: fallbackPreferences.cqt,
     autoSubscriptionEnabled: fallbackPreferences.autoSubscriptionEnabled,
     selectedRouterPackage: null,
+    autoRouting: fallbackPreferences.autoRouting,
   });
+});
+
+test('buyer config projection forwards autoRouting -- router-levanto\'s ensureSignedToday also gates real-money signing on this', () => {
+  // Regression: a buyer trying to stop subscription billing reasonably
+  // reached for the "Auto select seller" switch instead of the separate
+  // control that owns autoSubscriptionEnabled, and billing kept running
+  // because this field used to be dropped from the projection entirely.
+  const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, autoRouting: false });
+  assert.equal(projected.autoRouting, false);
 });
 
 test('buyer config projection forwards which router plugin is selected -- process-manager.ts reads this back to decide which router to start', () => {

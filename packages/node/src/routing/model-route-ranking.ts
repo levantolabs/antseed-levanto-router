@@ -31,6 +31,24 @@ export type ModelRoutingPreferences = {
    * router plugin, still behaves the same as it always did.
    */
   selectedRouterPackage?: string | null;
+  /**
+   * The buyer's standing "Auto select seller" switch -- distinct from, and
+   * checked ALONGSIDE, autoSubscriptionEnabled. Found live: a buyer trying
+   * to stop real-money subscription billing reasonably reached for this
+   * toggle (labeled "Off pauses routing everywhere" in the UI) instead of
+   * the separate "Select model router" control that actually owns
+   * autoSubscriptionEnabled -- and billing kept running, because nothing
+   * gated on this flag. A router that bills on autoSubscriptionEnabled
+   * (e.g. router-levanto's `ensureSignedToday`) should treat an explicit
+   * `false` here as an additional stop condition, same as
+   * autoSubscriptionEnabled itself: `undefined` (an older caller that
+   * doesn't send this field) must NOT be treated as consent to keep
+   * billing, but must also not newly block a host that never intended to
+   * gate on it -- so callers default it to `true` (routing enabled) when
+   * absent, not to `false`. Optional so existing routers/callers that
+   * don't need it are unaffected.
+   */
+  autoRouting?: boolean;
 };
 
 export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {

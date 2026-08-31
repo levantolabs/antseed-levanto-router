@@ -70,7 +70,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
           <VprSettingRow
             title="Auto select seller"
             caption="(Price + Trust preference)"
-            hint="Applies to every model set to Auto. Off pauses routing everywhere - providers stay on their last pick."
+            hint="Applies to every model set to Auto. Off pauses routing everywhere - providers stay on their last pick, and also pauses subscription billing below."
             control={(
               <VprToggle
                 checked={snap.preferences.autoRouting}

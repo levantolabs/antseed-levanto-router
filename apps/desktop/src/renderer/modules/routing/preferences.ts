@@ -159,6 +159,7 @@ export function buyerModelRoutingPreferences(
     cqt: value.cqt,
     autoSubscriptionEnabled: value.autoSubscriptionEnabled,
     selectedRouterPackage: value.selectedRouterPackage ?? null,
+    autoRouting: value.autoRouting,
   };
 }
 

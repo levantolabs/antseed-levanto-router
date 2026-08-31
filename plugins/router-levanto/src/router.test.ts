@@ -491,6 +491,63 @@ describe('LevantoRouter.selectRoute', () => {
         expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
         expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
       });
+
+      // Regression: a buyer trying to stop billing reasonably reached for
+      // the standing "Auto select seller" switch instead of the separate
+      // control that actually owns autoSubscriptionEnabled, and billing
+      // kept running because nothing checked it. autoRouting must now stop
+      // signing too, same as autoSubscriptionEnabled itself.
+      it('triggerDailySigningCheck never signs when autoRouting is explicitly false, even with autoSubscriptionEnabled true', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: false });
+
+        await router.triggerDailySigningCheck();
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('selectRoute never signs when autoRouting is explicitly false', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
+
+        const result = await router.selectRoute(
+          req('levanto-auto'), [peer('0xAAA')], null,
+          { ...enabledPreferences(), autoRouting: false },
+        );
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+        expect(result).not.toBeNull(); // routing itself is unaffected, only signing is gated
+      });
+
+      it('autoRouting absent (a caller that never sends it) does not block signing -- only an explicit false does', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        const { autoRouting: _omit, ...prefsWithoutAutoRouting } = { ...enabledPreferences(), autoRouting: true };
+        router.updateRoutingPreferences(prefsWithoutAutoRouting);
+
+        await router.triggerDailySigningCheck();
+
+        expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+      });
+
+      it('turning autoRouting back on via updateRoutingPreferences unblocks signing for a subsequent background trigger', async () => {
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: false });
+        await router.triggerDailySigningCheck();
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: true });
+        await router.triggerDailySigningCheck();
+        expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
+        expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
+      });
     });
 
     it('triggerDailySigningCheck does nothing when signDailyIfNeeded is not configured', async () => {
