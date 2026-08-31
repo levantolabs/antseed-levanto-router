@@ -54,6 +54,11 @@ test('applyLevantoRouterDemoOverride forces the Levanto router on connect-mode s
     assert.equal(result.router, 'levanto', `router should be forced to levanto when requested router was ${String(requestedRouter)}`);
     assert.equal(result.env?.['LEVANTO_ROUTING_PEER_URL'], process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787');
     assert.equal(result.env?.['LEVANTO_SELLER_PEER_ID'], process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265');
+    assert.equal(
+      result.env?.['LEVANTO_DATA_DIR'],
+      process.env['LEVANTO_DATA_DIR'] ?? join(homedir(), '.antseed', 'router-levanto'),
+      'router-levanto must get a persistent data dir so the routing_decisions ledger survives a subprocess restart',
+    );
     assert.equal(result.env?.['EXISTING'], '1', 'existing env entries must be preserved, not dropped');
   }
 });
@@ -71,6 +76,11 @@ test('applyLevantoRouterDemoOverride points at the real routing peer on a real c
     assert.equal(result.router, 'levanto');
     assert.equal(result.env?.['LEVANTO_ROUTING_PEER_URL'], process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://18.219.72.232:8787');
     assert.equal(result.env?.['LEVANTO_SELLER_PEER_ID'], process.env['LEVANTO_SELLER_PEER_ID'] ?? '4c63288576d1befdbdd5f4734b4c9d4c3d8791be');
+    assert.equal(
+      result.env?.['LEVANTO_DATA_DIR'],
+      process.env['LEVANTO_DATA_DIR'] ?? join(homedir(), '.antseed', 'router-levanto'),
+      'real-chain buyers must also get a persistent router-levanto data dir',
+    );
     assert.equal(result.env?.['ANTSEED_NO_OFFICIAL_BOOTSTRAP'], undefined, `${chainId} must not isolate from the real network`);
     assert.equal(result.env?.['ANTSEED_DIRECT_PEER_ADDRESSES_JSON'], undefined, `${chainId} must not get devnet mock-seller addresses`);
     assert.equal(result.env?.['EXISTING'], '1', 'existing env entries must be preserved, not dropped');

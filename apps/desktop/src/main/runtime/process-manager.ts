@@ -217,6 +217,11 @@ export function applyLevantoRouterDemoOverride(
       router: 'levanto',
       env: {
         ...opts.env,
+        // Without this, router-levanto's RoutingLedger (routing_decisions,
+        // savings-dashboard data) falls back to in-memory-only and is wiped
+        // on every connect-mode subprocess restart -- this was a real
+        // incident (a live 12-agent mainnet data run vanished on restart).
+        LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
         LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
         LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
         // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
@@ -243,6 +248,7 @@ export function applyLevantoRouterDemoOverride(
     router: 'levanto',
     env: {
       ...opts.env,
+      LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
       LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://18.219.72.232:8787',
       LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? '4c63288576d1befdbdd5f4734b4c9d4c3d8791be',
     },
