@@ -82,6 +82,8 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
   .card .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .table-wrap { overflow-x: auto; }
   .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 13px; color: var(--text-muted); }
   .toolbar select {
     appearance: none;
@@ -203,13 +205,23 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
         counts[key] = (counts[key] || 0) + 1;
       });
     });
-    // Key presence alone isn't enough -- a model can appear in some row's
-    // baselinePrices with a zero/unusable price (computeSavings already
-    // skips those per-row via its own rowBaseline <= 0 check). Only offer a
-    // baseline the user could actually compare against: one that produces
-    // real, positive savings data somewhere in this row set.
+    // Every model the routing peer ever RANKED as a candidate ends up as a
+    // baselinePrices key -- found live: 217 distinct models across 25 rows,
+    // most of them image-generation services (flux-2-pro, krea-v2-large,
+    // ideogram-v4, ...) that were considered and priced but never actually
+    // chosen for a text completion. Key presence, or even a real positive
+    // computeSavings figure, isn't enough to exclude those -- an image
+    // model's per-token price is still a real number, so it still produces
+    // a "computable" (if nonsensical) comparison. The one signal that
+    // actually distinguishes "a model this router would route real chat
+    // turns to" is having been the ACTUAL chosen model on at least one row
+    // somewhere in the set.
+    var actualModels = {};
+    rows.forEach(function (row) {
+      if (row.actualModel) actualModels[row.actualModel] = true;
+    });
     return Object.keys(counts)
-      .filter(function (key) { return computeSavings(rows, key) !== null; })
+      .filter(function (key) { return actualModels[key] && computeSavings(rows, key) !== null; })
       .sort(function (a, b) { return counts[b] - counts[a]; });
   }
   function groupBySession(rows) {
@@ -243,17 +255,19 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
     var allTime = computeSavings(rows, baselineModel) || { savedUsd: 0 };
     var last7d = computeSavings(recentRows, baselineModel) || { savedUsd: 0 };
     var sessions = groupBySession(rows);
+    var last7dSub = last7d.baselineUsd ? fmtUsd(last7d.actualUsd) + ' routed vs ' + fmtUsd(last7d.baselineUsd) + ' baseline' : '';
+    var allTimeSub = allTime.baselineUsd ? fmtUsd(allTime.actualUsd) + ' routed vs ' + fmtUsd(allTime.baselineUsd) + ' baseline' : '';
     document.getElementById('stats').innerHTML =
-      '<div class="card"><div class="label">Saved, past 7 days</div><div class="value">' + fmtUsd(last7d.savedUsd) + '</div></div>' +
-      '<div class="card"><div class="label">Saved, all time</div><div class="value">' + fmtUsd(allTime.savedUsd) + '</div></div>' +
+      '<div class="card"><div class="label">Saved, past 7 days</div><div class="value">' + fmtUsd(last7d.savedUsd) + '</div>' + (last7dSub ? '<div class="sub">' + last7dSub + '</div>' : '') + '</div>' +
+      '<div class="card"><div class="label">Saved, all time</div><div class="value">' + fmtUsd(allTime.savedUsd) + '</div>' + (allTimeSub ? '<div class="sub">' + allTimeSub + '</div>' : '') + '</div>' +
       '<div class="card"><div class="label">Sessions</div><div class="value">' + sessions.length + '</div></div>' +
       '<div class="card"><div class="label">Routed turns</div><div class="value">' + rows.length + '</div></div>';
   }
   function renderSessionList() {
     renderStats(allRows, currentBaseline);
     var sessions = groupBySession(allRows);
-    var html = '<table><thead><tr>' +
-      '<th>Session</th><th>Last active</th><th class="num">Turns</th><th class="num">Saved</th>' +
+    var html = '<div class="table-wrap"><table><thead><tr>' +
+      '<th>Session</th><th>Last active</th><th class="num">Turns</th><th class="num">Baseline</th><th class="num">Routed</th><th class="num">Saved</th>' +
       '</tr></thead><tbody>';
     sessions.forEach(function (session) {
       var savings = computeSavings(session.rows, currentBaseline);
@@ -261,10 +275,12 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
         '<td>' + session.conversationKey.slice(0, 18) + '&hellip;</td>' +
         '<td>' + fmtDate(session.lastActiveAt) + '</td>' +
         '<td class="num">' + session.turnCount + '</td>' +
+        '<td class="num">' + (savings ? fmtUsd(savings.baselineUsd) : '&mdash;') + '</td>' +
+        '<td class="num">' + (savings ? fmtUsd(savings.actualUsd) : '&mdash;') + '</td>' +
         '<td class="num">' + (savings ? fmtUsd(savings.savedUsd) : '&mdash;') + '</td>' +
         '</tr>';
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     document.getElementById('content').innerHTML = html;
     Array.prototype.forEach.call(document.querySelectorAll('tr[data-session]'), function (tr) {
       tr.addEventListener('click', function () { renderSessionDetail(tr.getAttribute('data-session')); });
@@ -272,7 +288,7 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   function renderTurnExpansion(row) {
     var baselinePrice = row.baselinePrices && row.baselinePrices[currentBaseline];
-    var html = '<tr class="turn-expansion"><td colspan="5">';
+    var html = '<tr class="turn-expansion"><td colspan="9">';
     if (row.consideredCandidates && row.consideredCandidates.length) {
       html += '<div class="expansion-label">Considered</div>' +
         '<table class="considered"><thead><tr><th>Model</th><th>Seller</th><th class="num">In</th><th class="num">Out</th></tr></thead><tbody>';
@@ -305,24 +321,32 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
     if (savings) metaParts.push('saved ' + fmtUsd(savings.savedUsd));
     if (conv && conv.tool) metaParts.push('via ' + escapeHtml(conv.tool));
     var titleLabel = (conv && conv.label) ? escapeHtml(conv.label) : (conversationKey.slice(0, 24) + '&hellip;');
+    var toolLabel = (conv && conv.tool) ? escapeHtml(conv.tool) : '&mdash;';
     var html = '<a class="back" id="back-link">&larr; All sessions</a>' +
       '<h2>' + titleLabel + ' &mdash; ' + metaParts.join(', ') + '</h2>' +
-      '<table><thead><tr><th>Time</th><th>Model</th><th class="num">Tokens</th><th class="num">Cost</th><th class="num">Saved</th></tr></thead><tbody>';
+      '<div class="table-wrap"><table><thead><tr>' +
+      '<th>Time</th><th>Model</th><th>Tool</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th>' +
+      '<th class="num">Baseline</th><th class="num">Routed</th><th class="num">Saved</th>' +
+      '</tr></thead><tbody>';
     rows.forEach(function (row, index) {
       var rowSavings = computeSavings([row], currentBaseline);
-      var tokens = (row.actualPromptTokens || 0) + (row.actualCompletionTokens || 0);
+      var freshInput = Math.max(0, (row.actualPromptTokens || 0) - (row.actualCachedTokens || 0));
       var baselinePrice = row.baselinePrices && row.baselinePrices[currentBaseline];
       var hoverTitle = baselinePrice ? 'vs ' + currentBaseline + ': ' + fmtPricePair(baselinePrice) : '';
       html += '<tr class="turn-row" data-turn-index="' + index + '"' + (hoverTitle ? ' title="' + escapeHtml(hoverTitle) + '"' : '') + '>' +
         '<td>' + fmtDate(row.atMs) + '</td>' +
         '<td>' + (row.actualModel || '&mdash;') + '</td>' +
-        '<td class="num">' + tokens + '</td>' +
+        '<td>' + toolLabel + '</td>' +
+        '<td class="num">' + freshInput + '</td>' +
+        '<td class="num">' + (row.actualCachedTokens || 0) + '</td>' +
+        '<td class="num">' + (row.actualCompletionTokens || 0) + '</td>' +
+        '<td class="num">' + (rowSavings ? fmtUsd(rowSavings.baselineUsd) : '&mdash;') + '</td>' +
         '<td class="num">' + fmtUsd(row.actualUsdcPaid || 0) + '</td>' +
         '<td class="num">' + (rowSavings ? fmtUsd(rowSavings.savedUsd) : '&mdash;') + '</td>' +
         '</tr>';
       if (index === expandedTurnIndex) html += renderTurnExpansion(row);
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';
     document.getElementById('content').innerHTML = html;
     document.getElementById('back-link').addEventListener('click', function () {
       expandedTurnIndex = -1;
