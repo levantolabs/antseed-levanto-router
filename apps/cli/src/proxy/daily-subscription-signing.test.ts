@@ -21,7 +21,6 @@ import { createSignDailyIfNeeded, scheduleDailySigningChecks, type DailySigningN
  */
 
 const DAILY_AMOUNT = 10_000n // matches other test suites' convention
-const CATCH_UP_CAP_DAYS = 30
 const SELLER_PEER_ID = 'cc'.repeat(20)
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -137,7 +136,7 @@ test('bootstrap: opens a channel sized to exactly one day, signs day 1, and tops
     // mechanics (covered separately below).
     scripted.bumpTo(DAILY_AMOUNT * 10n)
 
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
     await signDailyIfNeeded(SELLER_PEER_ID)
 
     // Three distinct SpendingAuth-shaped messages, all legitimate:
@@ -169,7 +168,7 @@ test('ordinary day: signs exactly one more day\'s increment, no top-up when ther
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 20n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
     await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
     const afterDay1 = mux.sent.length
@@ -214,7 +213,7 @@ test('repeated same-day calls never ratchet authMax up, even across many retries
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 10n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
     await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
     const afterDay1 = buyer.getActiveSession(SELLER_PEER_ID)!
@@ -234,42 +233,53 @@ test('repeated same-day calls never ratchet authMax up, even across many retries
   })
 })
 
-test('catch-up: a multi-day gap tops up before signing, then captures the full backlog in one signature', async (t) => {
+test('catch-up: a multi-day gap tops up and signs exactly one more day, never the whole backlog at once', async (t) => {
+  // Regression for a real live incident: a channel open under four hours
+  // signed 3.54 (six days' worth) in a single call, because the old
+  // catch-up design let one signature capture an unbounded backlog once a
+  // channel survived long enough for a real multi-day gap to accumulate.
+  // A subscription must be structurally incapable of charging more than
+  // dailyAmountUsdc per calendar day, regardless of how large the real gap
+  // is -- see signCumulativeAuth's own doc comment.
   t.mock.timers.enable({ apis: ['Date'] })
-  // A tight top-up step (equal to one day) deliberately forces the ceiling
-  // to be exhausted by a real multi-day gap, exercising the preemptive
-  // top-up-before-sign path -- decisions doc SS6.7.
   await withBuyer(DAILY_AMOUNT, async ({ buyer }) => {
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(0n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
-    // Bootstrap's own top-up raises the ceiling to 2x daily (one
-    // maxReserveAmountUsdc step) -- keep that step's confirmation instant,
-    // then deliberately DON'T give any more headroom, so the 9-day gap
-    // below genuinely exhausts it and the preemptive top-up path has to fire.
+    // Bootstrap's own top-up raises the ceiling by exactly one day's
+    // increment (the fixed topUpReserve call, not the generic per-request
+    // default) -- keep that step's confirmation instant.
     scripted.bumpTo(DAILY_AMOUNT * 2n)
     await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1 + prepare-tomorrow top-up
     const ceilingAfterDay1 = buyer.getReserveCeiling(SELLER_PEER_ID)
-    assert.equal(ceilingAfterDay1, DAILY_AMOUNT * 2n, 'day 1\'s own top-up raised the ceiling by exactly one step')
+    assert.equal(ceilingAfterDay1, DAILY_AMOUNT * 2n, 'day 1\'s own top-up raised the ceiling by exactly one day\'s increment, not the generic per-request default')
 
     // App closed for 9 more days -- toggle never switched off, nothing signed.
     t.mock.timers.tick(9 * DAY_MS)
-    // Now let the scripted chain reflect whatever the preemptive top-up(s)
-    // below raise the ceiling to, confirmed instantly each time.
     scripted.bumpTo(DAILY_AMOUNT * 100n)
 
     const beforeCatchUp = mux.sent.length
     await signDailyIfNeeded(SELLER_PEER_ID)
     const catchUpAuths = mux.sent.slice(beforeCatchUp)
 
-    // Exactly one SpendingAuth carrying the real cumulative for the whole
-    // backlog -- any preemptive top-up(s) sent alongside it carry reserve
-    // fields, not a competing cumulative claim.
     const realSigns = catchUpAuths.filter((a) => !a.reserveMaxAmount)
-    assert.equal(realSigns.length, 1, 'the backlog is captured in a single real signature, not split or duplicated')
-    assert.equal(BigInt(realSigns[0]!.cumulativeAmount), DAILY_AMOUNT * 10n, 'day 1 + 9 missed days = 10 total, independently bounded by real elapsed time')
+    assert.equal(realSigns.length, 1, 'exactly one real signature, not split or duplicated')
+    assert.equal(
+      BigInt(realSigns[0]!.cumulativeAmount), DAILY_AMOUNT * 2n,
+      'a 9-day gap still grants only ONE more day beyond day 1 -- the remaining 8 days are written off, not chased in a lump sum',
+    )
+
+    // The next tick, further along, catches up exactly one more day --
+    // proving the backlog is recovered gradually (one day per cycle) when
+    // real ticks keep happening, not permanently lost after the first catch-up.
+    t.mock.timers.tick(DAY_MS)
+    const beforeSecondTick = mux.sent.length
+    await signDailyIfNeeded(SELLER_PEER_ID)
+    const secondTickAuths = mux.sent.slice(beforeSecondTick).filter((a) => !a.reserveMaxAmount)
+    assert.equal(secondTickAuths.length, 1)
+    assert.equal(BigInt(secondTickAuths[0]!.cumulativeAmount), DAILY_AMOUNT * 3n, 'the next real day advances by exactly one more day again')
   })
 })
 
@@ -283,7 +293,7 @@ test('on-chain settlement: a channel closed on-chain (local store still says act
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 20n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
     await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
     const firstSessionId = buyer.getActiveSession(SELLER_PEER_ID)!.sessionId
@@ -319,7 +329,7 @@ test('reserve deadline renewal: an expired deadline with a healthy ceiling renew
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(DAILY_AMOUNT * 20n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
     await signDailyIfNeeded(SELLER_PEER_ID) // bootstrap + day 1
     const sentAfterDay1 = mux.sent.length
@@ -366,7 +376,7 @@ test('topUpAndReconcile genuinely waits for on-chain confirmation before reconci
     const mux = createRecordingMux()
     const scripted = createScriptedChannelsClient(0n)
     const node: DailySigningNode = { buyerPaymentManager: buyer, channelsClient: scripted.client, getOrConnectPaymentMux: async () => mux }
-    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT, catchUpCapDays: CATCH_UP_CAP_DAYS })
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, { dailyAmountUsdc: DAILY_AMOUNT })
 
     // The first getSession() read during bootstrap's own top-up will see
     // the OLD deposit (bumpAfterOneRead delays the raise by one read) --

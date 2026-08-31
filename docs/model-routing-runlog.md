@@ -19,6 +19,66 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-31] The toggle-on-gap catch-up burst is removed; a single call never grants more than one day, deviating from §6.7/§9.1's ~30-day backlog design
+
+**Type:** Deviation from the ground truth, forced by a real live incident, not a preference.
+
+**What happened.** The decisions doc (§6.7, §9.1, §13 item 7) and payment-flow doc both
+describe, as the working design, a toggle-on-gap "catch-up burst": reconnecting after a
+gap raises the ceiling and signs the full owed backlog (capped at ~30 toggle-on days) in
+one two-transaction sequence. Live today: a subscription channel open under four hours
+signed a single cumulative of $3.54 (six days' worth), because two independent bugs
+compounded --
+
+1. `signCumulativeAuth`'s elapsed-day math genuinely computed a large `daysElapsed` (a
+   stale `_lastFlatFeeSignedAt` from a prior session/channel, or a real multi-day gap
+   across this test subscription's on/off cycles this week) and `catchUpCapDays` let a
+   single call sign that many days at once, exactly as designed.
+2. `BuyerPaymentManager.topUpReserve`, called from the daily-signing path with no
+   increment argument, silently used the buyer-wide per-request reserve default
+   ($1.00) instead of the subscription's `dailyAmountUsdc` ($0.59) on every top-up --
+   observable directly in the resulting ceilings (1.59, 2.59, 5.59 = 0.59 + N×1.00).
+   This gave the ceiling far more headroom than one day's charge ever needed, which is
+   what made the six-day signature actually signable.
+
+Real consequence: the buyer's subscription overcharged roughly 15x in one day (~$8.67
+against a $0.59/day rate), draining deposits from ~$8 to under $1.
+
+**What changed, deviating from §6.7/§9.1/item 7.** `signCumulativeAuth` (buyer-core's
+`buyer-payment-manager.ts`) no longer accepts a `catchUpCapDays` config at all --
+`FlatFeeSigningConfig` now carries only `dailyAmountUsdc`, and a single call is
+structurally incapable of granting more than one day's increment beyond the previous
+signature, regardless of how large the real elapsed gap computes to. Backlog beyond one
+day is written off, not chased in a lump sum -- a missed multi-day gap now recovers one
+day per signing cycle (background tick or real request) instead of one burst, which
+means a long gap takes longer to fully recover but can never overcharge past one day
+per cycle even if the elapsed-time arithmetic is wrong again in the future. This makes
+§13 item 7's worst-case-backlog-vs-credit-limit analysis moot (there is no multi-day
+backlog signature to bound anymore) and retires §6.7's two-call catch-up burst as
+"the" reconnect mechanism -- reconnect after a gap is now just an ordinary one-day
+top-up-then-sign, the same shape as any other day, only the ceiling might need raising
+first if it was exhausted while away.
+
+**Separately, `topUpReserve` gained an explicit `incrementUsdc` parameter** (defaults to
+the existing per-request behavior, so the metered negotiation path is unaffected) --
+`daily-subscription-signing.ts` now always passes `dailyAmountUsdc` explicitly. This is a
+straight bug fix, not a documented-behavior deviation (no ground-truth doc specifies
+which increment a top-up should use).
+
+**Not yet resolved:** the root cause of `daysElapsed` computing a stale multi-day value
+in the first place (was it a genuinely-long real gap across this week's on/off testing,
+or a stale `_lastFlatFeeSignedAt` surviving a session change that should have cleared
+it via `cleanupSession`?) was not tracked down -- the fix makes it not matter for safety
+either way, but the "why did it think 6 days had passed" question is still open if
+anyone wants to chase it later.
+
+**Ground truth reference:** deviates from `docs/model-routing-architecture-and-open-decisions.md`
+§6.7, §9.1, §13 item 7, and `docs/model-routing-payment-flow.md`'s catch-up-burst
+description (lines ~11, 142, 160) -- those docs are left as-is per this file's own
+discipline; this entry is where the actual behavior is recorded.
+
+---
+
 ## [2026-08-31] `buyerPeerId` is now provable, not just claimed — resolves decisions doc SS13 item 8
 
 **Type:** Decision, implemented. Resolves the item both the decisions doc

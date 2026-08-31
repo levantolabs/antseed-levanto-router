@@ -15,11 +15,12 @@
  *  - Ordinary day: sign today's cumulative; top up for tomorrow if the
  *    ceiling is now past its 65% trigger.
  *  - Reconnect after a toggle-on gap (SS6.7): the ceiling was never
- *    topped up while the buyer was away, so it's raised (and reconciled
- *    from a real on-chain read) BEFORE signing -- signing first would
- *    silently reset the elapsed-day clock signCumulativeAuth relies on
- *    to compute the real backlog, without actually capturing more than a
- *    same-tick no-op would allow.
+ *    topped up while the buyer was away, so it's raised by exactly one
+ *    day's worth (and reconciled from a real on-chain read) BEFORE
+ *    signing -- signCumulativeAuth itself never grants more than one
+ *    day per call regardless of how long the gap was (see its own doc
+ *    comment), so however many days are actually owed get caught up one
+ *    per cycle rather than all at once.
  */
 import type { BuyerPaymentManager, ChannelsClient, FlatFeeSigningConfig, PaymentMux } from '@antseed/node'
 import { log } from './request-utils.js'
@@ -49,8 +50,6 @@ async function flushGap(): Promise<void> {
 export interface DailySubscriptionSigningOptions {
   /** e.g. 590_000n for $0.59/day (6-decimal USDC) -- decisions doc SS1. */
   dailyAmountUsdc: bigint
-  /** Backlog cap for a toggle-on gap -- decisions doc SS6.7. */
-  catchUpCapDays: number
 }
 
 /**
@@ -106,6 +105,7 @@ const TOPUP_CONFIRMATION_TIMEOUT_MS = 30_000
 async function topUpAndReconcile(
   node: DailySigningNode,
   sellerPeerId: string,
+  incrementUsdc: bigint,
 ): Promise<void> {
   const buyer = node.buyerPaymentManager
   const channelsClient = node.channelsClient
@@ -115,7 +115,12 @@ async function topUpAndReconcile(
   const ceilingBeforeTopUp = buyer.getReserveCeiling(sellerPeerId)
 
   const paymentMux = await node.getOrConnectPaymentMux(sellerPeerId)
-  await buyer.topUpReserve(sellerPeerId, paymentMux)
+  // The subscription's own daily amount, never BuyerPaymentManager's generic
+  // per-request reserve default -- passing no increment here is the exact
+  // bug that let the ceiling balloon by $1.00 per top-up instead of $0.59,
+  // which is what made an over-large signCumulativeAuth call signable in
+  // the first place. See buyer-payment-manager.ts's topUpReserve doc comment.
+  await buyer.topUpReserve(sellerPeerId, paymentMux, incrementUsdc)
 
   if (!channelsClient) {
     log(`no channelsClient available -- cannot confirm or reconcile the top-up for ${sellerPeerId.slice(0, 12)}...`)
@@ -145,14 +150,7 @@ export function createSignDailyIfNeeded(
 ): (sellerPeerId: string) => Promise<void> {
   const flatFeeConfig: FlatFeeSigningConfig = {
     dailyAmountUsdc: options.dailyAmountUsdc,
-    catchUpCapDays: options.catchUpCapDays,
   }
-  // A single call requesting "everything owed" -- signCumulativeAuth
-  // internally clamps to what's actually allowed (real elapsed days,
-  // catchUpCapDays, and the current ceiling), so the caller never computes
-  // the real target itself (buyer-payment-manager.ts's own doc comment on
-  // signCumulativeAuth: "a REQUEST, not a command").
-  const requestEverything = options.dailyAmountUsdc * BigInt(options.catchUpCapDays)
 
   return async function signDailyIfNeeded(sellerPeerId: string): Promise<void> {
     const buyer = node.buyerPaymentManager
@@ -188,7 +186,7 @@ export function createSignDailyIfNeeded(
       await flushGap()
       // Prepare tomorrow's ceiling now (SS6.5's Day-1 row) -- nothing more
       // is owed today, so this is a top-up only, not a second signature.
-      await topUpAndReconcile(node, sellerPeerId)
+      await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
       return
     }
 
@@ -203,23 +201,19 @@ export function createSignDailyIfNeeded(
     // be decided from topUpNeeded (the POST-sign 65%-threshold flag)
     // instead: signing first, when the ceiling is already exhausted from a
     // prior gap, would still "succeed" as a same-tick no-op that silently
-    // resets the elapsed-day clock without ever capturing the real
-    // backlog (see topUpAndReconcile's own doc comment) -- SS6.7's
-    // catch-up burst needs the ceiling raised BEFORE that one real sign,
-    // not after.
+    // resets the elapsed-day clock without ever capturing that one day's
+    // charge -- the ceiling needs raising BEFORE that one real sign, not
+    // after.
     const currentCumulative = BigInt(existingSession.authMax || '0')
-    // Math.floor, not Math.max(1, Math.ceil(...)): a call minutes after the
-    // last one must predict ZERO additional days owed, not a fresh one --
-    // must match signCumulativeAuth's own (equally fixed) elapsed-day math
-    // exactly, or this preemptive gate keeps demanding top-ups signCumulativeAuth
-    // itself would never actually need. The old floor-of-1 combined with
-    // currentCumulative being re-read fresh from the last cycle's own bump is
-    // exactly how a channel with zero real usage reached an $11.21 "owed"
-    // figure from repeated same-day retries (see buyer-payment-manager.ts's
-    // signCumulativeAuth for the full writeup).
+    // Purely informational -- logged below so a long real gap is visible,
+    // but never used to size a target or an increment. signCumulativeAuth
+    // itself now hard-caps a single call to at most one more day's charge
+    // regardless of how many calendar days have actually elapsed (see its
+    // own doc comment for the six-day-in-four-hours incident this closes),
+    // so the preemptive top-up below only ever needs to cover one more day,
+    // never a multi-day backlog.
     const daysSinceLastSign = Math.floor((Date.now() - existingSession.updatedAt) / MS_PER_DAY)
-    const trueTarget = currentCumulative
-      + options.dailyAmountUsdc * BigInt(Math.min(daysSinceLastSign, options.catchUpCapDays))
+    const trueTarget = currentCumulative + options.dailyAmountUsdc
 
     let ceiling = buyer.getReserveCeiling(sellerPeerId)
     // The ceiling and the reserve's on-chain deadline are independent -- the
@@ -238,21 +232,25 @@ export function createSignDailyIfNeeded(
         await buyer.renewReserveDeadline(sellerPeerId, paymentMux)
         reserveDeadlineExpiring = false
       } else {
-        log(`ceiling too low to cover what's owed for ${sellerPeerId.slice(0, 12)}... (need ${trueTarget}, have ${ceiling}) -- topping up before signing (SS6.7 catch-up burst)`)
-        await topUpAndReconcile(node, sellerPeerId)
+        log(`ceiling too low to cover one more day for ${sellerPeerId.slice(0, 12)}... (need ${trueTarget}, have ${ceiling}, ${daysSinceLastSign} day(s) since last sign) -- topping up before signing`)
+        await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
       }
       ceiling = buyer.getReserveCeiling(sellerPeerId)
       preemptiveTopUps += 1
     }
 
-    const { payload, topUpNeeded } = await buyer.signCumulativeAuth(sellerPeerId, requestEverything)
+    // Request exactly one more day than what's already on file --
+    // signCumulativeAuth would clamp to this anyway even if asked for more
+    // (see its own doc comment), but asking honestly for what's actually
+    // wanted beats relying on a downstream clamp to hide a wrong request.
+    const { payload, topUpNeeded } = await buyer.signCumulativeAuth(sellerPeerId, trueTarget)
     paymentMux.sendSpendingAuth(payload)
     log(`signed daily cumulative for ${sellerPeerId.slice(0, 12)}...: ${payload.cumulativeAmount}`)
 
     if (topUpNeeded) {
       // Prepare for next time -- not a re-sign; today's cumulative is
       // already on file above.
-      await topUpAndReconcile(node, sellerPeerId)
+      await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
     }
   }
 }

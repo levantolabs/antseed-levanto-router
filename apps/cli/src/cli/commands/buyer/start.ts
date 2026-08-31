@@ -463,13 +463,12 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       // payments are configured -- constructing the router itself (above)
       // happens before the node has started.
       if (router.configureDailySigning && paymentsConfig?.enabled) {
-        // $0.59/day, 30-day catch-up cap -- decisions doc SS1/SS6.2/SS6.7.
-        // Hardcoded: no wire mechanism exists yet for a buyer to learn the
-        // correct price from the routing peer itself (decisions doc SS13
-        // item 6, out of scope for this pass -- no decided direction).
+        // $0.59/day -- decisions doc SS1/SS6.2/SS6.7. Hardcoded: no wire
+        // mechanism exists yet for a buyer to learn the correct price from
+        // the routing peer itself (decisions doc SS13 item 6, out of scope
+        // for this pass -- no decided direction).
         const signDailyIfNeeded = createSignDailyIfNeeded(node, {
           dailyAmountUsdc: 590_000n,
-          catchUpCapDays: 30,
         })
         router.configureDailySigning(signDailyIfNeeded)
 

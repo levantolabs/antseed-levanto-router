@@ -107,8 +107,6 @@ export interface PerRequestAuthResult {
 export interface FlatFeeSigningConfig {
   /** e.g. $0.59/day as 590000n (6-decimal USDC). */
   dailyAmountUsdc: bigint;
-  /** Caps how many days' worth a single call can catch up in one signature. */
-  catchUpCapDays: number;
 }
 
 export interface BuyerRequestBillingEntry {
@@ -1450,9 +1448,10 @@ export class BuyerPaymentManager {
    * per-request usage.
    *
    * requestedCumulativeAmount is a REQUEST, not a command: this method never
-   * signs more than dailyAmountUsdc times the calendar days actually elapsed
-   * since it last signed for this seller (capped at catchUpCapDays), computed
-   * from this manager's own clock and its own persisted state — never from
+   * signs more than one dailyAmountUsdc increment beyond the previous
+   * signature, no matter how many calendar days have actually elapsed since
+   * it last signed for this seller (see maxAllowedIncrement below) — computed
+   * from this manager's own clock and its own persisted state, never from
    * anything the caller says. This mirrors _maxSignableForVerified's role for
    * metered billing (bounding by independently-verified cost, not the
    * caller's claim); a routing-client plugin is explicitly allowed to be
@@ -1497,8 +1496,18 @@ export class BuyerPaymentManager {
     const daysElapsed = lastSignedAt == null
       ? 1 // first-ever flat-fee signature for this seller — exactly one day's worth
       : Math.floor((Date.now() - lastSignedAt) / (24 * 60 * 60 * 1000));
-    const cappedDays = Math.min(daysElapsed, config.catchUpCapDays);
-    const maxAllowedIncrement = config.dailyAmountUsdc * BigInt(cappedDays);
+    // Hard invariant, independent of how large daysElapsed computes to: a
+    // single call never grants more than one day's charge. A stale
+    // `lastSignedAt` from a prior channel/session, a long real gap, or a
+    // future bug in the arithmetic above all degrade to "at most one day
+    // this call" instead of "however many days daysElapsed says" -- found
+    // live: a channel open for under four hours signed 3.54 (six days'
+    // worth) in one call, because a config knob let a single signature
+    // catch up an unbounded backlog. Uncollected backlog beyond one day is
+    // written off, not chased in a lump sum -- never overcharging matters
+    // more here than never undercharging; the next tick catches up one more
+    // day, and the one after that, however many are actually owed.
+    const maxAllowedIncrement = daysElapsed > 0 ? config.dailyAmountUsdc : 0n;
 
     const ceiling = this._getCeiling(sellerPeerId);
     let maxSignable = prevAmount + maxAllowedIncrement;
@@ -1835,10 +1844,23 @@ export class BuyerPaymentManager {
    * Sign a new ReserveAuth with a higher maxAmount to extend the session's reserve ceiling.
    * The seller must call reserve() on-chain again with the new signature.
    * Note: requires contract support for top-up (increaseDeposit on existing channelId).
+   *
+   * `incrementUsdc` defaults to the buyer-wide per-request reserve default
+   * (`_config.maxReserveAmountUsdc`) for the metered per-request negotiation
+   * path this was originally written for. A flat daily-subscription caller
+   * MUST pass its own `dailyAmountUsdc` explicitly here instead of relying on
+   * this default -- found live: the daily-signing path called this with no
+   * increment, silently topping up by the $1.00 per-request default instead
+   * of the subscription's $0.59/day, on every top-up. That's what let a
+   * single over-large signCumulativeAuth call (see that method's own
+   * six-day-in-four-hours incident writeup) actually be signable in the
+   * first place -- the ceiling had far more headroom than one day's charge
+   * ever needed.
    */
   async topUpReserve(
     sellerPeerId: string,
     paymentMux: PaymentMux,
+    incrementUsdc: bigint = this._config.maxReserveAmountUsdc,
   ): Promise<void> {
     const session = this.getActiveSession(sellerPeerId);
     if (!session) {
@@ -1847,7 +1869,7 @@ export class BuyerPaymentManager {
     }
 
     const prevCeiling = this._getCeiling(sellerPeerId);
-    const newCeiling = prevCeiling + this._config.maxReserveAmountUsdc;
+    const newCeiling = prevCeiling + incrementUsdc;
     const additionalReserve = newCeiling - prevCeiling;
     const deadline = Math.floor(Date.now() / 1000) + this._config.defaultAuthDurationSecs;
 
