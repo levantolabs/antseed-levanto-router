@@ -2665,3 +2665,49 @@ the affected machine) to close.
 
 **Ground truth reference:** none -- this is a storage-layer correctness gap orthogonal to
 the docs' protocol-level content.
+
+## [2026-08-31] Savings surfaced as a Profile pill + browser dashboard, not in-app panels
+
+**Type:** Decides something the docs are silent on -- where the removed per-session UI
+(reverted the same day, see the entry above) should live instead.
+
+**The pill:** `VprCreditsView.tsx` (the desktop app's Profile view), directly below the
+existing Network rewards and Payment channels cards, in the same `VprCard` visual style.
+Shows "You've saved $X in the past 7 days," gated on
+`vprRoutingPreferences.autoSubscriptionEnabled` -- the same standing toggle
+`VprPreferencesView` already gates on, reused rather than inventing a second condition.
+The 7-day figure is `computeRecentRouterSavings` (new, `router-savings.ts`), a thin,
+independently-testable sibling of the existing `computeRouterSavings` that takes an
+explicit `nowMs` rather than reading `Date.now()` internally.
+
+**The details page: deliberately NOT added to `apps/payments`' web SPA.** That app's own
+`App.tsx` states plainly: "The portal dashboard is retired -- every view lives in the
+desktop app (or the CLI). This page exists only for the actions that need an external
+wallet signature." `App.tsx` doesn't even have a `page=` switch anymore -- it unconditionally
+renders the wallet-signing `PayPage`. A read-only sessions/metrics view needs no wallet
+signature at all, so grafting it onto that retired SPA would directly reverse a stated,
+deliberate architectural decision. Instead: a new `GET /_antseed/routing-decisions/dashboard`
+route on the buyer-proxy's own already-running, already-unauthenticated control plane
+(`apps/cli/src/proxy/buyer-proxy.ts`, HTML in the new `routing-savings-dashboard.ts`) --
+self-contained inline HTML/JS, no build step, reading the existing
+`/_antseed/routing-decisions` JSON endpoint same-origin. Opened via a new
+`payments:open-savings-page` IPC that reuses `payments:open-pay-page`'s exact
+`shell.openExternal`-with-Electron-popup-fallback mechanism, just pointed at this route
+instead of starting the payments portal -- the *mechanism* ("open a localhost page in the
+browser") is the reusable part; the *host* (buyer-proxy vs. the retired portal) had to
+change to fit where this data actually needs no wallet.
+
+**Not done:** the dashboard page's per-session labels are truncated `conversationKey`
+values, not human conversation titles -- the buyer-proxy doesn't know the desktop app's
+conversation list (that cross-reference lived in the now-removed `VprActivityView` code,
+via `buyerConversationsResource`). Deferred rather than plumbing conversation titles into
+the CLI's own process just for a label.
+
+**Verification:** `apps/desktop` renderer 387/387 (384 baseline + 3 new
+`computeRecentRouterSavings` tests), both `tsconfig.renderer.json` and `tsconfig.main.json`
+typecheck clean, `apps/cli` builds clean and `buyer-proxy.test.js` unaffected (134/135, the
+1 failure the same pre-existing `autoSubscriptionEnabled`/`cqt` fixture mismatch documented
+earlier in this log).
+
+**Ground truth reference:** none of the four docs specify where routing-savings UI should
+live at this granularity.
