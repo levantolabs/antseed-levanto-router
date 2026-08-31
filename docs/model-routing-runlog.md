@@ -19,6 +19,45 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-31] AIP-5 alignment audit: router-picker generalization shipped via a lighter path than decided; `autoSubscriptionEnabled` relocation still blocked on a live-toggle gap
+
+**Type:** Status update on the two entries directly below, from a full audit of code against
+the four ground-truth docs and this runlog. No payment-flow or router-trigger code changed.
+
+**Router selection (the entry directly below this one): substantially shipped, but not via the
+decided mechanism.** Commit `94a6a730` ("Let the desktop's router picker discover any installed
+router plugin," 2026-08-30) added `VprRoutingPreferences.selectedRouterPackage: string | null`
+directly to the existing buyer-preferences shape, resolved generically in
+`ProcessManager.applyLevantoRouterDemoOverride` (`apps/desktop/src/main/runtime/process-manager.ts`
+— any non-Levanto package passes straight through as `opts.router`, no Levanto-specific branching),
+with the Preferences dropdown now populated from `installedRouterPluginsResource` (whatever's
+actually installed) instead of a single hardcoded option. This satisfies the scoped-down target the
+entry below set ("spawn resolves a router by name... generically; the config field is honestly
+named instead of a boolean," without a multi-entry picker) — but it did not adopt the
+plugin-instance-config store (`packages/node/src/config/plugin-config-manager.ts`'s
+`addInstance`/`getInstance`) the entry actually decided on. That store's write side still has zero
+callers anywhere in the codebase — confirmed again today, unchanged from the entry below. Logging
+the lighter path as the real implemented direction rather than re-deciding it.
+
+**`autoSubscriptionEnabled` relocation (the second entry below): still not done, and now has a
+concrete blocker worth recording before anyone picks it up.** `router.ts`'s `ensureSignedToday`
+still reads `this.cachedRoutingPreferences?.autoSubscriptionEnabled` unchanged. The blocker: this
+toggle takes effect *live*, no restart — `app.ts`'s `updateVprRoutingPreferences` says so directly
+("flipping it has to take effect immediately, not wait for the next unrelated recompute"),
+pushing straight to the running router via `Router.updateRoutingPreferences()`. Moving the field
+into construction-time plugin config (the originally decided direction — "a subscription-priced
+router reads its own consent from its own plugin configuration") would silently turn that into
+"takes effect on next reconnect" unless a live-update path for router-owned config is built
+too — no such mechanism exists today; `configureDailySigning`/`updateRoutingPreferences` are the
+only two post-construction pushes `Router` supports, and neither is scoped to plugin-instance
+config. This is a real-money consent gate, so not guessing at which UX to give up — flagging the
+tradeoff instead of resolving it silently.
+
+**Ground truth reference:** none, same as the two entries below — this is downstream of the
+router-agnostic decision, not something the four ground-truth docs address.
+
+---
+
 ## [2026-08-28] `autoSubscriptionEnabled` moves off `ModelRoutingPreferences`, into plugin config — decided in the AIP, not yet built
 
 **Type:** Decision, no code changed yet. Recorded so it isn't re-derived from
