@@ -976,6 +976,16 @@ export class BuyerPaymentManager {
     // Sign ReserveAuth — binds channelId, maxAmount, deadline on-chain
     const channelsDomain = this._channelsDomain;
     const maxAmount = reserveAmount;
+    // Unconditional (not debugWarn -- gated behind isDebugEnabled()) because
+    // this is the only signal that made the FirstSignCapExceeded class of
+    // bug visible: a bad `explicit` reserveAmount here silently becomes a
+    // channel-opening ReserveAuth that gets rejected on-chain, with nothing
+    // else in this path naming which of the two sources (an explicit caller
+    // amount vs. the configured default) produced it.
+    console.warn(
+      `[BuyerPayment] reserve: seller=${sellerPeerId.slice(0, 12)}... maxAmount=${maxAmount} `
+      + `explicit=${typeof reserveAmountOrPricing === 'bigint'} configDefault=${this._config.maxReserveAmountUsdc}`,
+    );
     const reserveMsg: ReserveAuthMessage = {
       channelId,
       maxAmount,
