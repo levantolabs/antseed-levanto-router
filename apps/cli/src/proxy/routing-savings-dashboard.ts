@@ -114,7 +114,14 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
         counts[key] = (counts[key] || 0) + 1;
       });
     });
-    return Object.keys(counts).sort(function (a, b) { return counts[b] - counts[a]; });
+    // Key presence alone isn't enough -- a model can appear in some row's
+    // baselinePrices with a zero/unusable price (computeSavings already
+    // skips those per-row via its own rowBaseline <= 0 check). Only offer a
+    // baseline the user could actually compare against: one that produces
+    // real, positive savings data somewhere in this row set.
+    return Object.keys(counts)
+      .filter(function (key) { return computeSavings(rows, key) !== null; })
+      .sort(function (a, b) { return counts[b] - counts[a]; });
   }
   function groupBySession(rows) {
     var byKey = {};
