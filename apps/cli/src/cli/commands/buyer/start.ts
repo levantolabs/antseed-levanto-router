@@ -17,6 +17,7 @@ import { resolvePluginPackage } from '../../../plugins/registry.js'
 import { BuyerProxy, type DepositWatcherAbsenceReason } from '../../../proxy/buyer-proxy.js'
 import { DepositWatcher } from '../../../proxy/deposit-watcher.js'
 import { createSignDailyIfNeeded, scheduleDailySigningChecks } from '../../../proxy/daily-subscription-signing.js'
+import { createSignRouteAuth } from '../../../proxy/route-auth-signing.js'
 import { log } from '../../../proxy/request-utils.js'
 import { curatedVerifierIds, resolveVerifierPolicy, type VerifierPolicy } from '../../../plugins/verifier.js'
 import { resolveEffectiveBuyerConfig, type BuyerRuntimeOverrides } from '../../../config/effective.js'
@@ -482,6 +483,20 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
             stopDailySigningChecks()
           })
         }
+      }
+
+      // Optional Router capability (model-routing decisions doc SS13 item
+      // 8): a router that talks to a bare, unauthenticated routing-peer HTTP
+      // endpoint implements configureRouteAuthSigning to receive a real
+      // signing closure, proving requests actually come from this buyer's
+      // own PeerId. Independent of paymentsConfig?.enabled -- this proves
+      // identity, not a payment; the buyer's Identity/wallet exists
+      // regardless of whether payments are configured.
+      if (router.configureRouteAuthSigning && node.identity) {
+        router.configureRouteAuthSigning(createSignRouteAuth(node.identity, {
+          evmChainId: chainConfig.evmChainId,
+          channelsContractAddress: chainConfig.channelsContractAddress,
+        }))
       }
 
       if (paymentsConfig?.enabled) {

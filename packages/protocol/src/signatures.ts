@@ -1,4 +1,4 @@
-import { type AbstractSigner, type TypedDataDomain, AbiCoder, hexlify, id, keccak256, randomBytes } from 'ethers';
+import { type AbstractSigner, type TypedDataDomain, AbiCoder, hexlify, id, keccak256, randomBytes, verifyTypedData } from 'ethers';
 
 // =========================================================================
 // EIP-712 Types — AntSeed SpendingAuth (cumulative payment authorization)
@@ -40,6 +40,29 @@ export const FREE_USAGE_AUTH_TYPES = {
     { name: 'sequence', type: 'uint256' },
     { name: 'metadataHash', type: 'bytes32' },
     { name: 'deadline', type: 'uint256' },
+  ],
+};
+
+/**
+ * Proves who is actually sending a `/_antseed/route` request (model-routing
+ * decisions doc SS13 item 8, previously unresolved: `x-antseed-buyer-peer-id`
+ * was a client-asserted, unverified header -- anyone reaching a routing
+ * peer's HTTP surface could claim to be any buyer). Off-chain only, never
+ * submitted to a contract -- EIP-712 typed data is reused here purely for
+ * its existing, audited structured-signing shape and because the buyer's
+ * `PeerId` already *is* their EVM address (`peer-id.ts`), not because this
+ * needs on-chain verification. `routingPeer` binds the signature to one
+ * specific routing peer (a signature captured by peer A can't be replayed
+ * against peer B); `issuedAt` + `nonce` bound the replay window on the
+ * receiving side (a short-lived, in-memory seen-nonce cache is enough -- this
+ * is an HTTP auth check, not a channel authorization).
+ */
+export const ROUTE_REQUEST_AUTH_TYPES = {
+  RouteRequestAuth: [
+    { name: 'buyer', type: 'address' },
+    { name: 'routingPeer', type: 'address' },
+    { name: 'issuedAt', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
   ],
 };
 
@@ -99,6 +122,13 @@ export interface FreeUsageAuthMessage {
   sequence: bigint;
   metadataHash: string;
   deadline: bigint;
+}
+
+export interface RouteRequestAuthMessage {
+  buyer: string;
+  routingPeer: string;
+  issuedAt: bigint;
+  nonce: string; // bytes32 hex
 }
 
 export interface ReceiveAuthorizationMessage {
@@ -453,6 +483,30 @@ export async function signFreeUsageAuth(
   msg: FreeUsageAuthMessage,
 ): Promise<string> {
   return signer.signTypedData(domain, FREE_USAGE_AUTH_TYPES, msg);
+}
+
+export async function signRouteRequestAuth(
+  signer: AbstractSigner,
+  domain: TypedDataDomain,
+  msg: RouteRequestAuthMessage,
+): Promise<string> {
+  return signer.signTypedData(domain, ROUTE_REQUEST_AUTH_TYPES, msg);
+}
+
+/**
+ * Recovers the signer address from a `RouteRequestAuth` signature. Pure
+ * (no chain read) -- callers compare the result against the claimed
+ * `buyerPeerId` (as `'0x' + buyerPeerId`, since PeerId IS the EVM address)
+ * and against their own `routingPeer` address, and separately enforce the
+ * `issuedAt`/`nonce` replay window. Throws if the signature is malformed;
+ * callers should treat that the same as a verification failure.
+ */
+export function recoverRouteRequestAuthSigner(
+  domain: TypedDataDomain,
+  msg: RouteRequestAuthMessage,
+  signature: string,
+): string {
+  return verifyTypedData(domain, ROUTE_REQUEST_AUTH_TYPES, msg, signature);
 }
 
 export interface SignedReceiveAuthorization {

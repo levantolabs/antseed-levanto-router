@@ -17,6 +17,8 @@ import {
   makeChannelsDomain,
   signSpendingAuth,
   signReserveAuth,
+  signRouteRequestAuth,
+  recoverRouteRequestAuthSigner,
 } from './signatures.js';
 import { buildConnectionAuthPayload } from './connection-auth.js';
 import { signUtf8, verifyUtf8 } from './signing.js';
@@ -83,6 +85,46 @@ describe('EIP-712 golden vectors', () => {
     const reserve = { channelId, maxAmount: 1_000_000n, deadline: 1900000000n };
     const reserveSig = await signReserveAuth(wallet, domain, reserve);
     expect(verifyTypedData(domain, RESERVE_AUTH_TYPES, reserve, reserveSig)).toBe(wallet.address);
+  });
+});
+
+describe('RouteRequestAuth (buyer identity proof for /_antseed/route)', () => {
+  const domain = makeChannelsDomain(8453, '0xBA66d3b4fbCf472F6F11D6F9F96aaCE96516F09d');
+  const routingPeer = '0x' + 'aa'.repeat(20);
+
+  it('signs and recovers to the signer address', async () => {
+    const msg = {
+      buyer: wallet.address,
+      routingPeer,
+      issuedAt: 1900000000n,
+      nonce: '0x' + '11'.repeat(32),
+    };
+    const sig = await signRouteRequestAuth(wallet, domain, msg);
+    expect(recoverRouteRequestAuthSigner(domain, msg, sig)).toBe(wallet.address);
+  });
+
+  it('recovers a different address for a tampered field (routingPeer swapped)', async () => {
+    const msg = {
+      buyer: wallet.address,
+      routingPeer,
+      issuedAt: 1900000000n,
+      nonce: '0x' + '22'.repeat(32),
+    };
+    const sig = await signRouteRequestAuth(wallet, domain, msg);
+    const tampered = { ...msg, routingPeer: '0x' + 'bb'.repeat(20) };
+    expect(recoverRouteRequestAuthSigner(domain, tampered, sig)).not.toBe(wallet.address);
+  });
+
+  it('recovers a different address under a different domain (chain-scoped, not replayable across chains)', async () => {
+    const msg = {
+      buyer: wallet.address,
+      routingPeer,
+      issuedAt: 1900000000n,
+      nonce: '0x' + '33'.repeat(32),
+    };
+    const sig = await signRouteRequestAuth(wallet, domain, msg);
+    const otherChainDomain = makeChannelsDomain(1, '0xBA66d3b4fbCf472F6F11D6F9F96aaCE96516F09d');
+    expect(recoverRouteRequestAuthSigner(otherChainDomain, msg, sig)).not.toBe(wallet.address);
   });
 });
 

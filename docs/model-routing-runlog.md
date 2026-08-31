@@ -19,6 +19,66 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-08-31] `buyerPeerId` is now provable, not just claimed — resolves decisions doc SS13 item 8
+
+**Type:** Decision, implemented. Resolves the item both the decisions doc
+and `router.ts`'s own `LevantoRouterConfig.buyerPeerId` doc comment called
+"genuinely unresolved."
+
+Every `/_antseed/route`/`/_antseed/route/digest` request carried
+`x-antseed-buyer-peer-id` as a bare, client-asserted claim -- nothing
+checked it, so anyone reaching a routing peer's HTTP surface could claim to
+be any buyer. Resolved by reusing the same EIP-712 signing machinery every
+other AntSeed signature already uses (`@antseed/protocol`'s
+`signReserveAuth`/`signSpendingAuth` siblings), not a new scheme: a new
+`RouteRequestAuth` type (`{buyer, routingPeer, issuedAt, nonce}`), signed
+with the buyer's real wallet and verified by recovering the signer address
+-- straightforward because a `PeerId` *is* the EVM address hex
+(`@antseed/protocol/peer-id.ts`), so "does this signature belong to
+`buyerPeerId`" is a direct address comparison, no separate identity-linking
+needed. Never submitted on-chain; EIP-712 is reused purely for its existing,
+audited typed-data shape and domain separation (reusing
+`makeChannelsDomain` costs nothing extra and keeps one signing style across
+the codebase).
+
+Same key-custody rule as daily signing (SS6.2, software-arch doc SS2.6):
+the router plugin never holds a signing key -- apps/cli builds the signing
+closure from the buyer's own `Identity`/wallet (`node.identity`, not
+gated on payments being configured, since proving identity doesn't require
+a payment channel) and hands the plugin a narrow callback via a new
+optional `Router.configureRouteAuthSigning`, mirroring
+`configureDailySigning` exactly. `routingPeer` binds each signature to one
+specific routing peer (no cross-peer replay); `issuedAt` + an in-memory
+seen-nonce cache (60s window) bound replay on the verifying side -- an HTTP
+auth check, not a channel authorization, so this never needed on-chain-grade
+replay protection.
+
+**Rollout is opportunistic, not a hard cutover:** a request with no auth
+headers at all is still treated as unauthenticated and allowed through,
+identical to today's behavior -- an old client we haven't redeployed yet
+must keep working. A request that DOES carry auth headers but fails
+verification (bad signature, wrong signer, expired, reused nonce) is
+rejected with 401 -- a present-but-invalid proof is either an attack or a
+bug, never silently downgraded to "allow anyway." Flip
+`RouteAuthVerifier`'s policy to require headers once every real client
+sends them.
+
+**Split across both repos, per the public/private rule above:** the wire
+contract (header names, the `RouteRequestAuth` type, the EIP-712 domain
+choice) lives here (`packages/protocol/src/signatures.ts`,
+`packages/node/src/interfaces/buyer-router.ts`'s `RouteAuthHeaders`,
+`plugins/router-levanto/src/router.ts`, `apps/cli/src/proxy/route-auth-signing.ts`)
+-- it's the public client/wire contract. Verification itself
+(`RouteAuthVerifier`) lives in the private `levanto-routing-server` repo
+(`src/route-auth-verification.ts`, wired into `LevantoRoutingServerHandler`
+and `local-peer-daemon.ts`) -- proprietary routing-peer logic, same as the
+subscription gate it now runs alongside.
+
+**Ground truth reference:** `docs/model-routing-architecture-and-open-decisions.md`
+§13 item 8 (now resolved, not edited in place per the rule above).
+
+---
+
 ## [2026-08-31] AIP-5 alignment audit: router-picker generalization shipped via a lighter path than decided; `autoSubscriptionEnabled` relocation still blocked on a live-toggle gap
 
 **Type:** Status update on the two entries directly below, from a full audit of code against

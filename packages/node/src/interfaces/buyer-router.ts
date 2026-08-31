@@ -26,6 +26,24 @@ export type RouteCandidate = {
 };
 
 /**
+ * Proves who is actually sending a `/_antseed/route` (or `/_antseed/route/digest`)
+ * request -- a `RouteRequestAuth` EIP-712 signature (`@antseed/protocol`'s
+ * `signRouteRequestAuth`/`recoverRouteRequestAuthSigner`) plus the plain
+ * fields needed to reconstruct and verify it. `buyer` is the signing
+ * address, which is also the buyer's `PeerId` (`peerIdToAddress`) -- a
+ * verifying routing peer checks the recovered signer against
+ * `'0x' + x-antseed-buyer-peer-id`, not just that a signature is present.
+ */
+export type RouteAuthHeaders = {
+  buyer: string;
+  /** Unix seconds. */
+  issuedAt: number;
+  /** 0x-prefixed 32-byte hex. */
+  nonce: string;
+  signature: string;
+};
+
+/**
  * One resolved routing decision, predicted vs. actual (model-routing
  * software-architecture doc SS2.5) -- the shape a `selectRoute`-implementing
  * router's local ledger is expected to produce, so a host UI (e.g. VPR's
@@ -194,6 +212,20 @@ export interface Router {
    * `selectRoute` has no reason to implement this.
    */
   updateRoutingPreferences?(preferences: ModelRoutingPreferences): void;
+
+  /**
+   * Optional, additive: a router that talks to a routing peer over a bare,
+   * unauthenticated HTTP endpoint (model-routing decisions doc SS13 item 8,
+   * previously unresolved) implements this to receive a host-provided
+   * signing function, called once by the host after loading. Same
+   * key-custody rule as `configureDailySigning` -- the router never holds a
+   * real signing key directly (software-arch doc SS2.6), so the host signs
+   * and hands back only the resulting auth fields. `signRouteAuth` takes the
+   * routing peer's own PeerId (which the router already knows) since only
+   * the router knows which peer it's about to call; the returned signature
+   * is bound to that specific peer and cannot be replayed against another.
+   */
+  configureRouteAuthSigning?(signRouteAuth: (routingPeerId: string) => Promise<RouteAuthHeaders>): void;
 
   /**
    * Optional, additive: cache "warmth" observation feed (model-routing

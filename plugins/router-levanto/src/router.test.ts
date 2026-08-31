@@ -87,6 +87,56 @@ describe('LevantoRouter.selectRoute', () => {
     expect(result?.[0]?.inputUsdPerMillion).toBe(0.2);
   });
 
+  it('attaches route-auth headers when configureRouteAuthSigning is set (decisions doc SS13 item 8)', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+    const router = new LevantoRouter({
+      routingPeerUrl: 'http://x',
+      sellerPeerId: 'bb'.repeat(20),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    const signRouteAuth = vi.fn().mockResolvedValue({
+      buyer: '0x' + 'cc'.repeat(20),
+      issuedAt: 1_700_000_000,
+      nonce: '0x' + 'dd'.repeat(32),
+      signature: '0xsig',
+    });
+    router.configureRouteAuthSigning(signRouteAuth);
+
+    await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+
+    expect(signRouteAuth).toHaveBeenCalledWith('bb'.repeat(20));
+    const [, init] = fetchImpl.mock.calls[0] as [string, { headers: Record<string, string> }];
+    expect(init.headers['x-antseed-route-auth-buyer']).toBe('0x' + 'cc'.repeat(20));
+    expect(init.headers['x-antseed-route-auth-issued-at']).toBe('1700000000');
+    expect(init.headers['x-antseed-route-auth-nonce']).toBe('0x' + 'dd'.repeat(32));
+    expect(init.headers['x-antseed-route-auth-signature']).toBe('0xsig');
+  });
+
+  it('omits route-auth headers (not a hard failure) when no signing is configured, no sellerPeerId, or signing itself throws', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+
+    // No configureRouteAuthSigning call at all.
+    const noAuthRouter = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: 'bb'.repeat(20), fetchImpl: fetchImpl as unknown as typeof fetch });
+    await noAuthRouter.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+    let [, init] = fetchImpl.mock.calls.at(-1) as [string, { headers: Record<string, string> }];
+    expect(init.headers['x-antseed-route-auth-signature']).toBeUndefined();
+
+    // Configured, but no sellerPeerId to bind the signature to.
+    const noSellerRouter = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
+    noSellerRouter.configureRouteAuthSigning(vi.fn().mockResolvedValue({ buyer: '0x1', issuedAt: 1, nonce: '0x2', signature: '0x3' }));
+    await noSellerRouter.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+    ;[, init] = fetchImpl.mock.calls.at(-1) as [string, { headers: Record<string, string> }];
+    expect(init.headers['x-antseed-route-auth-signature']).toBeUndefined();
+
+    // Configured, sellerPeerId present, but signing itself rejects.
+    const throwingRouter = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: 'bb'.repeat(20), fetchImpl: fetchImpl as unknown as typeof fetch });
+    throwingRouter.configureRouteAuthSigning(vi.fn().mockRejectedValue(new Error('signer unavailable')));
+    const result = await throwingRouter.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
+    expect(result).toHaveLength(1); // routing still succeeds -- signing is lenient, not a hard gate
+    ;[, init] = fetchImpl.mock.calls.at(-1) as [string, { headers: Record<string, string> }];
+    expect(init.headers['x-antseed-route-auth-signature']).toBeUndefined();
+  });
+
   it('drops ranked candidates whose peer is not in the current peer set', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: true,

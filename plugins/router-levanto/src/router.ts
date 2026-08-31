@@ -2,6 +2,7 @@ import type {
   ConversationIdentity,
   ModelRoutingPreferences,
   PeerInfo,
+  RouteAuthHeaders,
   RouteCandidate,
   SerializedHttpRequest,
 } from '@antseed/node';
@@ -29,6 +30,16 @@ export interface LevantoRouterConfig {
    * subscription gate always rejects.
    */
   buyerPeerId?: string;
+  /**
+   * Proves `buyerPeerId` is genuine (decisions doc SS13 item 8, previously
+   * unresolved) -- set via `configureRouteAuthSigning`. Deliberately narrow,
+   * same reasoning as `signDailyIfNeeded` below: this plugin never holds a
+   * signing key directly. Omitted -- requests carry no auth headers, same
+   * as before this capability existed; a verifying routing peer treats that
+   * as unauthenticated, not as a hard failure (see the runlog for the
+   * rollout choice).
+   */
+  signRouteAuth?: (routingPeerId: string) => Promise<RouteAuthHeaders>;
   /**
    * Pay-first daily signing (decisions doc SS6.2): called at most once per
    * calendar day, before the first routing call that day. Deliberately
@@ -262,6 +273,16 @@ export class LevantoRouter {
   }
 
   /**
+   * `Router.configureRouteAuthSigning` (packages/node/src/interfaces/buyer-router.ts,
+   * decisions doc SS13 item 8) -- same generic, additive, mutate-in-place
+   * pattern as `configureDailySigning` above, for the same reason (this
+   * plugin never holds a signing key directly).
+   */
+  configureRouteAuthSigning(signRouteAuth: (routingPeerId: string) => Promise<RouteAuthHeaders>): void {
+    this.config.signRouteAuth = signRouteAuth;
+  }
+
+  /**
    * `Router.updateRoutingPreferences` (packages/node/src/interfaces/buyer-router.ts,
    * decisions doc SS14 item 29) -- keeps `cachedRoutingPreferences` fresh
    * outside of `selectRoute` calls, so the background daily-signing trigger
@@ -320,6 +341,31 @@ export class LevantoRouter {
   }
 
   /**
+   * Headers proving `buyerPeerId` is genuine (decisions doc SS13 item 8),
+   * for both `/_antseed/route` and `/_antseed/route/digest`. `{}` (not a
+   * thrown error) whenever signing isn't configured, has no seller to bind
+   * to, or itself fails -- lenient by design during rollout (see the
+   * runlog): an old client or a signing hiccup must still be able to route,
+   * same as before this capability existed, not be hard-blocked by it. A
+   * verifying routing peer treats a request with no auth headers as
+   * unauthenticated, not as malformed.
+   */
+  private async buildRouteAuthHeaders(): Promise<Record<string, string>> {
+    if (!this.config.signRouteAuth || !this.config.sellerPeerId) return {};
+    try {
+      const auth = await this.config.signRouteAuth(this.config.sellerPeerId);
+      return {
+        'x-antseed-route-auth-buyer': auth.buyer,
+        'x-antseed-route-auth-issued-at': String(auth.issuedAt),
+        'x-antseed-route-auth-nonce': auth.nonce,
+        'x-antseed-route-auth-signature': auth.signature,
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  /**
    * Daily digest (decisions doc SS6.9, software-arch doc SS2.7): same daily
    * cadence as the SpendingAuth signature above, but its own request, not
    * bundled into it (SS3.6 -- SpendingAuthMetadata is the wrong shape, and
@@ -346,6 +392,7 @@ export class LevantoRouter {
     const digest = buildDigest(this.ledger.all(), periodKey(yesterday));
     const doFetch = this.config.fetchImpl ?? fetch;
     const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
+    const routeAuthHeaders = await this.buildRouteAuthHeaders();
     const timeoutController = new AbortController();
     const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
     try {
@@ -357,6 +404,7 @@ export class LevantoRouter {
         headers: {
           'content-type': 'application/json',
           ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
+          ...routeAuthHeaders,
         },
         body: JSON.stringify(digest),
         signal: timeoutController.signal,
@@ -503,6 +551,12 @@ export class LevantoRouter {
 
     const doFetch = this.config.fetchImpl ?? fetch;
     const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
+    // Computed once, reused across the not-subscribed self-heal retry below
+    // -- one nonce per selectRoute call is fine (replay protection is about
+    // rejecting an OLD signature replayed on a LATER call, not about
+    // single-use within the same call), and avoids re-signing twice for
+    // what's still logically one routing attempt.
+    const routeAuthHeaders = await this.buildRouteAuthHeaders();
     const attemptRoute = async (): Promise<Response> => {
       const timeoutController = new AbortController();
       const timeoutHandle = setTimeout(() => timeoutController.abort(), timeoutMs);
@@ -512,6 +566,7 @@ export class LevantoRouter {
           headers: {
             'content-type': 'application/json',
             ...(this.config.buyerPeerId ? { 'x-antseed-buyer-peer-id': this.config.buyerPeerId } : {}),
+            ...routeAuthHeaders,
           },
           body: JSON.stringify(body),
           signal: timeoutController.signal,
