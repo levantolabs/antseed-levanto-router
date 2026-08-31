@@ -2622,3 +2622,46 @@ gap this buyer-side fix cannot close.
 **Ground truth reference:** none of the four docs specify reserve-deadline or on-chain-status
 handling at this level of detail -- this is defensive/correctness work orthogonal to their
 protocol-level content.
+
+## [2026-08-31] StoredChannel's reserve-recovery fields were declared but never given sqlite columns
+
+**Type:** Fixes a real, confirmed gap found while chasing a live incident -- not something
+any of the four docs specify either way.
+
+Investigating why a live subscription-channel bootstrap today requested `maxAmount = 1.59
+USDC` from `AntseedChannels.reserve()` (reverting on-chain with `FirstSignCapExceeded`, the
+contract's $1.00 cap on any brand-new channel's first authorization) turned up a separate,
+definite bug: `StoredChannel`'s reserve-recovery fields -- `reserveSalt`, `reserveMaxAmount`,
+`reserveAuthPending`, `latestReserveAuthSig`, `latestReserveDeadline`,
+`initialReserveAmount`, `confirmedReserveAmount` -- exist on the TypeScript interface (for
+replaying an unconfirmed `ReserveAuth` via `BuyerPaymentManager.canReplayReserveAuth`/
+`resendReserveAuth` instead of retiring and rebootstrapping a channel from scratch) but the
+sqlite-backed `ChannelStore` (`packages/node/src/payments/channel-store.ts`) never gave them
+columns at all -- not in the schema, not in `upsertChannel`'s INSERT/UPDATE, not in
+`rowToChannel`'s read path. Every channel any CLI/node buyer ever loads therefore has these
+fields permanently `undefined`, so `canReplayReserveAuth` can never return true for this
+backend, and every "channel doesn't exist on-chain" recovery branch --
+`BuyerPaymentNegotiator._recoverExistingSession` (pre-existing) and
+`BuyerPaymentManager.reconcileOnChainChannelStatus` (added earlier this session) alike --
+always falls straight through to a full retire-and-rebootstrap, never the lighter-weight
+replay both were written to support. Fixed: migration 006 adds the seven columns, wired
+through both the INSERT and its `ON CONFLICT` UPDATE (so a later top-up's changes persist,
+not just the first insert) and `rowToChannel`.
+
+**On the $1.59 itself:** this gap does not explain it, and its actual origin is still open.
+Both known `ReserveAuth`-constructing call sites were traced and ruled out under default
+config -- the subscription bootstrap (`apps/cli/src/proxy/daily-subscription-signing.ts`)
+hardcodes `590_000n` with no override found anywhere in history, including the exact
+deployed commit, and the per-request negotiator's amount is clamped at
+`maxReserveAmountUsdc` ($1.00 default) and can only ever come out lower, never higher, than
+whatever the seller suggests (itself an unconditional $1.00 constant, confirmed in
+`SellerPaymentManager.getPaymentRequirements`). The persistence gap just fixed was the
+leading suspect for reviving a stale ceiling after a restart, but `getActiveChannelsByBuyer`
+already filters to `ACTIVE`-only, so a clean restart cannot rehydrate anything from a
+correctly-settled channel regardless of what these columns contain -- ruling that mechanism
+out too. Left open, needs live config/state access (specifically: whether
+`~/.antseed/config.json`'s `payments.maxReserveAmountUsdc` carries a non-default value on
+the affected machine) to close.
+
+**Ground truth reference:** none -- this is a storage-layer correctness gap orthogonal to
+the docs' protocol-level content.
