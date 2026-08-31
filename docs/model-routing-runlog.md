@@ -2521,3 +2521,28 @@ same 2 pre-existing, unrelated fixture-mismatch failures noted in earlier entrie
 **Ground truth reference:** none of the four docs specify a per-session view; this fills that gap
 without touching anything they do specify (the aggregate `computeRouterSavings` formula, the
 ledger's wire shape) beyond the one additive field.
+
+## [2026-08-31] New Chat silently inherited an auto-routed peer as a hard pin
+
+**Type:** Bug fix, found live by a peer session testing on Windows against a real user's session
+files, not from any of the four docs.
+
+`ChatListPanel.tsx`'s `newChatTarget` (feeding `handleStartNewChat`) derived a peer to carry into
+a fresh chat from `activeConversation.peerId`, with no check on *how* that conversation got its
+peerId. An auto-routed (Levanto Auto) conversation ends up with a concrete peerId in the exact
+same shape as a genuinely pinned one once the router picks a seller for it, so clicking New Chat
+right after an auto-routed conversation silently created the new chat hard-pinned to whichever
+peer the router last happened to land on -- confirmed against real session files (`levanto-auto`
+routed to "Apex Ant", New Chat clicked, new session created with `routeMode: "pinned"` and no user
+action to pin anything).
+
+Fixed by gating the whole computation on `activeConversation.routeMode === 'pinned'` -- only an
+explicitly pinned conversation's peer is eligible to carry forward; an auto-routed one, regardless
+of which peer it landed on, is not. Extracted the memo body into an exported `computeNewChatTarget`
+so this could be unit-tested directly rather than through full component rendering (no test
+harness existed for this component before).
+
+**Verification:** `npx vitest run --dir src/renderer` from apps/desktop: 46 files, 388 tests, all
+passed (384 baseline + 4 new). `tsc --noEmit -p tsconfig.renderer.json` surfaces one pre-existing,
+unrelated error in `VprActivityView.tsx` (confirmed present before this change too, from the
+per-session-history work) -- not touched, out of scope here.
