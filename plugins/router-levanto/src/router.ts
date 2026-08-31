@@ -37,7 +37,8 @@ export interface LevantoRouterConfig {
    * plugin code, including third-party ones per SSG3, would let it sign
    * arbitrary messages). The host implements this by calling the real
    * BuyerPaymentManager.signCumulativeAuth and sending the result over
-   * PaymentMux -- NOT WIRED UP in this pass; see the runlog.
+   * PaymentMux -- see apps/cli/src/proxy/daily-subscription-signing.ts,
+   * wired in via configureDailySigning at apps/cli/src/cli/commands/buyer/start.ts.
    */
   signDailyIfNeeded?: (sellerPeerId: string) => Promise<void>;
   fetchImpl?: typeof fetch;
@@ -377,12 +378,10 @@ export class LevantoRouter {
   }
 
   /**
-   * SS4.3's cache "warmth" observation feed. Router.onResult's shared
-   * interface doesn't carry cachedInputTokens (packages/node/src/interfaces/buyer-router.ts,
-   * unchanged this pass -- extending it is a wider, riskier change than this
-   * pass takes on, since other routers implement the same interface). Real
-   * wiring of buyer-proxy calling this after each response is a remaining
-   * gap, logged in the runlog; this method is what that wiring would call.
+   * SS4.3's cache "warmth" observation feed. Router.onResult's shared shape
+   * doesn't carry `conversation` or the resolved model (packages/node/src/interfaces/buyer-router.ts's
+   * `Router.recordObservedCache`), so buyer-proxy.ts calls this separately,
+   * alongside `onResult`, after a successful response.
    */
   recordObservedCache(conversation: ConversationIdentity, model: string, peerId: string, promptTokens: number, cachedInputTokens: number): void {
     this.conversations.recordObservedCache(conversationKey(conversation), model, peerId, promptTokens, cachedInputTokens);

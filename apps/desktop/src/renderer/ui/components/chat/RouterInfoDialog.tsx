@@ -23,8 +23,10 @@ const DAYS_PER_MONTH = 30.44;
  * plugin the user just picked in Preferences. Copy comes from that plugin's
  * own `autoRouteInfo` (packages/node's AntseedRouterPlugin), falling back to
  * its `displayName`/`description` if a plugin doesn't declare dedicated
- * dialog copy. The live daily price is a generic AIP-5 Router-interface
- * concept (`/_antseed/subscription-price`), not specific to any one plugin.
+ * dialog copy. The live daily price comes from `/_antseed/subscription-price`,
+ * a hardcoded admin route on the buyer-proxy (apps/cli/src/proxy/buyer-proxy.ts)
+ * reading whatever peer advertises a `type: 'subscription'` offer -- not
+ * (yet) a member of the `Router` TS interface itself.
  */
 export function RouterInfoDialog({ isOpen, plugin, onClose, onConfirm }: Props) {
   const { data: offer } = useCachedResource(subscriptionPriceResource, isOpen);

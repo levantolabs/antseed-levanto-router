@@ -87,6 +87,7 @@ import {
   isCompletionRequestPath,
   isTitleGenerationRequest,
   parseRequestBodyObject,
+  type ConversationIdentity,
 } from './conversation-identity.js'
 import { ConversationStore } from './conversation-store.js'
 import type { DepositWatcher } from './deposit-watcher.js'
@@ -2755,6 +2756,7 @@ export class BuyerProxy {
             false,
             clientAbortController.signal,
             routeAlternatives,
+            conversationIdentity,
           )
           if (result.done) {
             if (trackedConversationId) {
@@ -2994,6 +2996,8 @@ export class BuyerProxy {
       RETRYABLE_STATUS_CODES,
       true,
       clientAbortController.signal,
+      undefined,
+      conversationIdentity,
     )
     if (result.done && trackedConversationId && pinnedServiceId) {
       this._conversations.recordRoutedModel(
@@ -3121,6 +3125,9 @@ export class BuyerProxy {
     /** Router-ranked candidates to disclose to the client (top few, client
      *  display only) — undefined/null for a directly pinned peer. */
     routeAlternatives?: RouteAlternative[] | null,
+    /** For the router's cache-warmth feed (recordObservedCache) below --
+     *  null for a non-conversation request (no `conversation` to key by). */
+    conversation?: ConversationIdentity | null,
   ): Promise<
     | { done: true }
     | { done: false; statusCode: number; responseBody: Buffer; responseHeaders: Record<string, string>; errorMessage: string | null }
@@ -3349,6 +3356,19 @@ export class BuyerProxy {
             estimatedCostUsd: telemetry.estimatedCostUsd,
             requestId: requestForPeer.requestId,
           })
+          // Cache "warmth" feed (model-routing software-arch doc SS4.3) --
+          // not part of the generic onResult() shape above, since most
+          // routers have no use for it; router-levanto's own extension,
+          // called only when it implements it.
+          if (conversation && requestedService) {
+            router.recordObservedCache?.(
+              conversation,
+              requestedService,
+              selectedPeer.peerId,
+              telemetry.usage.freshInputTokens + telemetry.usage.cachedInputTokens,
+              telemetry.usage.cachedInputTokens,
+            )
+          }
         }
 
         if (responseFault === 'buyer') {
@@ -3449,6 +3469,19 @@ export class BuyerProxy {
             estimatedCostUsd: telemetry.estimatedCostUsd,
             requestId: requestForPeer.requestId,
           })
+          // Cache "warmth" feed (model-routing software-arch doc SS4.3) --
+          // not part of the generic onResult() shape above, since most
+          // routers have no use for it; router-levanto's own extension,
+          // called only when it implements it.
+          if (conversation && requestedService) {
+            router.recordObservedCache?.(
+              conversation,
+              requestedService,
+              selectedPeer.peerId,
+              telemetry.usage.freshInputTokens + telemetry.usage.cachedInputTokens,
+              telemetry.usage.cachedInputTokens,
+            )
+          }
         }
 
         if (responseFault === 'buyer') {

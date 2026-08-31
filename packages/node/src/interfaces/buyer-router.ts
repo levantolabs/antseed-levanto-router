@@ -194,6 +194,25 @@ export interface Router {
    * `selectRoute` has no reason to implement this.
    */
   updateRoutingPreferences?(preferences: ModelRoutingPreferences): void;
+
+  /**
+   * Optional, additive: cache "warmth" observation feed (model-routing
+   * software-architecture doc SS4.3). `onResult`'s shared shape carries
+   * `cachedInputTokens` but not `conversation`/the resolved model, so a
+   * router that estimates per-conversation cache hits (to predict a
+   * candidate's real cost before dispatch) needs this separate call instead
+   * -- called by the host after a successful response, alongside `onResult`,
+   * with the concrete resolved model (not a router-specific sentinel) and
+   * the peer actually dispatched to. A router with no cache-warmth estimator
+   * has no reason to implement this.
+   */
+  recordObservedCache?(
+    conversation: ConversationIdentity,
+    model: string,
+    peerId: string,
+    promptTokens: number,
+    cachedInputTokens: number,
+  ): void;
 }
 
 // Duck-typed, not formally part of `Router`, but probed for by buyer-proxy
