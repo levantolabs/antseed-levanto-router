@@ -84,11 +84,12 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
     background: var(--bg-primary);
     -webkit-font-smoothing: antialiased;
   }
-  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
   .brand svg { flex: none; color: var(--accent); }
   h1 { font-size: 20px; font-weight: 600; margin: 0; }
-  .subtitle { color: var(--text-muted); margin: 0 0 24px; font-size: 13px; }
-  .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  .stats { display: flex; flex-direction: column; gap: 4px; margin-bottom: 20px; }
+  .stats-row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .stats-row-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin: 10px 2px 2px; }
   .card {
     flex: 1 1 160px;
     background: var(--bg-card);
@@ -172,7 +173,6 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
   </svg>
   <h1>${sectionTitle}</h1>
 </div>
-<p class="subtitle">Every session routed through your model router, with savings vs. retail pricing.</p>
 <div class="toolbar">
   <label for="baseline-select">Comparing against</label>
   <select id="baseline-select"></select>
@@ -274,20 +274,31 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
     return null;
   }
 
-  function renderStats(rows, baselineModel) {
+  function statsRowHtml(rows, baselineModel) {
     var savings = computeSavings(rows, baselineModel) || { baselineUsd: 0, actualUsd: 0, savedUsd: 0 };
     var pct = savings.baselineUsd > 0 ? Math.round((savings.savedUsd / savings.baselineUsd) * 100) : null;
-    document.getElementById('stats').innerHTML =
+    return '<div class="stats-row">' +
       '<div class="card"><div class="label">Baseline</div><div class="value">' + fmtUsd(savings.baselineUsd) + '</div></div>' +
       '<div class="card"><div class="label">Spent</div><div class="value">' + fmtUsd(savings.actualUsd) + '</div></div>' +
-      '<div class="card"><div class="label">Saved</div><div class="value">' + fmtUsd(savings.savedUsd) + (pct !== null ? '<span class="pct">' + pct + '%</span>' : '') + '</div></div>';
+      '<div class="card"><div class="label">Saved</div><div class="value">' + fmtUsd(savings.savedUsd) + (pct !== null ? '<span class="pct">' + pct + '%</span>' : '') + '</div></div>' +
+      '</div>';
+  }
+  function renderStats(rows, baselineModel) {
+    document.getElementById('stats').innerHTML = statsRowHtml(rows, baselineModel);
+  }
+  function renderSessionListStats(rows, baselineModel) {
+    var sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    var recentRows = rows.filter(function (r) { return r.atMs >= sevenDaysAgo; });
+    document.getElementById('stats').innerHTML = statsRowHtml(rows, baselineModel) +
+      '<div class="stats-row-label">Last 7 days</div>' +
+      statsRowHtml(recentRows, baselineModel);
   }
   function sessionToolLabel(conversationKey) {
     var conv = findConversation(conversationKey);
     return (conv && conv.tool) ? conv.tool : null;
   }
   function renderSessionList() {
-    renderStats(allRows, currentBaseline);
+    renderSessionListStats(allRows, currentBaseline);
     var sessions = groupBySession(allRows);
     var html = '<div class="table-wrap"><table><thead><tr>' +
       '<th>Session</th><th>Tool</th><th>Last active</th><th class="num">Turns</th><th class="num">Baseline</th><th class="num">Spent</th><th class="num">Saved</th>' +
