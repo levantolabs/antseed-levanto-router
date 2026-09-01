@@ -12,3 +12,10 @@ export {
   type CapturedUnitBillingContext,
   type FinalUnitBillingResult,
 } from "./unit.js";
+
+export {
+  COMPARABLE_PRICES_URL_ENV,
+  getOpenRouterReferencePrices,
+  type OpenRouterReferenceMap,
+  type OpenRouterReferencePrice,
+} from "./openrouter-catalog.js";

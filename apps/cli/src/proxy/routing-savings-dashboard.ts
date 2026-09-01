@@ -89,7 +89,6 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
   h1 { font-size: 20px; font-weight: 600; margin: 0; }
   .stats { display: flex; flex-direction: column; gap: 4px; margin-bottom: 20px; }
   .stats-row { display: flex; gap: 12px; flex-wrap: wrap; }
-  .stats-row-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin: 10px 2px 2px; }
   .card {
     flex: 1 1 160px;
     background: var(--bg-card);
@@ -286,12 +285,81 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
   function renderStats(rows, baselineModel) {
     document.getElementById('stats').innerHTML = statsRowHtml(rows, baselineModel);
   }
+  function savedCardHtml(label, savings, baselineLabel) {
+    var pct = savings.baselineUsd > 0 ? Math.round((savings.savedUsd / savings.baselineUsd) * 100) : null;
+    var hover = savings.baselineUsd > 0 ? fmtUsd(savings.actualUsd) + ' spent vs ' + fmtUsd(savings.baselineUsd) + ' ' + (baselineLabel || 'baseline') : '';
+    return '<div class="card"' + (hover ? ' title="' + escapeHtml(hover) + '"' : '') + '>' +
+      '<div class="label">' + label + '</div>' +
+      '<div class="value">' + fmtUsd(savings.savedUsd) + (pct !== null ? '<span class="pct">' + pct + '%</span>' : '') + '</div>' +
+      '</div>';
+  }
+  // Retail-price comparison, kept separate from computeSavings' own
+  // AntSeed-network baseline (model-routing architecture doc SS4.6) -- only
+  // counts a row if it ALSO has a valid AntSeed baseline for the same model,
+  // so this figure and the AntSeed-baseline one are computed over the exact
+  // same row set and stay directly comparable/stackable.
+  function computeOpenRouterSavings(rows, baselineModel, orPrice) {
+    if (!orPrice || (orPrice.inUsdPerM == null && orPrice.outUsdPerM == null)) return null;
+    var actualUsd = 0, baselineUsd = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      if (!row.actualModel) continue;
+      if (!(row.baselinePrices && row.baselinePrices[baselineModel])) continue;
+      var fresh = Math.max(0, (row.actualPromptTokens || 0) - (row.actualCachedTokens || 0));
+      var cached = row.actualCachedTokens || 0;
+      var output = row.actualCompletionTokens || 0;
+      if (fresh === 0 && cached === 0 && output === 0) continue;
+      var inputPrice = orPrice.inUsdPerM != null ? orPrice.inUsdPerM : 0;
+      var cachedPrice = orPrice.cachedInUsdPerM != null ? orPrice.cachedInUsdPerM : inputPrice;
+      var outputPrice = orPrice.outUsdPerM != null ? orPrice.outUsdPerM : 0;
+      var rowBaseline = (fresh * inputPrice + cached * cachedPrice + output * outputPrice) / 1000000;
+      if (rowBaseline <= 0) continue;
+      baselineUsd += rowBaseline;
+      actualUsd += row.actualUsdcPaid || 0;
+    }
+    if (baselineUsd <= 0) return null;
+    return { actualUsd: actualUsd, baselineUsd: baselineUsd, savedUsd: Math.max(0, baselineUsd - actualUsd) };
+  }
+  var openRouterPriceCache = {};
+  function fetchOpenRouterPrice(model, callback) {
+    if (Object.prototype.hasOwnProperty.call(openRouterPriceCache, model)) {
+      callback(openRouterPriceCache[model]);
+      return;
+    }
+    fetch('/_antseed/openrouter-reference-prices?models=' + encodeURIComponent(model))
+      .then(function (res) { return res.json(); })
+      .then(function (data) {
+        var price = (data && data.prices && data.prices[model]) || null;
+        openRouterPriceCache[model] = price;
+        callback(price);
+      })
+      .catch(function () {
+        callback(null);
+      });
+  }
+  var statsRenderToken = 0;
   function renderSessionListStats(rows, baselineModel) {
+    var token = ++statsRenderToken;
     var sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
     var recentRows = rows.filter(function (r) { return r.atMs >= sevenDaysAgo; });
-    document.getElementById('stats').innerHTML = statsRowHtml(rows, baselineModel) +
-      '<div class="stats-row-label">Last 7 days</div>' +
-      statsRowHtml(recentRows, baselineModel);
+    var week = computeSavings(recentRows, baselineModel) || { baselineUsd: 0, actualUsd: 0, savedUsd: 0 };
+    var allTime = computeSavings(rows, baselineModel) || { baselineUsd: 0, actualUsd: 0, savedUsd: 0 };
+    function paint(openRouterCardHtml) {
+      if (token !== statsRenderToken) return; // superseded by a newer render
+      document.getElementById('stats').innerHTML = '<div class="stats-row">' +
+        savedCardHtml('Saved, 1w', week) +
+        savedCardHtml('Saved, all time', allTime) +
+        '<div class="card"><div class="label">Turns routed</div><div class="value">' + rows.length + '</div></div>' +
+        (openRouterCardHtml || '') +
+        '</div>';
+    }
+    paint('');
+    if (baselineModel) {
+      fetchOpenRouterPrice(baselineModel, function (orPrice) {
+        var orSavings = computeOpenRouterSavings(rows, baselineModel, orPrice);
+        if (orSavings) paint(savedCardHtml('Saved vs OpenRouter', orSavings, 'OpenRouter retail price'));
+      });
+    }
   }
   function sessionToolLabel(conversationKey) {
     var conv = findConversation(conversationKey);

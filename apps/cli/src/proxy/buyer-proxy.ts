@@ -13,6 +13,7 @@ import {
   decodeSweepRequest,
   faultAttributionOf,
   faultCodeOf,
+  getOpenRouterReferencePrices,
   isModelRouteEligible,
   modelRouteTotalPrice,
   peerSupportsCooperativeClose,
@@ -1998,6 +1999,30 @@ export class BuyerProxy {
       await this._mergeStateFile({ savingsBaselineModel: this._savingsBaselineModel })
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, baseline: this._savingsBaselineModel }))
+      return
+    }
+
+    if (path.startsWith('/_antseed/openrouter-reference-prices') && method === 'GET') {
+      // Retail-price comparison for the savings dashboard's "vs OpenRouter"
+      // figure (model-routing architecture doc SS4.6) -- kept separate from
+      // routing_decisions' own baselinePrices (AntSeed's own network price),
+      // since conflating the two would credit the router for savings that
+      // actually come from AntSeed's marketplace undercutting OpenRouter
+      // retail. Resolved server-side (not exposing the raw canonical map)
+      // so the dashboard's client-side JS never needs to replicate
+      // canonicalModelKey's normalization rules itself.
+      const url = new URL(path, 'http://localhost')
+      const requested = (url.searchParams.get('models') ?? '').split(',').map((m) => m.trim()).filter(Boolean)
+      const referenceMap = await getOpenRouterReferencePrices()
+      const prices: Record<string, { inUsdPerM: number | null; outUsdPerM: number | null; cachedInUsdPerM: number | null } | null> = {}
+      for (const model of requested) {
+        const ref = referenceMap[canonicalModelKey(model)]
+        prices[model] = ref
+          ? { inUsdPerM: ref.input, outUsdPerM: ref.output, cachedInUsdPerM: ref.cachedInput }
+          : null
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, prices }))
       return
     }
 
