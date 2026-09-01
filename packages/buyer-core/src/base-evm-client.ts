@@ -45,20 +45,27 @@ function createJsonRpcProvider(url: string, network?: Network, opts?: object): J
   return provider;
 }
 
-function buildProvider(rpcUrl: string, fallbackRpcUrls?: string[], evmChainId?: number): AbstractProvider {
+/**
+ * Builds the ensemble provider AND keeps the individual per-URL providers
+ * around (`raw`) so `_readWithFallback` has a manual, explicit backstop that
+ * doesn't depend on FallbackProvider's own internal failover heuristics --
+ * see `_readWithFallback`'s doc comment for why that backstop exists.
+ */
+function buildProvider(rpcUrl: string, fallbackRpcUrls?: string[], evmChainId?: number): { provider: AbstractProvider; raw: AbstractProvider[] } {
   const network = evmChainId ? Network.from(evmChainId) : undefined;
   const opts = { batchMaxCount: 1, staticNetwork: network ? true : undefined };
-  if (!fallbackRpcUrls || fallbackRpcUrls.length === 0) {
-    return createJsonRpcProvider(rpcUrl, network, opts);
+  const urls = [rpcUrl, ...(fallbackRpcUrls ?? [])];
+  const raw = urls.map((url) => createJsonRpcProvider(url, network, opts));
+  if (raw.length === 1) {
+    return { provider: raw[0]!, raw };
   }
-  const urls = [rpcUrl, ...fallbackRpcUrls];
-  const configs = urls.map((url, i) => ({
-    provider: createJsonRpcProvider(url, network, opts),
+  const configs = raw.map((provider, i) => ({
+    provider,
     priority: i + 1,
     stallTimeout: FALLBACK_STALL_TIMEOUT_MS,
     weight: 1,
   }));
-  return new FallbackProvider(configs, network, { quorum: 1 });
+  return { provider: new FallbackProvider(configs, network, { quorum: 1 }), raw };
 }
 
 export const ERC20_ABI = [
@@ -79,14 +86,51 @@ export abstract class BaseEvmClient {
   protected readonly _contractAddress: string;
   protected readonly _nonceCursor = new Map<string, number>();
   private readonly _nonceLocks = new Map<string, Promise<void>>();
+  private readonly _rawProviders: AbstractProvider[];
 
   constructor(rpcUrl: string, contractAddress: string, fallbackRpcUrls?: string[], evmChainId?: number) {
-    this._provider = buildProvider(rpcUrl, fallbackRpcUrls, evmChainId);
+    const built = buildProvider(rpcUrl, fallbackRpcUrls, evmChainId);
+    this._provider = built.provider;
+    this._rawProviders = built.raw;
     this._contractAddress = contractAddress;
   }
 
   get provider(): AbstractProvider { return this._provider; }
   get contractAddress(): string { return this._contractAddress; }
+
+  /**
+   * Explicit, manual fallback for reads that must not silently proceed
+   * unverified -- a real incident (BuyerPaymentManager.topUpReserve) showed
+   * `this._provider`'s FallbackProvider ensemble not engaging a healthy
+   * configured fallback (base.drpc.org) while the primary (Tenderly) was
+   * returning sustained 503s: seven confirmed 503s in the runtime logs, zero
+   * uses of the fallback URL, while the fallback was independently confirmed
+   * healthy and faster. The exact ethers-internal reason FallbackProvider
+   * didn't broaden to the next priority backend for this failure class
+   * hasn't been root-caused -- rather than tune undocumented FallbackProvider
+   * heuristics blind, this adds a provably-correct manual backstop: try the
+   * ensemble first (unchanged, still the fast path for ordinary transient
+   * blips), and on failure, retry sequentially and directly against each
+   * individually-held per-URL provider before giving up. Use this for any
+   * read a caller must be able to trust failed only after every configured
+   * RPC was tried, not just the (evidently sometimes silent) ensemble.
+   */
+  protected async _readWithFallback<T>(perform: (provider: AbstractProvider) => Promise<T>): Promise<T> {
+    try {
+      return await perform(this._provider);
+    } catch (primaryErr) {
+      if (this._rawProviders.length <= 1) throw primaryErr;
+      let lastErr: unknown = primaryErr;
+      for (const provider of this._rawProviders) {
+        try {
+          return await perform(provider);
+        } catch (err) {
+          lastErr = err;
+        }
+      }
+      throw lastErr;
+    }
+  }
 
   protected _ensureConnected(signer: AbstractSigner): AbstractSigner {
     if (signer.provider) return signer;

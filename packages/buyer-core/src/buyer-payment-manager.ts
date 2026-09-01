@@ -1885,9 +1885,20 @@ export class BuyerPaymentManager {
       if (faultCodeOf(err) === 'buyer-deposits-insufficient') {
         throw err;
       }
-      debugWarn(
-        `[BuyerPayment] topUpReserve: unable to verify buyer deposits before signing top-up: ` +
-        `${err instanceof Error ? err.message : err}`,
+      // A failed deposit-verification read must abort the top-up, not sign
+      // blind: this used to warn-and-continue, so an RPC outage left every
+      // retry re-deriving newCeiling from the same stale, unreconciled
+      // prevCeiling -- each attempt signed another full increment on top,
+      // stacking days of subscription fee for as long as the read kept
+      // failing and requests kept retrying (real incident: four top-ups in
+      // three minutes on one channel during a Tenderly outage). The caller
+      // (_topUpAfterSpendAuthBestEffort) already treats topUpReserve as
+      // best-effort and just logs, so aborting here is safe -- the next
+      // natural trigger retries once the read can verify again.
+      throw buyerFault(
+        `Unable to verify buyer deposits before signing top-up: ${err instanceof Error ? err.message : err}`,
+        'chain-rpc-unavailable',
+        { cause: err },
       );
     }
 

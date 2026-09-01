@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { AbiCoder, id, keccak256, Wallet } from 'ethers';
 import { BuyerPaymentManager, type BuyerPaymentConfig } from '../src/payments/buyer-payment-manager.js';
 import { ChannelStore, CHANNEL_ROLE, CHANNEL_STATUS, type StoredChannel } from '../src/payments/channel-store.js';
+import { DepositsClient } from '../src/payments/evm/deposits-client.js';
 import type { PaymentMux } from '../src/p2p/payment-mux.js';
 import type { Identity } from '../src/p2p/identity.js';
 import { bytesToHex } from '../src/utils/hex.js';
@@ -125,9 +126,23 @@ describe('BuyerPaymentManager', () => {
     const wallet = Wallet.createRandom();
     manager.setSigner(wallet);
     mux = createMockPaymentMux();
+    // topUpReserve verifies buyer deposits before signing (a failed read now
+    // aborts the top-up rather than signing blind -- a real incident showed
+    // the old warn-and-continue behavior let a stale ceiling ratchet up
+    // indefinitely during an RPC outage). Tests never run against a real
+    // chain, so without this every topUpReserve call would hit a real
+    // ECONNREFUSED against config.rpcUrl and (correctly, now) abort --
+    // this stubs that one read so tests can assert normal, verified-success
+    // top-up behavior instead of testing an unreachable RPC.
+    vi.spyOn(DepositsClient.prototype, 'getBuyerBalance').mockResolvedValue({
+      available: 1_000_000_000_000n,
+      reserved: 0n,
+      lastActivityAt: 0n,
+    });
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     store.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -1595,6 +1610,27 @@ describe('BuyerPaymentManager', () => {
     expect(sent.reserveSalt).toBeTypeOf('string');
     expect(sent.reserveDeadline).toBeTypeOf('number');
     expect(manager.getReserveCeiling(sellerPeerId)).toBe(20_000_000n);
+  });
+
+  it('topUpReserve aborts (does not sign) when the deposit-verification read fails, instead of signing blind', async () => {
+    // Regression for a real incident: this used to warn-and-continue on a
+    // failed verification read, so a sustained RPC outage let every retry
+    // re-derive the new ceiling from the same stale, unreconciled baseline
+    // and sign another full day's increment on top -- repeating for as long
+    // as the read kept failing (real trace: four top-ups in three minutes on
+    // one channel). A failed read must abort instead.
+    const sellerPeerId = fakePeerId('seller-topup-rpc-down');
+    await manager.authorizeSpending(sellerPeerId, mux, 10_000n, TEST_PRICING);
+    const ceilingBefore = manager.getReserveCeiling(sellerPeerId);
+    mux.sentSpendingAuths.length = 0;
+
+    vi.spyOn(DepositsClient.prototype, 'getBuyerBalance').mockRejectedValue(
+      new Error('connect ECONNREFUSED 127.0.0.1:8545'),
+    );
+
+    await expect(manager.topUpReserve(sellerPeerId, mux)).rejects.toMatchObject({ code: 'chain-rpc-unavailable' });
+    expect(mux.sentSpendingAuths.length).toBe(0);
+    expect(manager.getReserveCeiling(sellerPeerId)).toBe(ceilingBefore);
   });
 
   it('resendReserveAuth replays the original reserve amount after top-up', async () => {
