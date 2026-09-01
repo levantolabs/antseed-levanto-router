@@ -386,6 +386,12 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       const resolvedRouterName = options.instance
         ? (await getInstance(join(homedir(), '.antseed', 'config.json'), options.instance))?.package
         : routerName
+      // Only a short plugin id (e.g. "levanto") reads as a real name once
+      // title-cased for the routing-savings dashboard header -- an
+      // --instance package string (e.g. "@antseed/router-levanto" or a
+      // local path) doesn't, so leave it out and let the dashboard fall
+      // back to its generic title in that case.
+      const dashboardRouterName = resolvedRouterName && /^[a-z0-9-]+$/i.test(resolvedRouterName) ? resolvedRouterName : undefined
       const versions = getPackageVersions(resolvedRouterName ?? undefined)
       if (Object.keys(versions).length > 0) {
         console.log(chalk.dim(`Package versions: ${Object.entries(versions).map(([k, v]) => `${k}@${v}`).join(', ')}`))
@@ -557,6 +563,7 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         configPath: globalOpts.config,
         routingPreferences: effectiveBuyerConfig.routingPreferences,
         backgroundRefreshIntervalMs: effectiveBuyerConfig.peerRefreshIntervalMs,
+        routerName: dashboardRouterName,
         ...(verifierPolicy ? { verifier: verifierPolicy } : {}),
       })
       let ownsProxyListener = false

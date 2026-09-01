@@ -13,11 +13,27 @@
  * plane instead, which already serves the JSON this page reads
  * (`/_antseed/routing-decisions`, same origin, no new server or auth needed).
  */
-export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
+
+function escapeForHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/**
+ * `routerName` is the active router plugin's short id (e.g. `levanto`, from
+ * `AntseedRouterPlugin.name`), threaded down from CLI startup -- see
+ * `BuyerProxyConfig.routerName` in buyer-proxy.ts. Title-cased for display,
+ * e.g. "Model-routing savings (Levanto)". Falls back to the generic title
+ * when no router plugin identity reached this proxy.
+ */
+export function getRoutingSavingsDashboardHtml(routerName?: string): string {
+  const sectionTitle = routerName
+    ? `Model-routing savings (${escapeForHtml(routerName.charAt(0).toUpperCase() + routerName.slice(1))})`
+    : 'Auto-routing savings'
+  return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Auto-routing savings</title>
+<title>${sectionTitle}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -82,7 +98,15 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; color: var(--text-muted); margin-bottom: 4px; }
   .card .value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card .value .pct { font-size: 13px; font-weight: 600; color: var(--accent); margin-left: 6px; }
   .card .sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .tool-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; font-weight: 500; color: var(--text-secondary);
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 12px; margin-left: 10px;
+    vertical-align: middle;
+  }
   .table-wrap { overflow-x: auto; }
   .toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; font-size: 13px; color: var(--text-muted); }
   .toolbar select {
@@ -115,6 +139,8 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   .empty, .error { color: var(--text-muted); padding: 40px 0; text-align: center; }
   .error { color: var(--danger); }
   h2 { font-size: 15px; font-weight: 600; margin: 0 0 12px; }
+  .session-header { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+  .session-header h2 { margin: 0 0 12px; }
 </style>
 </head>
 <body>
@@ -144,7 +170,7 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
     <path opacity="0.15" d="M4.8999 14L5.5999 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
     <path opacity="0.15" d="M23.0999 14L22.3999 21" stroke="currentColor" stroke-width="0.52" stroke-linecap="round"/>
   </svg>
-  <h1>Auto-routing savings</h1>
+  <h1>${sectionTitle}</h1>
 </div>
 <p class="subtitle">Every session routed through your model router, with savings vs. retail pricing.</p>
 <div class="toolbar">
@@ -249,30 +275,29 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
 
   function renderStats(rows, baselineModel) {
-    var now = Date.now();
-    var sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-    var recentRows = rows.filter(function (r) { return r.atMs >= sevenDaysAgo; });
-    var allTime = computeSavings(rows, baselineModel) || { savedUsd: 0 };
-    var last7d = computeSavings(recentRows, baselineModel) || { savedUsd: 0 };
-    var sessions = groupBySession(rows);
-    var last7dSub = last7d.baselineUsd ? fmtUsd(last7d.actualUsd) + ' routed vs ' + fmtUsd(last7d.baselineUsd) + ' baseline' : '';
-    var allTimeSub = allTime.baselineUsd ? fmtUsd(allTime.actualUsd) + ' routed vs ' + fmtUsd(allTime.baselineUsd) + ' baseline' : '';
+    var savings = computeSavings(rows, baselineModel) || { baselineUsd: 0, actualUsd: 0, savedUsd: 0 };
+    var pct = savings.baselineUsd > 0 ? Math.round((savings.savedUsd / savings.baselineUsd) * 100) : null;
     document.getElementById('stats').innerHTML =
-      '<div class="card"><div class="label">Saved, past 7 days</div><div class="value">' + fmtUsd(last7d.savedUsd) + '</div>' + (last7dSub ? '<div class="sub">' + last7dSub + '</div>' : '') + '</div>' +
-      '<div class="card"><div class="label">Saved, all time</div><div class="value">' + fmtUsd(allTime.savedUsd) + '</div>' + (allTimeSub ? '<div class="sub">' + allTimeSub + '</div>' : '') + '</div>' +
-      '<div class="card"><div class="label">Sessions</div><div class="value">' + sessions.length + '</div></div>' +
-      '<div class="card"><div class="label">Routed turns</div><div class="value">' + rows.length + '</div></div>';
+      '<div class="card"><div class="label">Baseline</div><div class="value">' + fmtUsd(savings.baselineUsd) + '</div></div>' +
+      '<div class="card"><div class="label">Spent</div><div class="value">' + fmtUsd(savings.actualUsd) + '</div></div>' +
+      '<div class="card"><div class="label">Saved</div><div class="value">' + fmtUsd(savings.savedUsd) + (pct !== null ? '<span class="pct">' + pct + '%</span>' : '') + '</div></div>';
+  }
+  function sessionToolLabel(conversationKey) {
+    var conv = findConversation(conversationKey);
+    return (conv && conv.tool) ? conv.tool : null;
   }
   function renderSessionList() {
     renderStats(allRows, currentBaseline);
     var sessions = groupBySession(allRows);
     var html = '<div class="table-wrap"><table><thead><tr>' +
-      '<th>Session</th><th>Last active</th><th class="num">Turns</th><th class="num">Baseline</th><th class="num">Routed</th><th class="num">Saved</th>' +
+      '<th>Session</th><th>Tool</th><th>Last active</th><th class="num">Turns</th><th class="num">Baseline</th><th class="num">Spent</th><th class="num">Saved</th>' +
       '</tr></thead><tbody>';
     sessions.forEach(function (session) {
       var savings = computeSavings(session.rows, currentBaseline);
+      var toolLabel = sessionToolLabel(session.conversationKey);
       html += '<tr data-session="' + session.conversationKey + '">' +
         '<td>' + session.conversationKey.slice(0, 18) + '&hellip;</td>' +
+        '<td>' + (toolLabel ? escapeHtml(toolLabel) : '&mdash;') + '</td>' +
         '<td>' + fmtDate(session.lastActiveAt) + '</td>' +
         '<td class="num">' + session.turnCount + '</td>' +
         '<td class="num">' + (savings ? fmtUsd(savings.baselineUsd) : '&mdash;') + '</td>' +
@@ -288,7 +313,7 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   function renderTurnExpansion(row) {
     var baselinePrice = row.baselinePrices && row.baselinePrices[currentBaseline];
-    var html = '<tr class="turn-expansion"><td colspan="9">';
+    var html = '<tr class="turn-expansion"><td colspan="8">';
     if (row.consideredCandidates && row.consideredCandidates.length) {
       html += '<div class="expansion-label">Considered</div>' +
         '<table class="considered"><thead><tr><th>Model</th><th>Seller</th><th class="num">In</th><th class="num">Out</th></tr></thead><tbody>';
@@ -314,19 +339,17 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
   }
   function renderSessionDetail(conversationKey) {
     var rows = allRows.filter(function (r) { return r.conversationKey === conversationKey; }).sort(function (a, b) { return a.atMs - b.atMs; });
-    var savings = computeSavings(rows, currentBaseline);
     renderStats(rows, currentBaseline);
     var conv = findConversation(conversationKey);
     var metaParts = [rows.length + ' turn' + (rows.length === 1 ? '' : 's')];
-    if (savings) metaParts.push('saved ' + fmtUsd(savings.savedUsd));
-    if (conv && conv.tool) metaParts.push('via ' + escapeHtml(conv.tool));
     var titleLabel = (conv && conv.label) ? escapeHtml(conv.label) : (conversationKey.slice(0, 24) + '&hellip;');
-    var toolLabel = (conv && conv.tool) ? escapeHtml(conv.tool) : '&mdash;';
+    var toolLabelRaw = (conv && conv.tool) ? conv.tool : null;
     var html = '<a class="back" id="back-link">&larr; All sessions</a>' +
-      '<h2>' + titleLabel + ' &mdash; ' + metaParts.join(', ') + '</h2>' +
+      '<div class="session-header"><h2>' + titleLabel + ' &mdash; ' + metaParts.join(', ') + '</h2>' +
+      (toolLabelRaw ? '<span class="tool-pill">' + escapeHtml(toolLabelRaw) + '</span>' : '') + '</div>' +
       '<div class="table-wrap"><table><thead><tr>' +
-      '<th>Time</th><th>Model</th><th>Tool</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th>' +
-      '<th class="num">Baseline</th><th class="num">Routed</th><th class="num">Saved</th>' +
+      '<th>Time</th><th>Model</th><th class="num">Input</th><th class="num">Cached</th><th class="num">Output</th>' +
+      '<th class="num">Baseline</th><th class="num">Spent</th><th class="num">Saved</th>' +
       '</tr></thead><tbody>';
     rows.forEach(function (row, index) {
       var rowSavings = computeSavings([row], currentBaseline);
@@ -336,7 +359,6 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
       html += '<tr class="turn-row" data-turn-index="' + index + '"' + (hoverTitle ? ' title="' + escapeHtml(hoverTitle) + '"' : '') + '>' +
         '<td>' + fmtDate(row.atMs) + '</td>' +
         '<td>' + (row.actualModel || '&mdash;') + '</td>' +
-        '<td>' + toolLabel + '</td>' +
         '<td class="num">' + freshInput + '</td>' +
         '<td class="num">' + (row.actualCachedTokens || 0) + '</td>' +
         '<td class="num">' + (row.actualCompletionTokens || 0) + '</td>' +
@@ -413,4 +435,5 @@ export const ROUTING_SAVINGS_DASHBOARD_HTML = `<!doctype html>
 </script>
 </body>
 </html>
-`;
+`
+}

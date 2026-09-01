@@ -106,7 +106,7 @@ import { PeerAttributionTracker, HEARTBEAT_MS } from './peer-attribution.js'
 import { estimateAnthropicPromptTokens, isCountTokensPath } from './count-tokens.js'
 import { getCachedVerdict, runVerifier, verifierSupportFingerprint, type CachedVerdict, type VerifierPolicy, type SellerReach, type VerifyOutcome } from '../plugins/verifier.js'
 import { loadConfig } from '../config/loader.js'
-import { ROUTING_SAVINGS_DASHBOARD_HTML } from './routing-savings-dashboard.js'
+import { getRoutingSavingsDashboardHtml } from './routing-savings-dashboard.js'
 
 // Re-export for backward compatibility (used by tests and other consumers)
 export { selectCandidatePeersForRouting, type CandidatePeerRouteSelection } from './routing.js'
@@ -157,6 +157,13 @@ export interface BuyerProxyConfig {
   now?: () => number
   /** Verifier-SDK policy: which verifier the buyer commits to + whether it is required. */
   verifier?: VerifierPolicy
+  /**
+   * The active router plugin's short id (`AntseedRouterPlugin.name`, e.g.
+   * `levanto`) -- title-cased for display on the routing-savings dashboard
+   * (`GET /_antseed/routing-decisions/dashboard`), e.g. "Model-routing
+   * savings (Levanto)". Undefined falls back to a generic title.
+   */
+  routerName?: string
 }
 
 // 401/403 are included: sellers relay upstream auth failures (revoked or
@@ -758,6 +765,7 @@ export class BuyerProxy {
   private readonly _stateDir: string
   private readonly _stateFile: string
   private readonly _configPath: string | null
+  private readonly _routerName: string | undefined
   private _stateFileWatching = false
   private _configFileWatching = false
   private _pinnedPeer: string | null
@@ -854,6 +862,7 @@ export class BuyerProxy {
     this._stateDir = config.dataDir
     this._stateFile = join(config.dataDir, 'buyer.state.json')
     this._configPath = config.configPath ?? null
+    this._routerName = config.routerName
     this._conversations = new ConversationStore(config.dataDir)
     this._pinnedPeer = config.pinnedPeerId?.toLowerCase() ?? null
     this._routingPreferences = config.routingPreferences
@@ -1999,7 +2008,7 @@ export class BuyerProxy {
       // SPA: that app is deliberately retired down to wallet-signing pages
       // only (its own App.tsx says so), and this needs no wallet at all.
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(ROUTING_SAVINGS_DASHBOARD_HTML)
+      res.end(getRoutingSavingsDashboardHtml(this._routerName))
       return
     }
 
