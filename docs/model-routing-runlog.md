@@ -2965,3 +2965,84 @@ suite, which owns the continuation logic this fix now defers to, 69/69 unaffecte
 
 **Ground truth reference:** none of the four docs specify host-vs-plugin ownership of
 continuation state at this level of detail.
+
+## [2026-09-01] Savings dashboard moved off the buyer-proxy origin, onto the payments portal
+
+**Type:** Reverses the 2026-08-31 "Savings surfaced as a Profile pill + browser dashboard"
+decision's choice of host, on real feedback (the AntSeed team: this kind of browser-rendered
+page belongs on its own port, same as the payments portal, not on the buyer-proxy's origin).
+
+**Why the original choice was wrong on reflection:** `GET /_antseed/routing-decisions/dashboard`
+put a browser-rendered page on the exact same origin as the buyer-proxy's actual
+action-taking control-plane routes (`/_antseed/sweep`, `/_antseed/channels/close`,
+`/_antseed/peers/refresh`, deposit watching, ...). The dashboard itself is read-only and
+(as far as reviewed) properly escapes what it renders, but the *design* meant any future
+bug in that HTML/JS had a same-origin blast radius including real money-moving endpoints,
+not just other display data — unlike `apps/payments`' portal, which is already on its own
+port specifically so a compromise there is contained to what that portal itself can do.
+
+**What changed:**
+- `routing-savings-dashboard.ts` moved from `apps/cli/src/proxy/` into
+  `packages/node/src/routing/` (it had zero relative imports, so this was a clean move) and
+  is now exported from `@antseed/node` — both `apps/cli`'s buyer-proxy and `apps/payments`'
+  portal server can reach it without a new cross-app dependency.
+- `apps/cli/src/proxy/buyer-proxy.ts`: removed `GET /_antseed/routing-decisions/dashboard`
+  entirely. Added a small `GET /_antseed/router-name` JSON route (`{ ok, routerName }`) so
+  the dashboard's dynamic "Model-routing savings (Levanto)" title still works from its new
+  host — the buyer-proxy is still the only process that knows which router plugin is
+  active. The other JSON routes the dashboard reads (`/_antseed/routing-decisions`,
+  `/_antseed/routing-decisions/baseline` GET/POST, `/_antseed/conversations`,
+  `/_antseed/openrouter-reference-prices`) are unchanged and still live here — they're
+  read-only data endpoints, not the concern; only the browser-rendered page moved.
+- **No separate `/_antseed/routing-decisions/dashboard` route on the portal either** (an
+  earlier pass in this same session added one, then removed it once asked to match the
+  portal's existing addressing scheme instead): the dashboard is reachable only as
+  `GET /?page=savings-dash` on `apps/payments/src/server.ts`'s root route, alongside the
+  React app's own `?page=pay&action=...` convention. `App.tsx` deliberately has zero
+  page-routing left ("the portal dashboard is retired"), so this is handled at the Fastify
+  layer, not in React: `server.ts` checks `query.page === 'savings-dash'` on `GET /` and, if
+  set, calls `renderSavingsDashboardHtml(proxyPort)` (exported from `routes.ts`, alongside a
+  shared `proxyToBuyer` helper) directly and returns the HTML — otherwise falls through to
+  the normal `index.html` static-file response. Live-verified (actually started the built
+  server, not just typechecked): `GET /` still serves the React app, `GET
+  /?page=savings-dash` returns the dashboard HTML with the correct content-type, no
+  duplicate-route conflict with `@fastify/static`'s own default handling of `/`.
+- `apps/payments/src/routes.ts`: added five proxy routes mirroring the buyer-proxy paths
+  exactly (`routing-decisions`, `routing-decisions/baseline` GET/POST, `conversations`,
+  `openrouter-reference-prices`), each a simple server-side `fetch()` to
+  `http://127.0.0.1:{proxyPort}` (via the exported `proxyToBuyer` helper) with the response
+  relayed as-is. These, plus the `GET /` savings-dash branch, sit outside the `/api/*`
+  prefix, so the server's existing bearer-token `onRequest` hook doesn't apply to them —
+  deliberately kept as unauthenticated as the dashboard's original design, just on the
+  smaller-blast-radius origin. The dashboard's own client-side JS needed zero changes: it
+  already fetches these exact `/_antseed/*` relative paths, which now simply resolve against
+  the portal's origin instead of the buyer-proxy's.
+- `apps/desktop/src/main/ipc/payments.ts`: `payments:open-savings-page` now calls
+  `startPaymentsPortal()` first (matching `open-pay-page`'s existing pattern) and points at
+  `${PAYMENTS_PORT}/?page=savings-dash` instead of resolving the buyer-proxy's port directly.
+- `apps/payments/vite.config.ts`: added a `/_antseed` dev-server proxy entry alongside the
+  existing `/api` one, so `npm run dev` on this app still reaches the five data routes
+  through the Fastify backend during local frontend development (the `?page=savings-dash`
+  branch lives on `/`, already proxied).
+
+**Real tradeoff, stated plainly (not hidden):** opening the dashboard now costs whatever
+`startPaymentsPortal()`'s startup takes, since the portal doesn't run by default — it was
+previously instant (the buyer-proxy is already running as part of normal operation). No
+attempt made to keep the portal warm; that would reopen the "why is this always running"
+question the original portal retirement decision closed.
+
+**Verification:** `packages/node` typecheck + build clean. `apps/cli` typecheck clean.
+`apps/payments` typecheck + build clean (server + `vite build`), `vitest run` 8/8
+(routes.emissions.test.ts, unaffected), and the built server was actually started
+(`createServer` + `listen`, not a test double) with real requests fired at it: `GET /`
+returned the React app (200, real markup), `GET /?page=savings-dash` returned the dashboard
+HTML (200, `text/html`, real dashboard markup, correctly fell back to the generic title with
+no buyer-proxy running in that test). `apps/desktop` `tsconfig.main.json` typecheck + build
+clean, main-process `node --test` suite 320/320 (no existing test asserted the old
+open-savings-page URL shape, so nothing needed updating there). Not yet verified: an actual
+click-through in the real, running desktop app talking to a real buyer-proxy — this
+confirms the portal side works standalone, not the full chain including a live buyer-proxy's
+data.
+
+**Ground truth reference:** none of the four docs specify where routing-savings UI should
+live at this granularity (same as the 2026-08-31 entry this reverses).

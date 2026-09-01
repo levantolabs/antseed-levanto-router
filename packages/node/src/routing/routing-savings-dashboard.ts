@@ -200,7 +200,8 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
   }
   function fmtPricePair(price) {
     if (!price) return null;
-    return '$' + price.inUsdPerM.toFixed(2) + ' in / $' + price.outUsdPerM.toFixed(2) + ' out per M tokens';
+    var cached = price.cachedInUsdPerM != null ? ' / $' + price.cachedInUsdPerM.toFixed(2) + ' cached' : '';
+    return '$' + price.inUsdPerM.toFixed(2) + ' in / $' + price.outUsdPerM.toFixed(2) + ' out' + cached + ' per M tokens';
   }
   function computeSavings(rows, baselineModel) {
     var actualUsd = 0, baselineUsd = 0, models = {};
@@ -395,13 +396,14 @@ export function getRoutingSavingsDashboardHtml(routerName?: string): string {
     var html = '<tr class="turn-expansion"><td colspan="8">';
     if (row.consideredCandidates && row.consideredCandidates.length) {
       html += '<div class="expansion-label">Considered</div>' +
-        '<table class="considered"><thead><tr><th>Model</th><th>Seller</th><th class="num">In</th><th class="num">Out</th></tr></thead><tbody>';
+        '<table class="considered"><thead><tr><th>Model</th><th>Seller</th><th class="num">In</th><th class="num">Out</th><th class="num">Cached</th></tr></thead><tbody>';
       row.consideredCandidates.forEach(function (c) {
         html += '<tr' + (c.model === row.actualModel && c.peer === row.actualPeer ? ' class="picked"' : '') + '>' +
           '<td>' + escapeHtml(c.model) + '</td>' +
           '<td>' + escapeHtml(c.peer.slice(0, 8)) + '&hellip;</td>' +
           '<td class="num">$' + c.inUsdPerM.toFixed(2) + '</td>' +
           '<td class="num">$' + c.outUsdPerM.toFixed(2) + '</td>' +
+          '<td class="num">' + (c.cachedInUsdPerM != null ? '$' + c.cachedInUsdPerM.toFixed(2) : '&mdash;') + '</td>' +
           '</tr>';
       });
       html += '</tbody></table>';

@@ -12,7 +12,6 @@ import {
   ensureSecureIdentity,
   getSecureIdentity,
 } from '../identity.js';
-import { resolveBuyerProxyPort } from '../runtime/active-config.js';
 import {
   BYTES32_RE,
   type DesktopBuyerUsageTotals,
@@ -120,15 +119,20 @@ export function registerPaymentsIpc(): void {
     }
   });
 
-  // Read-only sessions/metrics page -- unlike open-pay-page, this needs no
-  // wallet signature and no bearer-token portal, so it opens a page served
-  // directly by the already-running, already-unauthenticated buyer-proxy
-  // control plane instead of starting the (deliberately wallet-signing-only)
-  // payments portal.
+  // Read-only sessions/metrics page. Previously served directly by the
+  // buyer-proxy control plane -- moved onto the payments portal instead so
+  // a browser-rendered page never shares an origin with the buyer-proxy's
+  // actual action-taking routes (sweep, close-channel, deposit-watch, ...).
+  // Still needs no wallet signature and no bearer token itself -- the
+  // portal's dashboard routes are registered outside its /api/* prefix, so
+  // this page (and its data fetches) load exactly as unauthenticated as
+  // they did on the buyer-proxy, just on a smaller-blast-radius origin.
   ipcMain.handle('payments:open-savings-page', async () => {
     try {
-      const port = await resolveBuyerProxyPort();
-      const url = `${LOCALHOST_URL}:${port}/_antseed/routing-decisions/dashboard`;
+      await startPaymentsPortal()
+      const devUrl = isDev ? process.env['ANTSEED_PAYMENTS_DEV_URL']?.trim() : undefined
+      const base = devUrl || `${LOCALHOST_URL}:${PAYMENTS_PORT}`
+      const url = `${base}/?page=savings-dash`;
       try {
         await shell.openExternal(url);
         return { ok: true, url };

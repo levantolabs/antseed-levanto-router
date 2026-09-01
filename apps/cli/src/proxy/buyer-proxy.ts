@@ -107,7 +107,7 @@ import { PeerAttributionTracker, HEARTBEAT_MS } from './peer-attribution.js'
 import { estimateAnthropicPromptTokens, isCountTokensPath } from './count-tokens.js'
 import { getCachedVerdict, runVerifier, verifierSupportFingerprint, type CachedVerdict, type VerifierPolicy, type SellerReach, type VerifyOutcome } from '../plugins/verifier.js'
 import { loadConfig } from '../config/loader.js'
-import { getRoutingSavingsDashboardHtml } from './routing-savings-dashboard.js'
+import { BAKED_COMPARABLE_PRICES_URL } from '../generated/baked-defaults.js'
 
 // Re-export for backward compatibility (used by tests and other consumers)
 export { selectCandidatePeersForRouting, type CandidatePeerRouteSelection } from './routing.js'
@@ -2013,7 +2013,11 @@ export class BuyerProxy {
       // canonicalModelKey's normalization rules itself.
       const url = new URL(path, 'http://localhost')
       const requested = (url.searchParams.get('models') ?? '').split(',').map((m) => m.trim()).filter(Boolean)
-      const referenceMap = await getOpenRouterReferencePrices()
+      // Same baked-default file `antseed buyer activity`'s Saved tile already
+      // reads (apps/cli/src/cli/commands/buyer/activity.ts) -- null for a
+      // from-source build, a real URL once scripts/bake-comparable-prices-url.mjs
+      // has run for a release. ANTSEED_COMPARABLE_PRICES_URL always overrides it.
+      const referenceMap = await getOpenRouterReferencePrices(BAKED_COMPARABLE_PRICES_URL)
       const prices: Record<string, { inUsdPerM: number | null; outUsdPerM: number | null; cachedInUsdPerM: number | null } | null> = {}
       for (const model of requested) {
         const ref = referenceMap[canonicalModelKey(model)]
@@ -2026,14 +2030,15 @@ export class BuyerProxy {
       return
     }
 
-    if (path === '/_antseed/routing-decisions/dashboard' && method === 'GET') {
-      // A real, standalone HTML page over the same data as the JSON route
-      // above -- opened in the user's browser from the desktop app's Profile
-      // pill (payments:open-savings-page). Not part of apps/payments' web
-      // SPA: that app is deliberately retired down to wallet-signing pages
-      // only (its own App.tsx says so), and this needs no wallet at all.
-      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-      res.end(getRoutingSavingsDashboardHtml(this._routerName))
+    if (path === '/_antseed/router-name' && method === 'GET') {
+      // The active router plugin's short id, so a host that renders the
+      // savings dashboard elsewhere (apps/payments' portal, since the
+      // dashboard itself no longer lives on this control-plane origin --
+      // see the removed /_antseed/routing-decisions/dashboard route) can
+      // still title it "Model-routing savings (Levanto)" instead of the
+      // generic fallback.
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, routerName: this._routerName ?? null }))
       return
     }
 
