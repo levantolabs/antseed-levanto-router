@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -53,7 +53,7 @@ describe('RoutingLedger (decisions doc SS13 item 12)', () => {
       rmSync(dir, { recursive: true, force: true });
     });
 
-    it('persists a recorded row to routing-decisions.jsonl on disk', async () => {
+    it('persists a recorded row to the SQLite store', async () => {
       const ledger = new RoutingLedger(dir);
       ledger.recordPending('req-1', pending());
       ledger.recordResult('req-1', '0xAAA', actual());
@@ -76,7 +76,7 @@ describe('RoutingLedger (decisions doc SS13 item 12)', () => {
       expect(second.all()[0]).toMatchObject({ actualModel: 'kimi-k3', actualUsdcPaid: 0.0005 });
     });
 
-    it('accumulates multiple rows across separate recordResult calls, each appended not rewritten', async () => {
+    it('accumulates multiple rows across separate recordResult calls, each inserted not rewritten', async () => {
       const ledger = new RoutingLedger(dir);
       ledger.recordPending('req-1', pending());
       ledger.recordResult('req-1', '0xAAA', actual(0.001));
@@ -92,23 +92,44 @@ describe('RoutingLedger (decisions doc SS13 item 12)', () => {
       expect(reloaded.all()).toHaveLength(2);
     });
 
-    it('tolerates a corrupt line on reload, keeping the well-formed rows around it', async () => {
-      const ledger = new RoutingLedger(dir);
-      ledger.recordPending('req-1', pending());
-      ledger.recordResult('req-1', '0xAAA', actual(0.001));
-      await ledger.flush();
-
-      // Simulate a crash mid-append: a trailing corrupt line, plus one more good row after it.
+    it('legacy-JSONL migration tolerates a corrupt line, keeping the well-formed rows around it', () => {
+      // Simulates upgrading from the old JSONL-based ledger after a crash
+      // mid-append left a trailing corrupt line: a good row, a corrupt line,
+      // then one more good row, written directly (no RoutingLedger involved
+      // yet) so the one-time migration path is what has to sanitize this.
       const filePath = join(dir, ROUTING_DECISIONS_FILE);
-      writeFileSync(filePath, `${readFileSync(filePath, 'utf8')}{not valid json\n${JSON.stringify({
+      writeFileSync(filePath, `${JSON.stringify({
+        atMs: Date.now(), actualModel: 'gpt-5.6-luna', actualPeer: '0xAAA', actualPromptTokens: 100, actualCachedTokens: 10,
+        actualCompletionTokens: 38, actualUsdcPaid: 0.001, predictedCostUsd: null, predictedInputTokens: null,
+        predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
+      })}\n{not valid json\n${JSON.stringify({
         atMs: Date.now(), actualModel: 'kimi-k3', actualPeer: '0xCCC', actualPromptTokens: 1, actualCachedTokens: 0,
         actualCompletionTokens: 1, actualUsdcPaid: 0.0001, predictedCostUsd: null, predictedInputTokens: null,
         predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
       })}\n`);
 
-      const reloaded = new RoutingLedger(dir);
-      expect(reloaded.all()).toHaveLength(2);
-      expect(reloaded.all().map((r) => r.actualPeer)).toEqual(['0xAAA', '0xCCC']);
+      const ledger = new RoutingLedger(dir);
+      expect(ledger.all()).toHaveLength(2);
+      expect(ledger.all().map((r) => r.actualPeer)).toEqual(['0xAAA', '0xCCC']);
+    });
+
+    it('imports a legacy JSONL file into the SQLite store exactly once, renaming it so it is not re-imported', () => {
+      const filePath = join(dir, ROUTING_DECISIONS_FILE);
+      writeFileSync(filePath, `${JSON.stringify({
+        atMs: Date.now(), actualModel: 'gpt-5.6-luna', actualPeer: '0xAAA', actualPromptTokens: 100, actualCachedTokens: 10,
+        actualCompletionTokens: 38, actualUsdcPaid: 0.001, predictedCostUsd: null, predictedInputTokens: null,
+        predictedCachedInputTokens: null, predictedOutputTokens: null, cqt: 5, routingLatencyMs: null,
+      })}\n`);
+
+      const first = new RoutingLedger(dir);
+      expect(first.all()).toHaveLength(1);
+      expect(existsSync(filePath)).toBe(false);
+      expect(existsSync(`${filePath}.migrated`)).toBe(true);
+
+      // A second construction against the same dir must not re-import or
+      // duplicate the migrated row -- the store already has data.
+      const second = new RoutingLedger(dir);
+      expect(second.all()).toHaveLength(1);
     });
 
     it('reloads cleanly when no file exists yet (first run)', () => {

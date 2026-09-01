@@ -362,7 +362,19 @@ export class LevantoRouter {
         .then(() => {
           this.lastSignedDayKey = todayKey;
         })
-        .catch(() => {})
+        .catch((err: unknown) => {
+          // Swallowed on purpose (a failed daily sign must not block/fail
+          // the live request this ran alongside -- see selectRoute's own
+          // await this.ensureSignedToday() call sites), but silent-and-
+          // discarded is its own incident: a real one already cost a day of
+          // on-chain forensics to diagnose (the routing peer's own error --
+          // "not subscribed, or today's signature is not yet on file" --
+          // gives no hint that a chain-RPC outage upstream is the actual
+          // cause). Logging what failed costs nothing and turns the next
+          // occurrence into a one-line diagnosis instead of a repeat of that.
+          const code = (err as { code?: unknown } | null)?.code;
+          console.warn(`[LevantoRouter] daily signing skipped: ${code ?? (err instanceof Error ? err.message : err)}`);
+        })
         .finally(() => {
           this.signingInFlight = null;
         });

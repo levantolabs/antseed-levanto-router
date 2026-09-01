@@ -1,5 +1,4 @@
-import { appendFile, mkdir, readFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { readFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -16,8 +15,18 @@ import { join } from 'node:path';
  * router.ts) -- ahead of the SS8.4 dropdown UI, since the response data
  * needed to fill it already arrives on every /_antseed/route call regardless
  * of whether that UI exists yet.
+ *
+ * Persistence: SQLite via `@antseed/node`'s `RoutingDecisionsStore`, not the
+ * hand-rolled append-only `routing-decisions.jsonl` this used before -- that
+ * file grew forever with no rotation/compaction, and required a full
+ * synchronous read+parse of the ENTIRE file on every process start (startup
+ * cost and peak memory scaled with total lifetime writes, not the intended
+ * 5000-row retention window). A pre-existing JSONL file from an older
+ * version is imported into the new SQLite store exactly once (see
+ * `_migrateLegacyJsonlIfPresent`) and renamed to `.migrated` so it's never
+ * re-read, but stays around as a backup.
  */
-import type { RoutingDecisionRow } from '@antseed/node';
+import { RoutingDecisionsStore, type RoutingDecisionRow } from '@antseed/node';
 export type { RoutingDecisionRow } from '@antseed/node';
 
 type BaselinePrices = RoutingDecisionRow['baselinePrices'];
@@ -39,7 +48,7 @@ export interface PendingDecision {
   inputMessagePreview: string | null;
 }
 
-/** File name within the plugin's data directory -- one JSON row per line, append-only. */
+/** Legacy JSON-lines file name, from before the move to SQLite -- still read once, for migration. */
 export const ROUTING_DECISIONS_FILE = 'routing-decisions.jsonl';
 
 /**
@@ -53,18 +62,13 @@ export const ROUTING_DECISIONS_FILE = 'routing-decisions.jsonl';
 const MAX_PENDING_DECISIONS = 500;
 
 /**
- * Flat cap on the in-memory `rows` list backing `getRoutingDecisions()`.
- * Previously unbounded -- the doc comment on `RoutingLedger` used to log this
- * as an open question for whoever built the savings dashboard; that's this
- * change. Bounds only the in-process copy (`loadSync` keeps the most recent
- * N lines on startup, `recordResult` evicts the oldest once over the cap) --
- * the on-disk `routing-decisions.jsonl` file itself still grows without a
- * retention policy, which is a separate, still-open question (no decided
- * retention window exists for this ledger, unlike e.g. the digest's daily
- * cadence) left for whoever needs to address on-disk growth specifically.
+ * Flat cap on the in-memory `rows` list backing `getRoutingDecisions()` --
  * 5000 rows is generous for the per-conversation drill-down/savings
  * dashboard this caps for -- at 100 routed messages/day that's ~50 days of
- * in-memory history, far more than either UI surface needs at once.
+ * in-memory history, far more than either UI surface needs at once. The
+ * on-disk SQLite store itself is not pruned to this cap -- unlike the old
+ * JSONL file, an indexed, queryable table growing past 5000 rows costs
+ * nothing UI surfaces care about, so there's no forced-deletion policy here.
  */
 const MAX_LEDGER_ROWS = 5000;
 
@@ -133,17 +137,17 @@ function sanitizeRow(value: unknown): RoutingDecisionRow | null {
 }
 
 /**
- * Loads whatever rows a prior process already persisted, synchronously, so a
- * freshly-constructed router's ledger is complete before selectRoute can run
- * (matching ConversationStore's `_loadSync` pattern -- apps/cli/src/proxy/conversation-store.ts).
- * Missing file (first run) or corrupt lines are tolerated, not fatal.
+ * Parses whatever a prior (pre-SQLite) process left in the legacy JSONL
+ * file, for one-time import. Missing file (no legacy data) or corrupt lines
+ * are tolerated, not fatal -- same posture the old `loadSync` had, since a
+ * mid-append crash could leave a trailing partial line.
  */
-function loadSync(filePath: string): RoutingDecisionRow[] {
+function parseLegacyJsonl(filePath: string): RoutingDecisionRow[] {
   let raw: string;
   try {
     raw = readFileSync(filePath, 'utf8');
   } catch {
-    return []; // first run -- no file yet
+    return []; // no legacy file -- nothing to migrate
   }
   const rows: RoutingDecisionRow[] = [];
   for (const line of raw.split('\n')) {
@@ -157,29 +161,14 @@ function loadSync(filePath: string): RoutingDecisionRow[] {
       // don't lose every row that came before or after it.
     }
   }
-  // Keep only the most recent MAX_LEDGER_ROWS -- an older file can hold far
-  // more than that; loading it all into memory just to immediately be over
-  // the cap defeats the point of having one.
-  return rows.length > MAX_LEDGER_ROWS ? rows.slice(rows.length - MAX_LEDGER_ROWS) : rows;
+  return rows;
 }
 
 /**
  * routing_decisions ledger (decisions doc SS13 item 12, resolved). Persists
- * as an append-only JSON-lines file in the router's data directory when
- * `dataDir` is provided -- one line per resolved decision, mirroring the
- * write-log shape naturally (a ledger is added to, never rewritten in
- * place), unlike ConversationStore's whole-file rewrite (right for a small,
- * bounded, frequently-mutated set of records; wrong for an ever-growing
- * append-only log where rewriting everything on every new row would get
- * slower over time for no benefit). Falls back to in-memory-only when
- * `dataDir` is omitted, same as before this pass -- existing callers that
- * don't need durability are unaffected.
- *
- * No retention/pruning policy yet -- the file grows indefinitely. Not
- * addressed here: no decided retention window exists for this ledger
- * (unlike e.g. the digest's daily cadence), so inventing one would be
- * guessing rather than implementing a decision; logged in the runlog as an
- * open question for whoever builds the savings dashboard against this data.
+ * to a SQLite database in the router's data directory when `dataDir` is
+ * provided (`RoutingDecisionsStore`, packages/node) -- falls back to
+ * in-memory-only when `dataDir` is omitted, same as before this pass.
  */
 export class RoutingLedger {
   private readonly rows: RoutingDecisionRow[];
@@ -188,14 +177,42 @@ export class RoutingLedger {
   // selectRoute originally saw, so two concurrent requests routed to the
   // same peer can no longer mis-pair the way peerId-only keying used to.
   private readonly pendingByRequestId = new Map<string, PendingDecision>();
-  private readonly filePath: string | null;
-  private readonly dataDir: string | null;
-  private _writeQueue: Promise<void> = Promise.resolve();
+  private readonly store: RoutingDecisionsStore | null;
 
   constructor(dataDir?: string) {
-    this.dataDir = dataDir ?? null;
-    this.filePath = dataDir ? join(dataDir, ROUTING_DECISIONS_FILE) : null;
-    this.rows = this.filePath ? loadSync(this.filePath) : [];
+    if (dataDir) {
+      this.store = new RoutingDecisionsStore(dataDir);
+      this._migrateLegacyJsonlIfPresent(dataDir, this.store);
+      this.rows = this.store.recent(MAX_LEDGER_ROWS);
+    } else {
+      this.store = null;
+      this.rows = [];
+    }
+  }
+
+  /**
+   * One-time import from a pre-existing `routing-decisions.jsonl` (an older
+   * version of this plugin) into the new SQLite store, so upgrading loses no
+   * history. Only runs when the store is still empty -- a non-empty store
+   * means either this has already run, or the store already has real rows
+   * from a source other than that legacy file, and re-importing on top would
+   * duplicate them (there's no natural unique key to de-dupe against).
+   */
+  private _migrateLegacyJsonlIfPresent(dataDir: string, store: RoutingDecisionsStore): void {
+    if (store.count() > 0) return;
+    const legacyPath = join(dataDir, ROUTING_DECISIONS_FILE);
+    const legacyRows = parseLegacyJsonl(legacyPath);
+    if (legacyRows.length === 0) return;
+    store.insertMany(legacyRows);
+    try {
+      // Renamed rather than deleted -- kept as a backup/audit trail, and the
+      // rename itself is what stops this from re-importing on every future
+      // restart once the store already has rows.
+      renameSync(legacyPath, `${legacyPath}.migrated`);
+    } catch {
+      // Rename failing (e.g. permissions) doesn't undo the import; the
+      // store.count() > 0 check above already prevents a re-import next time.
+    }
   }
 
   recordPending(requestId: string, pending: PendingDecision): void {
@@ -238,7 +255,7 @@ export class RoutingLedger {
     };
     this.rows.push(row);
     if (this.rows.length > MAX_LEDGER_ROWS) this.rows.shift();
-    this._persist(row);
+    this.store?.insert(row);
     return row;
   }
 
@@ -247,39 +264,21 @@ export class RoutingLedger {
   }
 
   /**
-   * Fire-and-forget append, serialized behind a queue so concurrent
-   * recordResult calls never interleave writes (mirrors ConversationStore's
-   * `_persist`/`_writeQueue`). A write failure never surfaces to the caller
-   * -- recordResult is called synchronously from Router.onResult, which
-   * can't safely become async or throw without risking the buyer's actual
-   * chat response path; a lost ledger row is a savings-dashboard gap, not a
-   * billing error (the real settlement is governed by the signed
-   * SpendingAuth, unaffected by this ledger either way).
+   * SQLite writes are synchronous (unlike the old JSONL append), so there is
+   * nothing to wait for -- kept as an async no-op so callers (tests,
+   * graceful-shutdown code) don't need to change.
    */
-  private _persist(row: RoutingDecisionRow): void {
-    if (!this.filePath || !this.dataDir) return;
-    const dir = this.dataDir;
-    const path = this.filePath;
-    const line = `${JSON.stringify(row)}\n`;
-    this._writeQueue = this._writeQueue.then(async () => {
-      await mkdir(dir, { recursive: true });
-      await appendFile(path, line, 'utf8');
-    }).catch(() => { /* keep the queue alive after a failed write */ });
-  }
-
-  /** Wait for pending writes (tests / shutdown). */
   flush(): Promise<void> {
-    return this._writeQueue;
+    return Promise.resolve();
   }
 
-  /** Test/debug helper -- reads the persisted file directly, bypassing in-memory state. */
+  /** Test/debug helper -- reads the persisted store directly, bypassing in-memory state. */
   static async readPersistedForTest(dataDir: string): Promise<RoutingDecisionRow[]> {
-    let raw: string;
+    const store = new RoutingDecisionsStore(dataDir);
     try {
-      raw = await readFile(join(dataDir, ROUTING_DECISIONS_FILE), 'utf8');
-    } catch {
-      return [];
+      return store.recent(MAX_LEDGER_ROWS);
+    } finally {
+      store.close();
     }
-    return raw.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => JSON.parse(l) as RoutingDecisionRow);
   }
 }
