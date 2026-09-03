@@ -35,6 +35,7 @@ export {
 export { formatEther, parseEther } from 'ethers';
 export type { Router, RouteCandidate, RoutingDecisionRow, RouteAuthHeaders } from './interfaces/buyer-router.js';
 export type { ConversationIdentity } from './routing/conversation-identity.js';
+export { RoutingDecisionsStore, ROUTING_DECISIONS_DB_FILE } from './routing/routing-decisions-store.js';
 
 // Types (re-export everything)
 export * from './types/index.js';
