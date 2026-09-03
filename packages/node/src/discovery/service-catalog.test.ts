@@ -73,42 +73,42 @@ describe('buildNetworkServiceOffers', () => {
     }]);
   });
 
-  it('derives type "subscription" for the antseed-subscription protocol and carries a flat price', () => {
+  it('derives type "day-pass" for the antseed-day-pass protocol and carries a flat price', () => {
     const offers = buildNetworkServiceOffers([{
       peerId: 'c'.repeat(40),
       displayName: 'Routing Peer',
       providerPricing: {
         'levanto-routing': {
-          services: { 'antseed-subscription': { inputUsdPerMillion: 0.59 } },
+          services: { 'antseed-day-pass': { inputUsdPerMillion: 0.59 } },
         },
       },
       providerServiceApiProtocols: {
-        'levanto-routing': { services: { 'antseed-subscription': ['antseed-subscription'] } },
+        'levanto-routing': { services: { 'antseed-day-pass': ['antseed-day-pass'] } },
       },
     }]);
 
     expect(offers).toHaveLength(1);
     expect(offers[0]).toMatchObject({
-      serviceId: 'antseed-subscription',
-      protocol: 'antseed-subscription',
-      type: 'subscription',
+      serviceId: 'antseed-day-pass',
+      protocol: 'antseed-day-pass',
+      type: 'day-pass',
       flatUsdPrice: 0.59,
     });
   });
 
-  it('never lets a subscription offer sort as "cheapest" against real per-token model offers', () => {
+  it('never lets a day-pass offer sort as "cheapest" against real per-token model offers', () => {
     const offers = buildNetworkServiceOffers([{
       peerId: 'd'.repeat(40),
       providerPricing: {
         'levanto-routing': {
-          services: { 'antseed-subscription': { inputUsdPerMillion: 0.59 } },
+          services: { 'antseed-day-pass': { inputUsdPerMillion: 0.59 } },
         },
         openai: {
           services: { 'gpt-real-model': { inputUsdPerMillion: 10, outputUsdPerMillion: 30 } },
         },
       },
       providerServiceApiProtocols: {
-        'levanto-routing': { services: { 'antseed-subscription': ['antseed-subscription'] } },
+        'levanto-routing': { services: { 'antseed-day-pass': ['antseed-day-pass'] } },
         openai: { services: { 'gpt-real-model': ['openai-chat-completions'] } },
       },
     }]);

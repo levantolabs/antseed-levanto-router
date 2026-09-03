@@ -116,7 +116,7 @@ export const ANTSEED_ROUTE_DIGEST_PATH = '/_antseed/route/digest'
  * A seller-side handler for the reserved model-routing-decision path
  * (single instance per node, unlike Prover which is looked up by name --
  * there's only one routing peer identity per seller). Registered the same
- * way a Prover is: the actual implementation (subscription gating, calling
+ * way a Prover is: the actual implementation (day-pass gating, calling
  * out to a ranking sidecar, computing the response) is entirely the host's
  * business -- this interface is just the generic dispatch contract
  * seller-request-handler.ts calls into, so that logic never has to live in

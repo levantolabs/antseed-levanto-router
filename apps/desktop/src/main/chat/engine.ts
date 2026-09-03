@@ -435,17 +435,17 @@ export function registerPiChatHandlers({
     }
   });
 
-  ipcMain.handle('chat:ai-get-subscription-price', async () => {
-    // The real, live-advertised `type: 'subscription'` price (model-routing
+  ipcMain.handle('chat:ai-get-day-pass-price', async () => {
+    // The real, live-advertised `type: 'day-pass'` price (model-routing
     // decisions doc SS13 item 6), for the Levanto Auto Preferences toggle's
     // disclosure copy. Same localhost-fetch-to-buyer-proxy pattern as
     // chat:ai-list-routing-decisions above -- no new transport. `null` (not
     // an error) whenever no routing peer has been discovered yet or none
-    // advertises a subscription price; the toggle falls back to its generic
+    // advertises a day-pass price; the toggle falls back to its generic
     // copy in that case.
     try {
       const port = await resolveProxyPort(configPath);
-      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/subscription-price`, {
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/day-pass-price`, {
         signal: AbortSignal.timeout(2_000),
       });
       if (!response.ok) return { ok: true, data: null };

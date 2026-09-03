@@ -190,10 +190,10 @@ export interface NodePaymentsConfig {
    * for that channel. Undefined (default) means no cap -- ordinary metered
    * per-request billing can legitimately jump by any amount in a burst of
    * real usage, so this must stay opt-in, not a blanket default. A seller
-   * offering a flat daily/periodic subscription price should set this to
+   * offering a flat daily/periodic day-pass price should set this to
    * that price: it closes the seller-side half of a real incident (a client-
    * side arithmetic bug let a single signature claim six days' worth of a
-   * $0.59/day subscription in one call) -- fixed client-side already, this
+   * $0.59/day day-pass in one call) -- fixed client-side already, this
    * is the independent server-side backstop so the seller never has to trust
    * the buyer's arithmetic alone, in case that class of bug ever recurs.
    */
@@ -202,9 +202,9 @@ export interface NodePaymentsConfig {
    * Seller-side: settle and close a channel the instant its buyer's live
    * connection drops. Default: true — correct for ordinary per-session
    * inference, where a dropped connection means the conversation is over.
-   * Wrong for a subscription-priced channel meant to persist across many
+   * Wrong for a day-pass-priced channel meant to persist across many
    * short connect/disconnect cycles between infrequent requests — set false
-   * there, or a signed subscription gets torn down the moment the buyer's
+   * there, or a signed day pass gets torn down the moment the buyer's
    * connection goes idle, before the next real request ever arrives.
    */
   settleOnDisconnect?: boolean;
@@ -1239,7 +1239,7 @@ export class AntseedNode extends EventEmitter {
    * peer, for buyer-side code outside this class that needs to sign and
    * send payment messages to a peer it isn't necessarily chatting through
    * (model-routing decisions doc SS13 item 11) -- e.g. a routing-client
-   * host paying a flat daily subscription fee to a routing peer, as opposed
+   * host paying a flat daily day-pass fee to a routing peer, as opposed
    * to per-request billing to a chat-completion seller. `_paymentMuxes` has
    * no public getter otherwise; mirrors `requestChannelClose`'s own
    * find-then-`connectToPeer` pattern.

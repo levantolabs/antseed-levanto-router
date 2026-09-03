@@ -290,8 +290,8 @@ const api = {
   chatAiListRoutingDecisions(): Promise<{ ok: boolean; data?: unknown[]; error?: string }> {
     return ipcRenderer.invoke('chat:ai-list-routing-decisions');
   },
-  chatAiGetSubscriptionPrice(): Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }> {
-    return ipcRenderer.invoke('chat:ai-get-subscription-price');
+  chatAiGetDayPassPrice(): Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }> {
+    return ipcRenderer.invoke('chat:ai-get-day-pass-price');
   },
   chatAiGetRoutingSavingsBaseline(): Promise<{ ok: boolean; data?: string | null; error?: string }> {
     return ipcRenderer.invoke('chat:ai-get-routing-savings-baseline');

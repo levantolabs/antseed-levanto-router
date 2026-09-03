@@ -105,7 +105,7 @@ export interface PerRequestAuthResult {
  * requesting a signature — see signCumulativeAuth's own doc comment for why.
  */
 export interface FlatFeeSigningConfig {
-  /** e.g. $0.59/day as 590000n (6-decimal USDC). */
+  /** e.g. $0.89/day as 890000n (6-decimal USDC). */
   dailyAmountUsdc: bigint;
 }
 
@@ -180,7 +180,7 @@ export class BuyerPaymentManager {
   /** sellerPeerId -> buyer-verified cumulative cost from bytes/4 */
   private readonly _verifiedCost = new Map<string, bigint>();
 
-  /** sellerPeerId -> flat daily-fee signing bound (model-routing subscription, decisions doc SS6.2). Host-set only. */
+  /** sellerPeerId -> flat daily-fee signing bound (model-routing day pass, decisions doc SS6.2). Host-set only. */
   private readonly _flatFeeConfig = new Map<string, FlatFeeSigningConfig>();
 
   /** sellerPeerId -> wall-clock time of the last signCumulativeAuth call, for independently bounding the next one. */
@@ -1427,7 +1427,7 @@ export class BuyerPaymentManager {
     return { payload, topUpNeeded };
   }
 
-  // ── Flat-fee cumulative signing (model-routing subscription) ───
+  // ── Flat-fee cumulative signing (model-routing day pass) ───
 
   /**
    * One-time host-level setup for a seller the buyer will sign flat daily
@@ -1441,10 +1441,10 @@ export class BuyerPaymentManager {
   }
 
   /**
-   * Sign a flat daily-subscription cumulative (decisions doc SS6.2,
+   * Sign a flat daily day-pass cumulative (decisions doc SS6.2,
    * software-architecture doc SS2.6 open item 2), given an amount the
    * calling plugin already decided. Unlike signPerRequestAuth, there is no
-   * responseStats to compute a cost from — a subscription fee isn't metered
+   * responseStats to compute a cost from — a day-pass fee isn't metered
    * per-request usage.
    *
    * requestedCumulativeAmount is a REQUEST, not a command: this method never
@@ -1847,11 +1847,11 @@ export class BuyerPaymentManager {
    *
    * `incrementUsdc` defaults to the buyer-wide per-request reserve default
    * (`_config.maxReserveAmountUsdc`) for the metered per-request negotiation
-   * path this was originally written for. A flat daily-subscription caller
+   * path this was originally written for. A flat daily day-pass caller
    * MUST pass its own `dailyAmountUsdc` explicitly here instead of relying on
    * this default -- found live: the daily-signing path called this with no
    * increment, silently topping up by the $1.00 per-request default instead
-   * of the subscription's $0.59/day, on every top-up. That's what let a
+   * of the day pass's $0.59/day, on every top-up. That's what let a
    * single over-large signCumulativeAuth call (see that method's own
    * six-day-in-four-hours incident writeup) actually be signable in the
    * first place -- the ceiling had far more headroom than one day's charge
@@ -1889,7 +1889,7 @@ export class BuyerPaymentManager {
       // blind: this used to warn-and-continue, so an RPC outage left every
       // retry re-deriving newCeiling from the same stale, unreconciled
       // prevCeiling -- each attempt signed another full increment on top,
-      // stacking days of subscription fee for as long as the read kept
+      // stacking days of day-pass fee for as long as the read kept
       // failing and requests kept retrying (real incident: four top-ups in
       // three minutes on one channel during a Tenderly outage). The caller
       // (_topUpAfterSpendAuthBestEffort) already treats topUpReserve as
@@ -1935,7 +1935,7 @@ export class BuyerPaymentManager {
   /**
    * Sign a fresh ReserveAuth at the SAME maxAmount as the current ceiling,
    * purely to push the deadline out -- unlike topUpReserve, this never grows
-   * the ceiling. A channel with infrequent activity (a daily subscription
+   * the ceiling. A channel with infrequent activity (a daily day pass
    * with no other per-request traffic to this seller) can otherwise sit on
    * an expired deadline indefinitely: topUpReserve/the ceiling-shortfall
    * check that calls it only ever fires when the ceiling itself is running
@@ -1995,7 +1995,7 @@ export class BuyerPaymentManager {
    * dead. Mirrors BuyerPaymentNegotiator._recoverExistingSession's
    * on-chain-status ladder -- same classifyOnChainChannel classification,
    * same retire semantics -- scoped down to just "is this channel still
-   * usable," since a caller like the daily-subscription-signing path has no
+   * usable," since a caller like the day-pass-signing path has no
    * per-request budget/lock-confirmation concerns of its own.
    *
    * Real bug found live: signDailyIfNeeded only ever consulted the LOCAL

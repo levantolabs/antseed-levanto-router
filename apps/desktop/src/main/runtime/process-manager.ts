@@ -80,7 +80,7 @@ function normalizeRouterIdentifier(value: string | undefined): string {
 /**
  * Applies the Levanto model router only when the user has actually turned it
  * on (Preferences' "Select model router" dropdown, persisted as
- * `buyer.routingPreferences.autoSubscriptionEnabled` -- VprPreferencesView.tsx).
+ * `buyer.routingPreferences.autoDayPassEnabled` -- VprPreferencesView.tsx).
  * That dropdown is the real choice this override used to stand in for before
  * it existed (runlog: "local routing-peer daemon", 2026-08-26); now that it
  * exists, unconditionally forcing router:'levanto' regardless of the user's
@@ -123,22 +123,22 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * below apply only when router-levanto specifically is selected.
  */
 /**
- * Reads `buyer.routingPreferences.autoSubscriptionEnabled` straight from disk
+ * Reads `buyer.routingPreferences.autoDayPassEnabled` straight from disk
  * rather than caching it -- the config file is the one source of truth the
  * renderer's dropdown, a config-file edit, and this main-process check all
  * agree on, and a start() call is infrequent enough that a sync file read
  * here is not a real cost. Any read/parse failure (missing file, malformed
  * JSON, a config shape from before this field existed) resolves to false --
  * same "never default to on" rule as the real-money signing gate this
- * mirrors (router.ts's ensureSignedToday).
+ * mirrors (router.ts's signSubscriptionOnDemand).
  */
 function isLevantoAutoSubscriptionEnabled(): boolean {
   try {
     const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
     const parsed = JSON.parse(raw) as {
-      buyer?: { routingPreferences?: { autoSubscriptionEnabled?: unknown } };
+      buyer?: { routingPreferences?: { autoDayPassEnabled?: unknown } };
     };
-    return parsed.buyer?.routingPreferences?.autoSubscriptionEnabled === true;
+    return parsed.buyer?.routingPreferences?.autoDayPassEnabled === true;
   } catch {
     return false;
   }

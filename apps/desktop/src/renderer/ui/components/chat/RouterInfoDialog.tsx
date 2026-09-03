@@ -1,7 +1,7 @@
 import { Button, Modal } from '@antseed/ui';
 import type { RouterPluginInfo } from '../../../types/bridge';
 import { useCachedResource } from '../../../modules/app/cached-resource';
-import { subscriptionPriceResource } from '../../../modules/app/vpr-resources';
+import { dayPassPriceResource } from '../../../modules/app/vpr-resources';
 import styles from './RouterInfoDialog.module.scss';
 
 type Props = {
@@ -23,13 +23,13 @@ const DAYS_PER_MONTH = 30.44;
  * plugin the user just picked in Preferences. Copy comes from that plugin's
  * own `autoRouteInfo` (packages/node's AntseedRouterPlugin), falling back to
  * its `displayName`/`description` if a plugin doesn't declare dedicated
- * dialog copy. The live daily price comes from `/_antseed/subscription-price`,
+ * dialog copy. The live daily price comes from `/_antseed/day-pass-price`,
  * a hardcoded admin route on the buyer-proxy (apps/cli/src/proxy/buyer-proxy.ts)
- * reading whatever peer advertises a `type: 'subscription'` offer -- not
+ * reading whatever peer advertises a `type: 'day-pass'` offer -- not
  * (yet) a member of the `Router` TS interface itself.
  */
 export function RouterInfoDialog({ isOpen, plugin, onClose, onConfirm }: Props) {
-  const { data: offer } = useCachedResource(subscriptionPriceResource, isOpen);
+  const { data: offer } = useCachedResource(dayPassPriceResource, isOpen);
   const dailyUsd = offer?.flatUsdPrice;
   const title = plugin?.autoRouteInfo?.title ?? plugin?.displayName ?? 'Model router';
   const body = plugin?.autoRouteInfo?.body ?? plugin?.description ?? '';
@@ -48,16 +48,16 @@ export function RouterInfoDialog({ isOpen, plugin, onClose, onConfirm }: Props) 
         {typeof dailyUsd === 'number'
           ? (
             <>
-              <span className={styles.priceAmount}>${dailyUsd.toFixed(2)}/day</span>
+              <span className={styles.priceAmount}>${dailyUsd.toFixed(2)}</span>
               <span className={styles.priceSecondary}>
-                {' '}(~${(dailyUsd * DAYS_PER_MONTH).toFixed(2)}/month)
+                {' '}per day you use it (~${(dailyUsd * DAYS_PER_MONTH).toFixed(2)}/month if used every day)
               </span>
             </>
           )
-          : <span className={styles.priceAmount}>Billed daily</span>}
+          : <span className={styles.priceAmount}>Billed per day used</span>}
       </div>
       <p className={styles.paragraph}>
-        Charged once per day. Cancel any time from Preferences.
+        Charged when you send a message, which unlocks a full day of access -- you won't be charged again until you use it after that day runs out. Turn off any time from Preferences.
       </p>
 
       <div className={styles.actions}>

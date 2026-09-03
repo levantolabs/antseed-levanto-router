@@ -53,18 +53,18 @@ export const routingDecisionsResource = createCachedResource<RoutingDecisionRow[
 });
 
 /**
- * The real, live-advertised daily subscription price (model-routing decisions
+ * The real, live-advertised daily day-pass price (model-routing decisions
  * doc SS13 item 6), for the Levanto Auto Preferences toggle's disclosure
  * copy. `null` (not an error/throw) whenever no routing peer advertising one
  * has been discovered yet -- the toggle falls back to generic copy in that
  * case rather than showing a broken number.
  */
-export type SubscriptionPriceOffer = { peerId?: string; flatUsdPrice?: number };
+export type DayPassPriceOffer = { peerId?: string; flatUsdPrice?: number };
 
-export const subscriptionPriceResource = createCachedResource<SubscriptionPriceOffer | null>({
+export const dayPassPriceResource = createCachedResource<DayPassPriceOffer | null>({
   pollMs: POLL_MS,
   async load() {
-    const result = await window.antseedDesktop?.chatAiGetSubscriptionPrice?.();
+    const result = await window.antseedDesktop?.chatAiGetDayPassPrice?.();
     return result?.data ?? null;
   },
 });

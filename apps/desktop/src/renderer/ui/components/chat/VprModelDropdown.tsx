@@ -85,7 +85,7 @@ export function VprModelDropdown({
 
   // "Levanto Auto" (decisions doc SS4.3) gets its own dedicated slot above
   // Favorites/Recommended, not mixed into the curated lineup below -- it's a
-  // flat subscription, not one model priced across N sellers, so it's pulled
+  // flat day pass, not one model priced across N sellers, so it's pulled
   // out before the ranking/favoriting logic (built for real catalog entries)
   // ever sees it.
   const autoEntry = useMemo(

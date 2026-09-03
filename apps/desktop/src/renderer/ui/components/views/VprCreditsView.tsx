@@ -31,7 +31,7 @@ export function VprCreditsView({ onSelectView }: Props) {
     operatorAddress: state.creditsOperatorAddress,
     usage: state.creditsBuyerUsage,
     rewards: state.creditsRewards,
-    autoSubscriptionEnabled: state.vprRoutingPreferences.autoSubscriptionEnabled ?? false,
+    autoDayPassEnabled: state.vprRoutingPreferences.autoDayPassEnabled ?? false,
   }), shallowEqual);
   // Local to the button: background pollers (floating pill, payment events)
   // also refresh the summary, and mirroring their in-flight state here made
@@ -61,8 +61,8 @@ export function VprCreditsView({ onSelectView }: Props) {
 
   // Only polled while a router is actually selected -- the pill itself is
   // hidden otherwise, so there's nothing for this data to feed.
-  const routingDecisions = useCachedResource(routingDecisionsResource, snap.autoSubscriptionEnabled).data;
-  const savingsBaselineModel = useCachedResource(savingsBaselineModelResource, snap.autoSubscriptionEnabled).data;
+  const routingDecisions = useCachedResource(routingDecisionsResource, snap.autoDayPassEnabled).data;
+  const savingsBaselineModel = useCachedResource(savingsBaselineModelResource, snap.autoDayPassEnabled).data;
   const last7DaysSavings = useMemo(
     () => computeRecentRouterSavings(routingDecisions, SEVEN_DAYS_MS, Date.now(), savingsBaselineModel ?? undefined),
     [routingDecisions, savingsBaselineModel],
@@ -152,7 +152,7 @@ export function VprCreditsView({ onSelectView }: Props) {
           </button>
         </VprCard>
 
-        {snap.autoSubscriptionEnabled && (
+        {snap.autoDayPassEnabled && (
           <VprCard className={styles.rewardsCard}>
             <span className={styles.rewardsText}>
               <strong>Auto-routing savings</strong>{' '}

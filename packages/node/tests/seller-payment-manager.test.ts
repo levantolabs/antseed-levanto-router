@@ -1342,7 +1342,7 @@ describe('SellerPaymentManager', () => {
 
   it('rejects a SpendingAuth jump exceeding maxCumulativeIncreasePerAuth, independent of the buyer\'s own day-counting', async () => {
     // Regression for a real incident: a client-side arithmetic bug let a
-    // single SpendingAuth claim six days of a $0.59/day subscription in one
+    // single SpendingAuth claim six days of a $0.59/day day pass in one
     // signature. Fixed client-side already -- this is the seller's own,
     // independent backstop, so accepting an overcharge never depends on the
     // buyer's arithmetic being right.

@@ -34,7 +34,7 @@ import { log } from './request-utils.js'
  * seller-local event only, per node.ts), so a corrupted/dropped frame here
  * fails silent: the seller later logs "Invalid ReserveAuth signature:
  * recovered=<garbage> expected=<real address>" and the buyer has no idea
- * anything went wrong until a later request 402s with "Not subscribed".
+ * anything went wrong until a later request 402s with "no current day pass".
  * Reproduced live: three back-to-back sends over pure localhost never hit
  * this; the identical sequence over a higher-latency hop (observed: a
  * Windows client through WSL2's forwarded localhost) corrupted a signature
@@ -47,8 +47,8 @@ async function flushGap(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 250))
 }
 
-export interface DailySubscriptionSigningOptions {
-  /** e.g. 590_000n for $0.59/day (6-decimal USDC) -- decisions doc SS1. */
+export interface DayPassSigningOptions {
+  /** e.g. 890_000n for $0.89/day (6-decimal USDC) -- runlog 2026-09-02, supersedes decisions doc SS1. */
   dailyAmountUsdc: bigint
 }
 
@@ -115,7 +115,7 @@ async function topUpAndReconcile(
   const ceilingBeforeTopUp = buyer.getReserveCeiling(sellerPeerId)
 
   const paymentMux = await node.getOrConnectPaymentMux(sellerPeerId)
-  // The subscription's own daily amount, never BuyerPaymentManager's generic
+  // The day pass's own daily amount, never BuyerPaymentManager's generic
   // per-request reserve default -- passing no increment here is the exact
   // bug that let the ceiling balloon by $1.00 per top-up instead of $0.59,
   // which is what made an over-large signCumulativeAuth call signable in
@@ -140,13 +140,13 @@ async function topUpAndReconcile(
 
 /**
  * Builds a `signDailyIfNeeded(sellerPeerId)` closure for a real running
- * buyer process. Generic across any router that needs subscription-style
+ * buyer process. Generic across any router that needs day-pass-style
  * daily signing, not specific to any one router package -- `node` is a real
  * `AntseedNode`, already started, with payments configured.
  */
 export function createSignDailyIfNeeded(
   node: DailySigningNode,
-  options: DailySubscriptionSigningOptions,
+  options: DayPassSigningOptions,
 ): (sellerPeerId: string) => Promise<void> {
   const flatFeeConfig: FlatFeeSigningConfig = {
     dailyAmountUsdc: options.dailyAmountUsdc,
@@ -169,7 +169,7 @@ export function createSignDailyIfNeeded(
       // kept receiving fresh cumulative signatures on every retry).
       const onChainStatus = await buyer.reconcileOnChainChannelStatus(sellerPeerId, node.channelsClient, paymentMux)
       if (onChainStatus === 'retired') {
-        log(`subscription channel with routing peer ${sellerPeerId.slice(0, 12)}... was closed on-chain -- retired locally, opening a fresh one`)
+        log(`day-pass channel with routing peer ${sellerPeerId.slice(0, 12)}... was closed on-chain -- retired locally, opening a fresh one`)
         existingSession = buyer.getActiveSession(sellerPeerId)
       }
     }
@@ -177,7 +177,7 @@ export function createSignDailyIfNeeded(
       // Bootstrap (SS6.3, SS6.5): reserve exactly one day's charge, not
       // maxed at FIRST_SIGN_CAP -- settling 100% of a one-day deposit
       // clears the 85% top-up gate after a single day instead of two.
-      log(`opening subscription channel with routing peer ${sellerPeerId.slice(0, 12)}...`)
+      log(`opening day-pass channel with routing peer ${sellerPeerId.slice(0, 12)}...`)
       await buyer.authorizeSpending(sellerPeerId, paymentMux, 0n, options.dailyAmountUsdc)
       await flushGap()
       buyer.configureFlatFeeSigning(sellerPeerId, flatFeeConfig)
@@ -255,37 +255,3 @@ export function createSignDailyIfNeeded(
   }
 }
 
-/** The exact slice of `Router` this scheduler needs -- narrower than importing the full interface. */
-export interface DailySigningTrigger {
-  triggerDailySigningCheck?(): Promise<void>
-}
-
-/**
- * Schedules a usage-independent daily-signing check (model-routing decisions
- * doc SS13 item 9): without this, signing only ever fires from inside
- * `selectRoute()`, so billing silently stops the moment the buyer stops
- * sending routable chat requests, even with the toggle still on. Fires once
- * immediately (so a buyer who opts in but never chats that day doesn't wait
- * a full interval for the first signature) and then on `intervalMs`. The
- * router's own `ensureSignedToday`-style bookkeeping (at most one real
- * signature per calendar day) means ticking more often than once a day is
- * free -- the interval only needs to notice a new calendar day within a
- * reasonable window, not fire at a precise instant.
- *
- * A failed check is caught and passed to `onError` -- swallowed, never
- * thrown -- a background tick must never crash the host process; the next
- * tick retries. Returns a cleanup function that stops the timer.
- */
-export function scheduleDailySigningChecks(
-  router: DailySigningTrigger,
-  intervalMs: number,
-  onError: (err: unknown) => void = () => {},
-): () => void {
-  const runCheck = (): void => {
-    void router.triggerDailySigningCheck?.().catch(onError)
-  }
-  runCheck()
-  const timer = setInterval(runCheck, intervalMs)
-  timer.unref?.()
-  return () => clearInterval(timer)
-}

@@ -6,7 +6,7 @@ import type { SerializedHttpRequest, SerializedHttpResponse } from '../types/htt
 function makeProvider(overrides: Partial<Provider> & { handleRequest: Provider['handleRequest'] }): Provider {
   return {
     name: 'test-provider',
-    services: ['antseed-subscription'],
+    services: ['antseed-day-pass'],
     pricing: { defaults: { inputUsdPerMillion: 0, outputUsdPerMillion: 0 } },
     maxConcurrency: 10,
     getCapacity: () => ({ current: 0, max: 10 }),
@@ -15,21 +15,21 @@ function makeProvider(overrides: Partial<Provider> & { handleRequest: Provider['
 }
 
 describe('supportsHealthProbe', () => {
-  it('excludes antseed-subscription, same as openai-images', () => {
-    expect(supportsHealthProbe('antseed-subscription')).toBe(false);
+  it('excludes antseed-day-pass, same as openai-images', () => {
+    expect(supportsHealthProbe('antseed-day-pass')).toBe(false);
     expect(supportsHealthProbe('openai-images')).toBe(false);
     expect(supportsHealthProbe('openai-chat-completions')).toBe(true);
   });
 });
 
-describe('ModelHealthChecker with an antseed-subscription service', () => {
+describe('ModelHealthChecker with an antseed-day-pass service', () => {
   it('never probes it and never removes it, even after many sweeps', async () => {
     const handleRequest = vi.fn(async (): Promise<SerializedHttpResponse> => {
-      throw new Error('should never be called for a subscription pseudo-service');
+      throw new Error('should never be called for a day-pass pseudo-service');
     });
     const provider = makeProvider({
-      services: ['antseed-subscription'],
-      serviceApiProtocols: { 'antseed-subscription': ['antseed-subscription'] },
+      services: ['antseed-day-pass'],
+      serviceApiProtocols: { 'antseed-day-pass': ['antseed-day-pass'] },
       handleRequest,
     });
     const onChange = vi.fn();
@@ -45,7 +45,7 @@ describe('ModelHealthChecker with an antseed-subscription service', () => {
 
     expect(handleRequest).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();
-    expect(provider.services).toEqual(['antseed-subscription']);
+    expect(provider.services).toEqual(['antseed-day-pass']);
 
     const snapshot = checker.getSnapshot();
     expect(snapshot).toHaveLength(1);
@@ -61,9 +61,9 @@ describe('ModelHealthChecker with an antseed-subscription service', () => {
       body: new Uint8Array(),
     }));
     const provider = makeProvider({
-      services: ['antseed-subscription', 'real-model'],
+      services: ['antseed-day-pass', 'real-model'],
       serviceApiProtocols: {
-        'antseed-subscription': ['antseed-subscription'],
+        'antseed-day-pass': ['antseed-day-pass'],
         'real-model': ['openai-chat-completions'],
       },
       handleRequest,
@@ -75,8 +75,8 @@ describe('ModelHealthChecker with an antseed-subscription service', () => {
 
     await checker.runSweep();
 
-    // Only the real model was probed -- the subscription pseudo-service never hit handleRequest.
+    // Only the real model was probed -- the day-pass pseudo-service never hit handleRequest.
     expect(handleRequest).toHaveBeenCalledTimes(1);
-    expect(provider.services).toEqual(['antseed-subscription']);
+    expect(provider.services).toEqual(['antseed-day-pass']);
   });
 });

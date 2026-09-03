@@ -3,8 +3,8 @@ import type { ConversationIdentity, ModelRoutingPreferences, PeerInfo, Serialize
 import { LevantoRouter } from './router.js';
 
 /**
- * Explicit consent to the daily subscription (decisions doc SS14 item 29) --
- * `ensureSignedToday` requires this to be true before it will ever call
+ * Explicit consent to the daily day pass (decisions doc SS14 item 29) --
+ * `signSubscriptionOnDemand` requires this to be true before it will ever call
  * `signDailyIfNeeded`. Most pre-existing signing tests below pass this where
  * they previously passed `null`, since `null`/absent must mean "no consent
  * seen yet," not "assume yes."
@@ -17,7 +17,7 @@ function enabledPreferences(): ModelRoutingPreferences {
     allowedPeerIds: [],
     blockedPeerIds: [],
     cqt: 5,
-    autoSubscriptionEnabled: true,
+    autoDayPassEnabled: true,
   };
 }
 
@@ -51,6 +51,29 @@ function req(model: string, lastUserText = 'hello'): SerializedHttpRequest {
 
 function peer(peerId: string): PeerInfo {
   return { peerId } as PeerInfo;
+}
+
+/**
+ * A fetchImpl for the reactive-signing tests (runlog 2026-09-0X): the actual
+ * routing call ('inputMessage' in the body -- distinguishes it from the
+ * separate digest submission, which shares the same fetchImpl in every test
+ * here) 402s exactly `unpaidCount` times, then succeeds on every call after
+ * that. Defaults to 402ing once, modeling "the seller says pay me" on the
+ * very next routing call -- exactly the trigger signSubscriptionOnDemand
+ * reacts to.
+ */
+function fetchWithPaymentRequired(unpaidCount = 1) {
+  let routeCalls = 0;
+  return vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
+    const body = JSON.parse(init.body);
+    if ('inputMessage' in body) {
+      routeCalls += 1;
+      if (routeCalls <= unpaidCount) {
+        return { ok: false, status: 402, json: async () => ({ error: { message: 'No current day pass.' } }) };
+      }
+    }
+    return { ok: true, json: async () => rankedResponse() };
+  });
 }
 
 describe('LevantoRouter.selectRoute', () => {
@@ -163,72 +186,25 @@ describe('LevantoRouter.selectRoute', () => {
     });
   });
 
-  it('throws RoutingPeerError("rejected") when the routing peer returns a non-OK status (e.g. 402 not subscribed)', async () => {
+  it('throws RoutingPeerError("rejected") when the routing peer returns a non-OK status (e.g. 402 no current day pass)', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: false,
       status: 402,
-      json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }),
+      json: async () => ({ error: { message: 'No current day pass, or today\'s signature is not yet on file.' } }),
     });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({
       name: 'RoutingPeerError',
       kind: 'rejected',
       statusCode: 402,
-      message: 'Not subscribed, or today\'s signature is not yet on file.',
+      message: 'No current day pass, or today\'s signature is not yet on file.',
     });
   });
 
-  it('self-heals from a "not subscribed" 402 by forcing a fresh signature and retrying the routing call once', async () => {
-    const notSubscribed = { ok: false, status: 402, json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }) };
-    const success = { ok: true, json: async () => rankedResponse() };
-    let routingCalls = 0;
-    // /_antseed/route/digest shares the same fetchImpl (sendDailyDigestIfNeeded)
-    // -- discriminate by URL rather than call order/count, same reasoning as
-    // the inputMessage filter in "signs before the routing call it gates" above.
-    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
-      if (!url.endsWith('/_antseed/route')) return { ok: true, json: async () => ({}) };
-      routingCalls += 1;
-      return routingCalls === 1 ? notSubscribed : success;
-    });
-    const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-    const router = new LevantoRouter({
-      routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-
-    const result = await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences());
-
-    expect(result).toHaveLength(1);
-    expect(routingCalls).toBe(2);
-    // Once from the normal pay-first gate, once again forced by the retry --
-    // proves the once-per-day throttle was actually reset, not just skipped.
-    expect(signDailyIfNeeded).toHaveBeenCalledTimes(2);
-  });
-
-  it('does not retry a second time if the seller still reports "not subscribed" after the forced re-signature', async () => {
-    let routingCalls = 0;
-    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
-      if (!url.endsWith('/_antseed/route')) return { ok: true, json: async () => ({}) };
-      routingCalls += 1;
-      return { ok: false, status: 402, json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }) };
-    });
-    const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-    const router = new LevantoRouter({
-      routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
-      fetchImpl: fetchImpl as unknown as typeof fetch,
-    });
-
-    await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences())).rejects.toMatchObject({
-      kind: 'rejected',
-      statusCode: 402,
-    });
-    expect(routingCalls).toBe(2); // bounded to exactly one retry, not a loop
-  });
-
-  it('does not retry a "not subscribed" 402 when the subscription toggle is off (existing behavior preserved)', async () => {
+  it('does not retry a "no current day pass" 402 when no signing capability is configured at all -- nothing to self-heal with (runlog 2026-09-0X)', async () => {
     const fetchImpl = vi.fn().mockResolvedValue({
       ok: false, status: 402,
-      json: async () => ({ error: { message: 'Not subscribed, or today\'s signature is not yet on file.' } }),
+      json: async () => ({ error: { message: 'No current day pass, or today\'s signature is not yet on file.' } }),
     });
     const router = new LevantoRouter({ routingPeerUrl: 'http://x', fetchImpl: fetchImpl as unknown as typeof fetch });
     await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
@@ -310,9 +286,9 @@ describe('LevantoRouter.selectRoute', () => {
     });
   });
 
-  describe('pay-first daily signing (decisions doc SS6.2)', () => {
-    it('signs today before the first routing call of the day, only once even across multiple calls', async () => {
-      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+  describe('reactive on-demand signing (runlog 2026-09-0X)', () => {
+    it('signs only when the seller asks for it (a 402), not on a call that needed nothing', async () => {
+      const fetchImpl = fetchWithPaymentRequired(1); // 402s once, then always succeeds
       const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
       const router = new LevantoRouter({
         routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
@@ -326,13 +302,18 @@ describe('LevantoRouter.selectRoute', () => {
       expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
     });
 
-    it('signs before the routing call it gates, not after', async () => {
+    it('signs after a 402, then retries the exact same call once -- never signs ahead of one', async () => {
       const order: string[] = [];
+      let routeCalls = 0;
       const fetchImpl = vi.fn().mockImplementation(async (_url: string, init: { body: string }) => {
         // Only the SS4.4 routing call (carries inputMessage) is the "fetch" this
         // test cares about ordering against sign -- the digest submission
         // fires alongside it but isn't part of what this test verifies.
-        if ('inputMessage' in JSON.parse(init.body)) order.push('fetch');
+        if ('inputMessage' in JSON.parse(init.body)) {
+          routeCalls += 1;
+          order.push(`fetch${routeCalls}`);
+          if (routeCalls === 1) return { ok: false, status: 402, json: async () => ({ error: { message: 'No current day pass.' } }) };
+        }
         return { ok: true, json: async () => rankedResponse() };
       });
       const signDailyIfNeeded = vi.fn().mockImplementation(async () => { order.push('sign'); });
@@ -343,7 +324,39 @@ describe('LevantoRouter.selectRoute', () => {
 
       await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences());
 
-      expect(order).toEqual(['sign', 'fetch']);
+      expect(order).toEqual(['fetch1', 'sign', 'fetch2']);
+    });
+
+    it('does not attempt to sign for a non-402 rejection (nothing about it implies a lapsed day pass)', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: false, status: 500,
+        json: async () => ({ error: { message: 'Internal error.' } }),
+      });
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences())).rejects.toMatchObject({ statusCode: 500 });
+
+      expect(signDailyIfNeeded).not.toHaveBeenCalled();
+    });
+
+    it('signs exactly once and retries exactly once on a persistent 402, then throws if still unpaid', async () => {
+      const fetchImpl = vi.fn().mockResolvedValue({
+        ok: false, status: 402,
+        json: async () => ({ error: { message: 'No current day pass.' } }),
+      });
+      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+      const router = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences())).rejects.toMatchObject({ statusCode: 402 });
+
+      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
     });
 
     it('does not sign at all for a pinned tool-loop continuation (no network call to gate)', async () => {
@@ -370,9 +383,9 @@ describe('LevantoRouter.selectRoute', () => {
     });
   });
 
-  describe('configureDailySigning / triggerDailySigningCheck (decisions doc SS13 items 9 and 11)', () => {
+  describe('configureDailySigning (decisions doc SS13 item 11)', () => {
     it('configureDailySigning wires a callback that was never provided at construction', async () => {
-      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+      const fetchImpl = fetchWithPaymentRequired(0); // never 402s -- proves the "not wired" call really can't sign
       const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
       const router = new LevantoRouter({
         routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl as unknown as typeof fetch,
@@ -382,177 +395,150 @@ describe('LevantoRouter.selectRoute', () => {
       expect(signDailyIfNeeded).not.toHaveBeenCalled(); // not wired yet
 
       router.configureDailySigning(signDailyIfNeeded);
-      await router.selectRoute(req('levanto-auto', 'a new message'), [peer('0xAAA')], null, enabledPreferences());
+      const fetchImpl402 = fetchWithPaymentRequired(1);
+      const router2 = new LevantoRouter({
+        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', fetchImpl: fetchImpl402 as unknown as typeof fetch,
+      });
+      router2.configureDailySigning(signDailyIfNeeded);
+      await router2.selectRoute(req('levanto-auto', 'a new message'), [peer('0xAAA')], null, enabledPreferences());
       expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
     });
 
-    it('triggerDailySigningCheck signs today independent of any chat request (decisions doc SS13 item 9)', async () => {
-      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-      const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
-      router.updateRoutingPreferences(enabledPreferences());
-
-      await router.triggerDailySigningCheck();
-
-      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
-      expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
-    });
-
-    it('shares the once-per-day gate with selectRoute -- a background trigger after a real chat already signed today is a no-op', async () => {
-      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
-      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-      const router = new LevantoRouter({
-        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
-        fetchImpl: fetchImpl as unknown as typeof fetch,
-      });
-
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences()); // real chat signs today
-      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
-
-      await router.triggerDailySigningCheck(); // background tick, same day
-      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1); // still just once
-    });
-
-    it('and the reverse: a real chat after a background trigger already signed today does not sign again', async () => {
-      const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
-      const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-      const router = new LevantoRouter({
-        routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
-        fetchImpl: fetchImpl as unknown as typeof fetch,
-      });
-      router.updateRoutingPreferences(enabledPreferences());
-
-      await router.triggerDailySigningCheck(); // background tick signs first
-      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
-
-      await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, enabledPreferences()); // real chat, same day
-      expect(signDailyIfNeeded).toHaveBeenCalledTimes(1); // still just once
-    });
-
-    describe('subscription-enable gate (decisions doc SS14 item 29)', () => {
-      it('selectRoute never signs when autoSubscriptionEnabled is false', async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+    describe('day-pass-enable gate (decisions doc SS14 item 29)', () => {
+      it('selectRoute never signs when autoDayPassEnabled is false, even though the seller asked for payment', async () => {
+        const fetchImpl = fetchWithPaymentRequired(Infinity); // always 402s -- signing is blocked, so it never clears
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
         const router = new LevantoRouter({
           routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
           fetchImpl: fetchImpl as unknown as typeof fetch,
         });
 
-        const result = await router.selectRoute(
+        await expect(router.selectRoute(
           req('levanto-auto'), [peer('0xAAA')], null,
-          { ...enabledPreferences(), autoSubscriptionEnabled: false },
-        );
+          { ...enabledPreferences(), autoDayPassEnabled: false },
+        )).rejects.toMatchObject({ statusCode: 402 }); // never retried, so the 402 surfaces as-is
 
         expect(signDailyIfNeeded).not.toHaveBeenCalled();
-        expect(result).not.toBeNull(); // routing itself is unaffected, only signing is gated
       });
 
       it('selectRoute never signs when routingPreferences is null (no consent ever seen -- must not default to "yes")', async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+        const fetchImpl = fetchWithPaymentRequired(Infinity); // always 402s -- signing is blocked, so it never clears
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
         const router = new LevantoRouter({
           routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
           fetchImpl: fetchImpl as unknown as typeof fetch,
         });
 
+        await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('selectRoute never signs when autoDayPassEnabled is false via a cached updateRoutingPreferences push (not just a direct parameter)', async () => {
+        const fetchImpl = fetchWithPaymentRequired(Infinity); // always 402s -- signing is blocked, so it never clears
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoDayPassEnabled: false });
+
+        await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
+
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+      });
+
+      it('turning the toggle on via updateRoutingPreferences unblocks signing for a subsequent selectRoute call', async () => {
+        // Calls 1-2: the first selectRoute (blocked) 402s, retries, 402s again.
+        // Call 3: the second selectRoute's first attempt also 402s, this time
+        // triggering a real sign; call 4 (its retry) succeeds.
+        const fetchImpl = fetchWithPaymentRequired(3);
+        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoDayPassEnabled: false });
+        await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
+        expect(signDailyIfNeeded).not.toHaveBeenCalled();
+
+        router.updateRoutingPreferences({ ...enabledPreferences(), autoDayPassEnabled: true });
         await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
-
-        expect(signDailyIfNeeded).not.toHaveBeenCalled();
-      });
-
-      it('triggerDailySigningCheck never signs when autoSubscriptionEnabled is false', async () => {
-        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
-        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: false });
-
-        await router.triggerDailySigningCheck();
-
-        expect(signDailyIfNeeded).not.toHaveBeenCalled();
-      });
-
-      it('triggerDailySigningCheck never signs before any preferences have been pushed at all', async () => {
-        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
-
-        await router.triggerDailySigningCheck();
-
-        expect(signDailyIfNeeded).not.toHaveBeenCalled();
-      });
-
-      it('turning the toggle on via updateRoutingPreferences unblocks signing for a subsequent background trigger', async () => {
-        const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
-
-        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: false });
-        await router.triggerDailySigningCheck();
-        expect(signDailyIfNeeded).not.toHaveBeenCalled();
-
-        router.updateRoutingPreferences({ ...enabledPreferences(), autoSubscriptionEnabled: true });
-        await router.triggerDailySigningCheck();
         expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
         expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
       });
 
       // Regression: a buyer trying to stop billing reasonably reached for
       // the standing "Auto select seller" switch instead of the separate
-      // control that actually owns autoSubscriptionEnabled, and billing
+      // control that actually owns autoDayPassEnabled, and billing
       // kept running because nothing checked it. autoRouting must now stop
-      // signing too, same as autoSubscriptionEnabled itself.
-      it('triggerDailySigningCheck never signs when autoRouting is explicitly false, even with autoSubscriptionEnabled true', async () => {
+      // signing too, same as autoDayPassEnabled itself.
+      it('selectRoute never signs when autoRouting is explicitly false, even with autoDayPassEnabled true, pushed via updateRoutingPreferences', async () => {
+        const fetchImpl = fetchWithPaymentRequired(Infinity); // always 402s -- signing is blocked, so it never clears
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
         router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: false });
 
-        await router.triggerDailySigningCheck();
+        await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
 
         expect(signDailyIfNeeded).not.toHaveBeenCalled();
       });
 
       it('selectRoute never signs when autoRouting is explicitly false', async () => {
-        const fetchImpl = vi.fn().mockResolvedValue({ ok: true, json: async () => rankedResponse() });
+        const fetchImpl = fetchWithPaymentRequired(Infinity); // always 402s -- signing is blocked, so it never clears
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
         const router = new LevantoRouter({
           routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
           fetchImpl: fetchImpl as unknown as typeof fetch,
         });
 
-        const result = await router.selectRoute(
+        await expect(router.selectRoute(
           req('levanto-auto'), [peer('0xAAA')], null,
           { ...enabledPreferences(), autoRouting: false },
-        );
+        )).rejects.toMatchObject({ statusCode: 402 });
 
         expect(signDailyIfNeeded).not.toHaveBeenCalled();
-        expect(result).not.toBeNull(); // routing itself is unaffected, only signing is gated
       });
 
       it('autoRouting absent (a caller that never sends it) does not block signing -- only an explicit false does', async () => {
+        const fetchImpl = fetchWithPaymentRequired(1);
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
         const { autoRouting: _omit, ...prefsWithoutAutoRouting } = { ...enabledPreferences(), autoRouting: true };
         router.updateRoutingPreferences(prefsWithoutAutoRouting);
 
-        await router.triggerDailySigningCheck();
+        await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
 
         expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
       });
 
-      it('turning autoRouting back on via updateRoutingPreferences unblocks signing for a subsequent background trigger', async () => {
+      it('turning autoRouting back on via updateRoutingPreferences unblocks signing for a subsequent selectRoute call', async () => {
+        // Calls 1-2: the first selectRoute (blocked) 402s, retries, 402s again.
+        // Call 3: the second selectRoute's first attempt also 402s, this time
+        // triggering a real sign; call 4 (its retry) succeeds.
+        const fetchImpl = fetchWithPaymentRequired(3);
         const signDailyIfNeeded = vi.fn().mockResolvedValue(undefined);
-        const router = new LevantoRouter({ routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded });
+        const router = new LevantoRouter({
+          routingPeerUrl: 'http://x', sellerPeerId: '0xSELLER', signDailyIfNeeded,
+          fetchImpl: fetchImpl as unknown as typeof fetch,
+        });
 
         router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: false });
-        await router.triggerDailySigningCheck();
+        await expect(router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null)).rejects.toMatchObject({ statusCode: 402 });
         expect(signDailyIfNeeded).not.toHaveBeenCalled();
 
         router.updateRoutingPreferences({ ...enabledPreferences(), autoRouting: true });
-        await router.triggerDailySigningCheck();
+        await router.selectRoute(req('levanto-auto'), [peer('0xAAA')], null, null);
         expect(signDailyIfNeeded).toHaveBeenCalledTimes(1);
         expect(signDailyIfNeeded).toHaveBeenCalledWith('0xSELLER');
       });
-    });
-
-    it('triggerDailySigningCheck does nothing when signDailyIfNeeded is not configured', async () => {
-      const router = new LevantoRouter({ routingPeerUrl: 'http://x' });
-      await expect(router.triggerDailySigningCheck()).resolves.toBeUndefined();
     });
   });
 

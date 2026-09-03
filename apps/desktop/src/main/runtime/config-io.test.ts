@@ -55,7 +55,7 @@ test('ensureConfig creates config with desktop buyer max pricing defaults', asyn
     allowedPeerIds: [],
     blockedPeerIds: [],
     cqt: 5,
-    autoSubscriptionEnabled: false,
+    autoDayPassEnabled: false,
     selectedRouterPackage: null,
   });
   assert.equal(
@@ -195,12 +195,12 @@ test('ensureConfig preserves valid buyer routing preferences', async (t) => {
   });
 });
 
-test('ensureConfig preserves cqt and autoSubscriptionEnabled even when the migration touches other routing preferences', async (t) => {
+test('ensureConfig preserves cqt and autoDayPassEnabled even when the migration touches other routing preferences', async (t) => {
   // Regression for a real bug found live: minTrustScore out of [0,100] range
   // (or any other field needing a default) forced the migration path to
   // rebuild routingPreferences from a narrower object literal that never
-  // mentioned cqt/autoSubscriptionEnabled -- silently dropping both. In
-  // practice this meant a user's "Levanto Auto" toggle (autoSubscriptionEnabled)
+  // mentioned cqt/autoDayPassEnabled -- silently dropping both. In
+  // practice this meant a user's "Levanto Auto" toggle (autoDayPassEnabled)
   // reset to off on every app launch, with no error.
   const { dir, configPath } = await makeTempConfigPath();
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -214,7 +214,7 @@ test('ensureConfig preserves cqt and autoSubscriptionEnabled even when the migra
         allowedPeerIds: [],
         blockedPeerIds: [],
         cqt: 9,
-        autoSubscriptionEnabled: true,
+        autoDayPassEnabled: true,
       },
     },
   }, null, 2));
@@ -225,7 +225,7 @@ test('ensureConfig preserves cqt and autoSubscriptionEnabled even when the migra
   const prefs = readBuyerRoutingPreferences(config);
   assert.equal(prefs.minTrustScore, 60, 'sanity check: the migration actually fired and corrected the out-of-range value');
   assert.equal(prefs.cqt, 9, 'cqt must survive a migration triggered by an unrelated field');
-  assert.equal(prefs.autoSubscriptionEnabled, true, 'the Levanto Auto toggle must survive a migration triggered by an unrelated field');
+  assert.equal(prefs.autoDayPassEnabled, true, 'the Levanto Auto toggle must survive a migration triggered by an unrelated field');
 });
 
 test('ensureConfig preserves buyer max pricing at or below desktop defaults', async (t) => {

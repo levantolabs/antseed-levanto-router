@@ -63,7 +63,7 @@ export function isDebugEnabled(): boolean {
  * Optional file sink for debug output, in addition to console. Console
  * output is lost the moment a process is killed (`kill -9`, a crash, an
  * accidental restart) -- exactly what happened repeatedly while diagnosing
- * a real subscription-flow bug across `apps/cli` (buyer) and
+ * a real day-pass-flow bug across `apps/cli` (buyer) and
  * `levanto-routing-server` (seller) as two separate processes: getting any
  * correlated evidence meant re-running throwaway scripts with stdout
  * manually redirected each time. Set `ANTSEED_DEBUG_LOG_FILE=<path>`

@@ -6,7 +6,7 @@ import { peerAccessSummaryLabel } from '../../../modules/routing/peer-access';
 import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
 import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
-import { AUTO_SUBSCRIPTION_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
+import { AUTO_DAY_PASS_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
 import { useCachedResource } from '../../../modules/app/cached-resource';
 import { installedRouterPluginsResource } from '../../../modules/app/vpr-resources';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
@@ -44,10 +44,10 @@ export function VprPreferencesView({ onSelectView }: Props) {
   );
   const { allowedPeerIds, blockedPeerIds } = snap.preferences;
   const accessSummary = peerAccessSummaryLabel(allowedPeerIds.length, blockedPeerIds.length);
-  // Real gate on the daily subscription and the CQT dial (decisions doc
+  // Real gate on the daily day pass and the CQT dial (decisions doc
   // SS14 item 29) -- a standing, explicit toggle, not a proxy for whatever
   // model happens to be selected at this moment.
-  const autoSubscriptionEnabled = snap.preferences.autoSubscriptionEnabled ?? false;
+  const autoDayPassEnabled = snap.preferences.autoDayPassEnabled ?? false;
 
   const selectTheme = (mode: ThemeMode) => {
     applyThemeMode(mode);
@@ -70,7 +70,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
           <VprSettingRow
             title="Auto select seller"
             caption="(Price + Trust preference)"
-            hint="Applies to every model set to Auto. Off pauses routing everywhere - providers stay on their last pick, and also pauses subscription billing below."
+            hint="Applies to every model set to Auto. Off pauses routing everywhere - providers stay on their last pick, and also stops the daily router charge below."
             control={(
               <VprToggle
                 checked={snap.preferences.autoRouting}
@@ -85,11 +85,11 @@ export function VprPreferencesView({ onSelectView }: Props) {
             control={(
               <select
                 className={styles.select}
-                value={autoSubscriptionEnabled ? (snap.preferences.selectedRouterPackage ?? 'none') : 'none'}
+                value={autoDayPassEnabled ? (snap.preferences.selectedRouterPackage ?? 'none') : 'none'}
                 onChange={(event) => {
                   const nextPackage = event.target.value;
                   if (nextPackage === 'none') {
-                    actions.updateVprRoutingPreferences({ autoSubscriptionEnabled: false, selectedRouterPackage: null });
+                    actions.updateVprRoutingPreferences({ autoDayPassEnabled: false, selectedRouterPackage: null });
                     return;
                   }
                   const plugin = availableRouters.find((router) => router.package === nextPackage);
@@ -97,7 +97,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
                   // Enabling costs real, recurring money -- explain and
                   // confirm before it takes effect. The <select> itself
                   // reverts to "None" on the next render if the user
-                  // cancels, since autoSubscriptionEnabled never changed.
+                  // cancels, since autoDayPassEnabled never changed.
                   setPendingRouterPlugin(plugin);
                 }}
                 aria-label="Select model router"
@@ -110,7 +110,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
             )}
           />
 
-          {autoSubscriptionEnabled ? (
+          {autoDayPassEnabled ? (
             <div className={styles.sliderGroup}>
               <div className={styles.sliderHead}>
                 <span className={styles.sliderTitle}>Cost / quality tradeoff</span>
@@ -153,7 +153,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
               </span>
             </div>
             <VprSlider
-              min={autoSubscriptionEnabled ? AUTO_SUBSCRIPTION_MIN_TRUST_SCORE : 0}
+              min={autoDayPassEnabled ? AUTO_DAY_PASS_MIN_TRUST_SCORE : 0}
               max={100}
               step={5}
               value={snap.preferences.minTrustScore}
@@ -162,7 +162,7 @@ export function VprPreferencesView({ onSelectView }: Props) {
             />
             <div className={styles.sliderHint}>
               Providers rated below this are never used
-              {autoSubscriptionEnabled ? ' — locked to 7.0+ while a model router is selected' : ''}
+              {autoDayPassEnabled ? ' — locked to 7.0+ while a model router is selected' : ''}
             </div>
           </div>
 
@@ -318,10 +318,10 @@ export function VprPreferencesView({ onSelectView }: Props) {
         onConfirm={() => {
           if (!pendingRouterPlugin) return;
           actions.updateVprRoutingPreferences({
-            autoSubscriptionEnabled: true,
+            autoDayPassEnabled: true,
             selectedRouterPackage: pendingRouterPlugin.package,
-            ...(snap.preferences.minTrustScore < AUTO_SUBSCRIPTION_MIN_TRUST_SCORE
-              ? { minTrustScore: AUTO_SUBSCRIPTION_MIN_TRUST_SCORE }
+            ...(snap.preferences.minTrustScore < AUTO_DAY_PASS_MIN_TRUST_SCORE
+              ? { minTrustScore: AUTO_DAY_PASS_MIN_TRUST_SCORE }
               : {}),
           });
           setPendingRouterPlugin(null);

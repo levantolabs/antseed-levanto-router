@@ -199,7 +199,7 @@ export interface Router {
 
   /**
    * Optional, additive: a router that needs daily/periodic payment-signing
-   * capability (e.g. a subscription-priced routing peer, model-routing
+   * capability (e.g. a day-pass-priced routing peer, model-routing
    * decisions doc SS6.2/SS13 item 11) implements this to receive a
    * host-provided signing function, called once by the host after loading
    * and after payments are configured. Generic across any router that needs
@@ -212,30 +212,17 @@ export interface Router {
   configureDailySigning?(signDailyIfNeeded: (sellerPeerId: string) => Promise<void>): void;
 
   /**
-   * Optional, additive: host-callable, independent of any chat request
-   * (model-routing decisions doc SS13 item 9) -- a router that implements
-   * `configureDailySigning` should also implement this so a background
-   * timer can keep billing continuous even on a day the buyer never sends
-   * a routable chat message at all. Calls the exact same gated logic
-   * `selectRoute` calls internally before routing (a router's own
-   * "at most once per calendar day" bookkeeping is shared, not
-   * duplicated) -- a no-op if daily signing isn't configured, or if today
-   * was already signed by an earlier call this same day, whether from a
-   * real chat request or from this same background trigger.
-   */
-  triggerDailySigningCheck?(): Promise<void>;
-
-  /**
    * Optional, additive: pushed by the host whenever live `buyer.routingPreferences`
    * changes (buyer-proxy's config-file watcher), including once at startup if
    * preferences were supplied at construction. `selectRoute` already receives
-   * a fresh `routingPreferences` on every call, but `triggerDailySigningCheck`
-   * fires from a background timer with no request in flight and therefore no
-   * such parameter -- a router that needs live preference state outside of
-   * `selectRoute` (e.g. gating background signing on an explicit
-   * subscription-enable toggle, decisions doc SS14 item 29) implements this
-   * to receive it. A router that only ever needs `routingPreferences` inside
-   * `selectRoute` has no reason to implement this.
+   * a fresh `routingPreferences` on every call, but not every `selectRoute`
+   * call passes one (e.g. a concretely-chosen model) -- a router that needs
+   * live preference state to still be current on such a call (e.g. gating
+   * postpaid daily signing on an explicit day-pass-enable toggle,
+   * decisions doc SS14 item 29, runlog 2026-09-02) implements this to receive
+   * preference changes independent of any one `selectRoute` call. A router
+   * that only ever needs `routingPreferences` inside `selectRoute` has no
+   * reason to implement this.
    */
   updateRoutingPreferences?(preferences: ModelRoutingPreferences): void;
 

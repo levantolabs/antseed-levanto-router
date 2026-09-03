@@ -35,14 +35,14 @@ const plugin: AntseedRouterPlugin = {
       label: 'Routing Peer ID',
       type: 'string',
       required: false,
-      description: 'The routing peer\'s P2P peer id (40-char hex EVM address) -- who the daily subscription SpendingAuth is signed against. Distinct from the HTTP URL above: this is a P2P identity, not an endpoint. Omit to disable daily signing (routing-only, no subscription billing).',
+      description: 'The routing peer\'s P2P peer id (40-char hex EVM address) -- who the daily usage charge is signed against. Distinct from the HTTP URL above: this is a P2P identity, not an endpoint. Omit to disable daily signing (routing-only, no charge).',
     },
     {
       key: 'LEVANTO_BUYER_PEER_ID',
       label: 'Buyer Peer ID',
       type: 'string',
       required: false,
-      description: 'This buyer\'s own P2P peer id, sent to the routing peer as x-antseed-buyer-peer-id so the subscription gate has someone to check. Omit and the routing peer sees no buyer identity at all -- every request fails the subscription gate. See LevantoRouterConfig.buyerPeerId for why this is a demo-shaped stopgap, not a real authentication mechanism.',
+      description: 'This buyer\'s own P2P peer id, sent to the routing peer as x-antseed-buyer-peer-id so the daily-charge gate has someone to check. Omit and the routing peer sees no buyer identity at all -- every request fails that gate. See LevantoRouterConfig.buyerPeerId for why this is a demo-shaped stopgap, not a real authentication mechanism.',
     },
   ],
   createRouter(config: Record<string, string>) {

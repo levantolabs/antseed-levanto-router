@@ -1123,7 +1123,6 @@ export class BuyerProxy {
   private async _reloadRoutingPreferences(): Promise<void> {
     if (!this._configPath) return
     try {
-      const wasSubscriptionEnabled = this._routingPreferences?.autoSubscriptionEnabled ?? false
       const config = await loadConfig(this._configPath)
       const next = config.buyer.routingPreferences
       this._routingPreferences = {
@@ -1135,20 +1134,12 @@ export class BuyerProxy {
       log(
         `Routing preferences reloaded: minTrust=${next.minTrustScore} maxInput=${next.maxInputUsdPerMillion} `
         + `preferFree=${next.preferFreePeers} allow=${next.allowedPeerIds.length} block=${next.blockedPeerIds.length} `
-        + `autoSubscriptionEnabled=${next.autoSubscriptionEnabled ?? false}`,
+        + `autoDayPassEnabled=${next.autoDayPassEnabled ?? false}`,
       )
-      // Sign on toggle, not just on first request (SS13 item 9's periodic
-      // check already covers "opted in, never chatted that day" -- but its
-      // interval is 15 minutes, so a buyer who just flipped the toggle would
-      // otherwise wait up to that long, or until they send a message, before
-      // the subscription actually authorizes. Firing here makes toggling on
-      // itself the trigger, with the existing per-request/periodic paths as
-      // the fallback if this attempt fails.
-      if (!wasSubscriptionEnabled && next.autoSubscriptionEnabled) {
-        void this._node.router?.triggerDailySigningCheck?.().catch((err: unknown) => {
-          log(`Toggle-time daily signing check failed (will retry via periodic check / next request): ${err instanceof Error ? err.message : String(err)}`)
-        })
-      }
+      // Toggling the day pass on/off, by itself, causes zero network or
+      // signing activity (runlog 2026-09-02: postpaid, usage-only billing --
+      // the only trigger is a real routing dispatch caused by an actual
+      // prompt). Nothing fires here anymore.
     } catch (err) {
       log(`Routing preferences reload ignored: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -2042,16 +2033,16 @@ export class BuyerProxy {
       return
     }
 
-    if (path === '/_antseed/subscription-price' && method === 'GET') {
-      // Generic read of any discovered peer's advertised `type: 'subscription'`
+    if (path === '/_antseed/day-pass-price' && method === 'GET') {
+      // Generic read of any discovered peer's advertised `type: 'day-pass'`
       // offer (model-routing decisions doc SS13 item 6) -- for the Levanto
       // Auto Preferences toggle to show a real, live daily price instead of
-      // a bare "starts a daily subscription" with no number. `null` (not an
+      // a bare "starts a day pass" with no number. `null` (not an
       // error) whenever no such offer has been discovered yet -- a buyer who
       // hasn't found a routing peer over the network, or one advertising
       // nothing, sees the generic copy rather than a broken price.
       const peers = await this._getPeers()
-      const offer = buildNetworkServiceOffers(peers).find((o) => o.type === 'subscription' && o.flatUsdPrice !== undefined) ?? null
+      const offer = buildNetworkServiceOffers(peers).find((o) => o.type === 'day-pass' && o.flatUsdPrice !== undefined) ?? null
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({
         ok: true,

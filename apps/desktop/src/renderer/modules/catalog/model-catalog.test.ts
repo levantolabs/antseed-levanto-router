@@ -180,7 +180,7 @@ test('selectDefaultVprModel prefers Levanto Router when enabled, ahead of a free
       inputUsdPerMillion: 0, outputUsdPerMillion: 0,
     }),
   ]);
-  const catalog = withLevantoAutoCatalogEntry(withFreeModel, { autoSubscriptionEnabled: true, selectedRouterPackage: null }, []);
+  const catalog = withLevantoAutoCatalogEntry(withFreeModel, { autoDayPassEnabled: true, selectedRouterPackage: null }, []);
 
   const result = selectDefaultVprModel(catalog, null, undefined, true);
 

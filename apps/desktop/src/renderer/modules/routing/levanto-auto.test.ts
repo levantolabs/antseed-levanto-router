@@ -32,10 +32,10 @@ function realEntry(overrides: Partial<VprModelCatalogEntry> = {}): VprModelCatal
   };
 }
 
-type AutoPreferences = Pick<VprRoutingPreferences, 'autoSubscriptionEnabled' | 'selectedRouterPackage'>;
+type AutoPreferences = Pick<VprRoutingPreferences, 'autoDayPassEnabled' | 'selectedRouterPackage'>;
 
-const ENABLED_LEVANTO_DEFAULT: AutoPreferences = { autoSubscriptionEnabled: true, selectedRouterPackage: null };
-const DISABLED: AutoPreferences = { autoSubscriptionEnabled: false, selectedRouterPackage: null };
+const ENABLED_LEVANTO_DEFAULT: AutoPreferences = { autoDayPassEnabled: true, selectedRouterPackage: null };
+const DISABLED: AutoPreferences = { autoDayPassEnabled: false, selectedRouterPackage: null };
 
 const CUSTOM_ROUTER: RouterPluginInfo = {
   package: '@antseed/router-custom',
@@ -55,7 +55,7 @@ test('withLevantoAutoCatalogEntry falls back to the Levanto identity when no rou
 });
 
 test('withLevantoAutoCatalogEntry uses the selected plugin\'s own declared identity when installed', () => {
-  const preferences: AutoPreferences = { autoSubscriptionEnabled: true, selectedRouterPackage: CUSTOM_ROUTER.package };
+  const preferences: AutoPreferences = { autoDayPassEnabled: true, selectedRouterPackage: CUSTOM_ROUTER.package };
   const catalog = withLevantoAutoCatalogEntry([realEntry()], preferences, [CUSTOM_ROUTER]);
   assert.equal(catalog.length, 2);
   assert.equal(catalog[0]!.provider, 'custom');

@@ -45,7 +45,7 @@ export interface SellerPaymentConfig {
    * NodePaymentsConfig.maxCumulativeIncreasePerAuth for the full rationale --
    * this is the independent seller-side backstop for a real incident where a
    * client-side bug (fixed separately) let one signature claim several days
-   * of a flat daily subscription at once. Applies only to the "subsequent
+   * of a flat daily day pass at once. Applies only to the "subsequent
    * SpendingAuth" path, not the initial one -- day 1's own charge is exactly
    * one day's worth by construction, nothing to cap there.
    */
@@ -782,7 +782,7 @@ export class SellerPaymentManager {
 
         // Independent backstop against a buyer-side arithmetic bug claiming
         // more than one legitimate cadence's worth in a single signature
-        // (real incident: a $0.59/day subscription client-side bug let one
+        // (real incident: a $0.59/day day-pass client-side bug let one
         // call claim six days at once -- fixed there, but the seller should
         // never have to trust the buyer's day-counting alone for something
         // this consequential). Opt-in: undefined config means no cap, so
@@ -1356,11 +1356,11 @@ export class SellerPaymentManager {
 
         // If we have auths and the buyer is disconnected, try to close --
         // gated by the same settleOnDisconnect flag onBuyerDisconnect()
-        // respects (default true). A subscription-style channel (config'd
+        // respects (default true). A day-pass-style channel (config'd
         // false) must survive its buyer's connection going idle between
         // infrequent requests; without this gate, this periodic sweep
         // closed it anyway even when the immediate disconnect handler
-        // correctly preserved it -- found live: a real signed subscription
+        // correctly preserved it -- found live: a real signed day pass
         // got torn down by this exact path seconds after being established.
         if (accepted > 0n && buyerDisconnected && (this._config.settleOnDisconnect ?? true)) {
           debugLog(`[SellerPayment] Channel ${channel.sessionId.slice(0, 18)}... buyer disconnected — attempting close`);

@@ -9,8 +9,8 @@
  *
  * Deliberately independent of payments being configured: proving "this
  * request really comes from PeerId X" is useful to any router (rate
- * limiting, abuse handling, a future non-subscription pricing model), not
- * just a subscription-priced one, and the buyer's P2P `Identity` (and its
+ * limiting, abuse handling, a future non-day-pass pricing model), not
+ * just a day-pass-priced one, and the buyer's P2P `Identity` (and its
  * wallet) exists before payments are ever set up.
  */
 import {

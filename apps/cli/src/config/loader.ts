@@ -409,7 +409,7 @@ function mergeBuyerRoutingPreferences(
   const maxInputUsdPerMillion = value['maxInputUsdPerMillion'];
   const minTrustScore = value['minTrustScore'];
   const cqt = value['cqt'];
-  const autoSubscriptionEnabled = value['autoSubscriptionEnabled'];
+  const autoDayPassEnabled = value['autoDayPassEnabled'];
   return {
     preferFreePeers: preferFreePeers === undefined
       ? fallback.preferFreePeers
@@ -423,9 +423,9 @@ function mergeBuyerRoutingPreferences(
     allowedPeerIds: normalizeRoutingPeerIds(value['allowedPeerIds'], fallback.allowedPeerIds),
     blockedPeerIds: normalizeRoutingPeerIds(value['blockedPeerIds'], fallback.blockedPeerIds),
     cqt: cqt === undefined ? fallback.cqt : toFiniteOrNaN(cqt),
-    autoSubscriptionEnabled: autoSubscriptionEnabled === undefined
-      ? fallback.autoSubscriptionEnabled
-      : autoSubscriptionEnabled as boolean,
+    autoDayPassEnabled: autoDayPassEnabled === undefined
+      ? fallback.autoDayPassEnabled
+      : autoDayPassEnabled as boolean,
   };
 }
 

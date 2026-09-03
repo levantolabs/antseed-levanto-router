@@ -31,7 +31,7 @@ export type ActiveAutoRouterPlugin = {
 /**
  * router-levanto's own identity, used as the fallback default: the app has
  * shipped with it as the only bundled router plugin, and preferences saved
- * before `selectedRouterPackage` existed have `autoSubscriptionEnabled: true`
+ * before `selectedRouterPackage` existed have `autoDayPassEnabled: true`
  * with no package recorded (migrated to this package explicitly in
  * preferences.ts's `loadVprRoutingPreferences`) -- so resolving an unmatched
  * selection back to this identity preserves exactly what those buyers had
@@ -50,18 +50,18 @@ let active: ActiveAutoRouterPlugin | null = LEVANTO_FALLBACK;
 export let LEVANTO_AUTO_LABEL: string = LEVANTO_FALLBACK.label;
 
 /**
- * Minimum trust score enforced while `autoSubscriptionEnabled` is on
+ * Minimum trust score enforced while `autoDayPassEnabled` is on
  * (decisions doc SS14 item 29) -- on the *stored* 0-100 scale.
  * `reputationScaleLabel` (modules/catalog/seller-format.ts) displays this
  * scale as 0.0-10.0 (`score / 10`), so this constant is display "7.0". A
  * flat, host-side floor rather than per-plugin metadata -- not worth a new
  * `AntseedRouterPlugin` field for one UX guard.
  */
-export const AUTO_SUBSCRIPTION_MIN_TRUST_SCORE = 70;
+export const AUTO_DAY_PASS_MIN_TRUST_SCORE = 70;
 
 /**
  * Resolves the Auto entry's *identity* -- independent of whether
- * `autoSubscriptionEnabled` is currently on. `isLevantoAutoEntry`/
+ * `autoDayPassEnabled` is currently on. `isLevantoAutoEntry`/
  * `isLevantoAutoSelected` need to keep recognizing an already-selected Auto
  * conversation/model even after the user flips the toggle off (e.g. so a
  * discover refresh doesn't silently rebind it to a concrete model) -- only
@@ -101,9 +101,9 @@ export function isLevantoAutoEntry(entry: Pick<VprModelCatalogEntry, 'provider' 
  * (which is `null` before any model is chosen). No longer what the CQT
  * dial's visibility gates on -- decisions doc SS14 item 29 supersedes item
  * 21's "gate on Auto being selected" with a dedicated Preferences toggle
- * (`VprRoutingPreferences.autoSubscriptionEnabled`) instead, since a
+ * (`VprRoutingPreferences.autoDayPassEnabled`) instead, since a
  * momentary model selection was never a real substitute for explicit,
- * standing consent to a daily subscription charge. Kept for any other
+ * standing consent to a real-money day-pass charge. Kept for any other
  * "is Auto the current selection" check that isn't a consent gate.
  */
 export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'> | null): boolean {
@@ -158,7 +158,7 @@ export function currentAutoRouteEntry(): VprModelCatalogEntry {
 
 /**
  * Idempotently prepends the Auto entry to a freshly-derived catalog, but only
- * when `preferences.autoSubscriptionEnabled` is true -- the entry starts a
+ * when `preferences.autoDayPassEnabled` is true -- the entry starts a
  * real daily USDC charge, so it must not be offered as a pickable model until
  * the buyer has explicitly consented via the Preferences toggle (decisions
  * doc SS14 item 29). Also refreshes the shared "active router" cache that
@@ -174,13 +174,13 @@ export function currentAutoRouteEntry(): VprModelCatalogEntry {
  */
 export function withLevantoAutoCatalogEntry(
   catalog: VprModelCatalogEntry[],
-  preferences: Pick<VprRoutingPreferences, 'autoSubscriptionEnabled' | 'selectedRouterPackage'>,
+  preferences: Pick<VprRoutingPreferences, 'autoDayPassEnabled' | 'selectedRouterPackage'>,
   availableRouters: RouterPluginInfo[],
 ): VprModelCatalogEntry[] {
   active = resolveActiveAutoRouterPlugin(preferences, availableRouters);
   LEVANTO_AUTO_LABEL = active?.label ?? LEVANTO_FALLBACK.label;
 
-  if (!preferences.autoSubscriptionEnabled || !active) {
+  if (!preferences.autoDayPassEnabled || !active) {
     return catalog.some(isLevantoAutoEntry) ? catalog.filter((entry) => !isLevantoAutoEntry(entry)) : catalog;
   }
   if (catalog.some(isLevantoAutoEntry)) return catalog;

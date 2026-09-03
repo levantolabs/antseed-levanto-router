@@ -15,16 +15,16 @@ export type ModelRoutingPreferences = {
    */
   cqt?: number;
   /**
-   * Explicit opt-in to Auto model-routing's daily flat-fee subscription
+   * Explicit opt-in to Auto model-routing's daily flat-fee day pass
    * (decisions doc SS14 item 29, superseding item 28's "gate on Auto being
    * selected") -- off by default. A router that gates real signing on this
-   * (e.g. router-levanto's `ensureSignedToday`) must treat "unknown"
+   * (e.g. router-levanto's `signSubscriptionOnDemand`) must treat "unknown"
    * (preferences not yet supplied) the same as `false`, never as implicit
    * consent. Optional so existing routers that don't read it are unaffected.
    */
-  autoSubscriptionEnabled?: boolean;
+  autoDayPassEnabled?: boolean;
   /**
-   * npm package name of the router plugin `autoSubscriptionEnabled` applies
+   * npm package name of the router plugin `autoDayPassEnabled` applies
    * to (e.g. '@antseed/router-levanto'), chosen from whichever router-type
    * plugins are actually installed. Optional/nullable so a preferences
    * object from before this field existed, or a host with exactly one
@@ -33,15 +33,15 @@ export type ModelRoutingPreferences = {
   selectedRouterPackage?: string | null;
   /**
    * The buyer's standing "Auto select seller" switch -- distinct from, and
-   * checked ALONGSIDE, autoSubscriptionEnabled. Found live: a buyer trying
-   * to stop real-money subscription billing reasonably reached for this
+   * checked ALONGSIDE, autoDayPassEnabled. Found live: a buyer trying
+   * to stop real-money day-pass billing reasonably reached for this
    * toggle (labeled "Off pauses routing everywhere" in the UI) instead of
    * the separate "Select model router" control that actually owns
-   * autoSubscriptionEnabled -- and billing kept running, because nothing
-   * gated on this flag. A router that bills on autoSubscriptionEnabled
-   * (e.g. router-levanto's `ensureSignedToday`) should treat an explicit
+   * autoDayPassEnabled -- and billing kept running, because nothing
+   * gated on this flag. A router that bills on autoDayPassEnabled
+   * (e.g. router-levanto's `signSubscriptionOnDemand`) should treat an explicit
    * `false` here as an additional stop condition, same as
-   * autoSubscriptionEnabled itself: `undefined` (an older caller that
+   * autoDayPassEnabled itself: `undefined` (an older caller that
    * doesn't send this field) must NOT be treated as consent to keep
    * billing, but must also not newly block a host that never intended to
    * gate on it -- so callers default it to `true` (routing enabled) when
@@ -58,7 +58,7 @@ export const DEFAULT_MODEL_ROUTING_PREFERENCES: ModelRoutingPreferences = {
   allowedPeerIds: [],
   blockedPeerIds: [],
   cqt: 5,
-  autoSubscriptionEnabled: false,
+  autoDayPassEnabled: false,
   selectedRouterPackage: null,
 };
 

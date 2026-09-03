@@ -105,7 +105,7 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
   // unrecognized/missing stored value, never on -- readBoolean's `fallback`
   // here must itself be `false` (see DEFAULT_MODEL_ROUTING_PREFERENCES), not
   // inherited from some other truthy default.
-  const autoSubscriptionEnabled = readBoolean(parsed.autoSubscriptionEnabled, fallback.autoSubscriptionEnabled ?? false);
+  const autoDayPassEnabled = readBoolean(parsed.autoDayPassEnabled, fallback.autoDayPassEnabled ?? false);
 
   return {
     autoRouting: readBoolean(parsed.autoRouting, fallback.autoRouting),
@@ -122,15 +122,15 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
       ? normalizePeerIdList(parsed.blockedPeerIds)
       : fallback.blockedPeerIds,
     cqt: readCqt(parsed.cqt, fallback.cqt ?? 5),
-    autoSubscriptionEnabled,
+    autoDayPassEnabled,
     // Preferences saved before this field existed have no package recorded.
-    // Default those (and any other autoSubscriptionEnabled=true state with no
+    // Default those (and any other autoDayPassEnabled=true state with no
     // package) to router-levanto -- the only router this app has ever
     // offered until now -- so an upgrade doesn't silently strand an existing
-    // subscriber with an Auto entry that resolves to nothing.
+    // day-pass buyer with an Auto entry that resolves to nothing.
     selectedRouterPackage: readNullableString(
       parsed.selectedRouterPackage,
-      fallback.selectedRouterPackage ?? (autoSubscriptionEnabled ? '@antseed/router-levanto' : null),
+      fallback.selectedRouterPackage ?? (autoDayPassEnabled ? '@antseed/router-levanto' : null),
     ),
   };
 }
@@ -157,7 +157,7 @@ export function buyerModelRoutingPreferences(
     allowedPeerIds: validPeerIds(value.allowedPeerIds),
     blockedPeerIds: validPeerIds(value.blockedPeerIds),
     cqt: value.cqt,
-    autoSubscriptionEnabled: value.autoSubscriptionEnabled,
+    autoDayPassEnabled: value.autoDayPassEnabled,
     selectedRouterPackage: value.selectedRouterPackage ?? null,
     autoRouting: value.autoRouting,
   };

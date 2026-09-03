@@ -7,7 +7,7 @@ import test from 'node:test'
 import { Wallet } from 'ethers'
 import { BuyerPaymentManager, ChannelStore } from '@antseed/node'
 import type { BuyerPaymentConfig, ChannelsClient, Identity, PaymentMux, SpendingAuthPayload } from '@antseed/node'
-import { createSignDailyIfNeeded, scheduleDailySigningChecks, type DailySigningNode } from './daily-subscription-signing.js'
+import { createSignDailyIfNeeded, type DailySigningNode } from './day-pass-signing.js'
 
 /**
  * Real BuyerPaymentManager throughout -- all the clamping/elapsed-day/
@@ -238,7 +238,7 @@ test('catch-up: a multi-day gap tops up and signs exactly one more day, never th
   // signed 3.54 (six days' worth) in a single call, because the old
   // catch-up design let one signature capture an unbounded backlog once a
   // channel survived long enough for a real multi-day gap to accumulate.
-  // A subscription must be structurally incapable of charging more than
+  // A day pass must be structurally incapable of charging more than
   // dailyAmountUsdc per calendar day, regardless of how large the real gap
   // is -- see signCumulativeAuth's own doc comment.
   t.mock.timers.enable({ apis: ['Date'] })
@@ -390,60 +390,3 @@ test('topUpAndReconcile genuinely waits for on-chain confirmation before reconci
   })
 })
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-test('scheduleDailySigningChecks fires once immediately, without waiting for the first interval tick', async () => {
-  let calls = 0
-  const stop = scheduleDailySigningChecks({ triggerDailySigningCheck: async () => { calls += 1 } }, 60_000)
-  try {
-    await sleep(10)
-    assert.equal(calls, 1)
-  } finally {
-    stop()
-  }
-})
-
-test('scheduleDailySigningChecks fires again on the interval', async () => {
-  let calls = 0
-  const stop = scheduleDailySigningChecks({ triggerDailySigningCheck: async () => { calls += 1 } }, 20)
-  try {
-    await sleep(70) // immediate + a few 20ms ticks
-    assert.ok(calls >= 3, `expected at least 3 calls, got ${calls}`)
-  } finally {
-    stop()
-  }
-})
-
-test('scheduleDailySigningChecks stops ticking once its cleanup function is called', async () => {
-  let calls = 0
-  const stop = scheduleDailySigningChecks({ triggerDailySigningCheck: async () => { calls += 1 } }, 15)
-  await sleep(40)
-  stop()
-  const callsAtStop = calls
-  await sleep(60)
-  assert.equal(calls, callsAtStop, 'no further ticks after stop()')
-})
-
-test('scheduleDailySigningChecks passes a failed check to onError instead of throwing (a background tick must never crash the process)', async () => {
-  const errors: unknown[] = []
-  const stop = scheduleDailySigningChecks(
-    { triggerDailySigningCheck: async () => { throw new Error('signing failed') } },
-    60_000,
-    (err) => errors.push(err),
-  )
-  try {
-    await sleep(10)
-    assert.equal(errors.length, 1)
-    assert.ok(errors[0] instanceof Error && errors[0].message === 'signing failed')
-  } finally {
-    stop()
-  }
-})
-
-test('scheduleDailySigningChecks is a safe no-op for a router that does not implement triggerDailySigningCheck', async () => {
-  const stop = scheduleDailySigningChecks({}, 60_000)
-  await sleep(10)
-  stop() // must not throw
-})

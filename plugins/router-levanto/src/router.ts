@@ -20,14 +20,14 @@ export interface LevantoRouterConfig {
    * `/_antseed/route`/`/_antseed/route/digest` call. `routingPeerUrl` is a
    * bare, unauthenticated HTTP endpoint (decisions doc has no wire mechanism
    * for the routing peer to otherwise learn who's asking), so without this
-   * the subscription gate has no buyerPeerId to check `hasSession`/
+   * the day pass gate has no buyerPeerId to check `hasSession`/
    * `getChannelByPeer` against at all. A client-supplied, unverified header
    * is not a real authentication mechanism -- anyone who can reach
    * `routingPeerUrl` could claim to be any buyer. Genuinely open: how this
    * channel gets authenticated for real (a routing-peer-side P2P bridge, a
    * signed header, TLS client certs, or something else) is unresolved; see
    * the runlog. Omitted -- the routing peer gets no buyerPeerId, so the
-   * subscription gate always rejects.
+   * day pass gate always rejects.
    */
   buyerPeerId?: string;
   /**
@@ -48,7 +48,7 @@ export interface LevantoRouterConfig {
    * plugin code, including third-party ones per SSG3, would let it sign
    * arbitrary messages). The host implements this by calling the real
    * BuyerPaymentManager.signCumulativeAuth and sending the result over
-   * PaymentMux -- see apps/cli/src/proxy/daily-subscription-signing.ts,
+   * PaymentMux -- see apps/cli/src/proxy/day-pass-signing.ts,
    * wired in via configureDailySigning at apps/cli/src/cli/commands/buyer/start.ts.
    */
   signDailyIfNeeded?: (sellerPeerId: string) => Promise<void>;
@@ -222,7 +222,7 @@ function conversationKey(conversation: ConversationIdentity): string {
  * implementation just hadn't matched that yet for either: `'unreachable'`
  * (the routing peer couldn't be reached, or didn't respond within
  * `routeTimeoutMs`) and `'rejected'` (the routing peer responded but
- * declined the request, e.g. 402 "not subscribed today").
+ * declined the request, e.g. 402 "no current day pass").
  */
 export class RoutingPeerError extends Error {
   constructor(
@@ -238,17 +238,17 @@ export class RoutingPeerError extends Error {
 export class LevantoRouter {
   private readonly conversations = new ConversationState();
   private readonly ledger: RoutingLedger;
-  private lastSignedDayKey: string | null = null;
   private signingInFlight: Promise<void> | null = null;
   private lastDigestSentDayKey: string | null = null;
   /**
    * Most recently seen `routingPreferences` -- kept fresh from two paths:
    * the host's `updateRoutingPreferences` push (fires on config-file change,
-   * including once at startup) and every `selectRoute` call. Needed because
-   * `ensureSignedToday`/`triggerDailySigningCheck` (the background-timer
-   * path, decisions doc SS13 item 9) have no `selectRoute` request to read a
-   * fresh `routingPreferences` parameter from -- without this cache they'd
-   * have no way to see the subscription-enable toggle at all.
+   * including once at startup) and every `selectRoute` call that receives a
+   * non-null `routingPreferences` parameter. Needed because `signSubscriptionOnDemand`
+   * (called from inside `selectRoute`, but taking no parameters of its own)
+   * reads this cache rather than a passed-in value -- a `selectRoute` call for
+   * a concretely-chosen model, or any other call site with nothing fresh to
+   * hand over, passes `null` and relies on whatever was cached last.
    */
   private cachedRoutingPreferences: ModelRoutingPreferences | null = null;
 
@@ -305,34 +305,35 @@ export class LevantoRouter {
   /**
    * `Router.updateRoutingPreferences` (packages/node/src/interfaces/buyer-router.ts,
    * decisions doc SS14 item 29) -- keeps `cachedRoutingPreferences` fresh
-   * outside of `selectRoute` calls, so the background daily-signing trigger
-   * below can see the subscription-enable toggle even on a day the buyer
-   * never sends a chat message at all.
+   * outside of a `selectRoute` call that happens to pass one, e.g. right
+   * after a config-file reload, so `signSubscriptionOnDemand` (called only
+   * from inside a live `selectRoute`, per runlog 2026-09-0X's fully-reactive
+   * billing) still sees a current day-pass-enable toggle on a
+   * `selectRoute` call that itself passes `null`.
    */
   updateRoutingPreferences(preferences: ModelRoutingPreferences): void {
     this.cachedRoutingPreferences = preferences;
   }
 
   /**
-   * `Router.triggerDailySigningCheck` (packages/node/src/interfaces/buyer-router.ts,
-   * decisions doc SS13 item 9) -- lets a host-side background timer keep
-   * billing continuous even on a day the buyer never sends a routable chat
-   * message, by calling the exact same gated logic selectRoute() calls
-   * internally. ensureSignedToday's own bookkeeping (at most one real call
-   * per calendar day) is shared, not duplicated -- a background tick on a
-   * day already signed by a real chat request is a no-op, and vice versa.
-   */
-  async triggerDailySigningCheck(): Promise<void> {
-    await this.ensureSignedToday();
-  }
-
-  /**
-   * Ensures today's SpendingAuth is on file before routing, per SS6.2's
-   * "before making any routing calls that day" ordering. At most one call
-   * to signDailyIfNeeded per calendar day, however many times selectRoute
-   * fires that day.
+   * Signs a day-pass SpendingAuth strictly on demand -- called only when
+   * the routing peer's own response just said payment is required (a 402
+   * from `attemptRoute` below), never on a schedule, a timer, or any
+   * elapsed-time bookkeeping this client keeps itself (runlog 2026-09-0X,
+   * supersedes the calendar-day and rolling-window client-side cadences
+   * tried before it). This mirrors ordinary per-request metered billing's
+   * own seller-driven shape exactly: the seller alone decides, from its own
+   * rolling-window check (levanto-routing-server's day-pass-gate.ts),
+   * when a charge is due; the client never guesses at that, it only reacts.
    *
-   * Gated on `routingPreferences.autoSubscriptionEnabled` (decisions doc
+   * `signDailyIfNeeded` already handles both cases idempotently -- a
+   * genuinely brand-new buyer with no channel yet (opens one) and a
+   * returning buyer whose last charge fell outside the seller's window
+   * (signs one more day) -- so this has no bootstrap-vs-renewal branch of
+   * its own; both look identical from here: a 402, then one sign, then one
+   * retry.
+   *
+   * Gated on `routingPreferences.autoDayPassEnabled` (decisions doc
    * SS14 item 29) -- real money moves here (a signed SpendingAuth is a
    * genuine payment authorization), so an explicit, current "yes" is
    * required. "Unknown" (no preferences ever pushed -- `configureDailySigning`
@@ -343,37 +344,37 @@ export class LevantoRouter {
    * ALSO gated on `autoRouting !== false` -- found live: a buyer trying to
    * stop billing reasonably reached for the standing "Auto select seller"
    * switch (a different, more prominent control than the one that actually
-   * owns autoSubscriptionEnabled), and billing kept running because nothing
+   * owns autoDayPassEnabled), and billing kept running because nothing
    * checked it. `autoRouting` defaults to `undefined`/absent meaning "on"
-   * (unlike autoSubscriptionEnabled's opt-in default), so only an EXPLICIT
+   * (unlike autoDayPassEnabled's opt-in default), so only an EXPLICIT
    * `false` stops signing here -- a caller that never sends this field at
    * all is unaffected.
+   *
+   * Concurrent callers collapse onto one in-flight signature via
+   * `signingInFlight`, rather than each firing their own -- the only
+   * "limiting" this does; it never decides on its own that a sign is due.
    */
-  private async ensureSignedToday(): Promise<void> {
-    if (!this.cachedRoutingPreferences?.autoSubscriptionEnabled) return;
+  private async signSubscriptionOnDemand(): Promise<void> {
+    if (!this.cachedRoutingPreferences?.autoDayPassEnabled) return;
     if (this.cachedRoutingPreferences.autoRouting === false) return;
     if (!this.config.signDailyIfNeeded || !this.config.sellerPeerId) return;
-    const todayKey = calendarDayKey();
-    if (this.lastSignedDayKey === todayKey) return;
     if (!this.signingInFlight) {
       const signDailyIfNeeded = this.config.signDailyIfNeeded;
       const sellerPeerId = this.config.sellerPeerId;
       this.signingInFlight = signDailyIfNeeded(sellerPeerId)
-        .then(() => {
-          this.lastSignedDayKey = todayKey;
-        })
         .catch((err: unknown) => {
-          // Swallowed on purpose (a failed daily sign must not block/fail
-          // the live request this ran alongside -- see selectRoute's own
-          // await this.ensureSignedToday() call sites), but silent-and-
-          // discarded is its own incident: a real one already cost a day of
-          // on-chain forensics to diagnose (the routing peer's own error --
-          // "not subscribed, or today's signature is not yet on file" --
-          // gives no hint that a chain-RPC outage upstream is the actual
-          // cause). Logging what failed costs nothing and turns the next
-          // occurrence into a one-line diagnosis instead of a repeat of that.
+          // Swallowed on purpose (a failed sign must not turn a successful
+          // retry attempt below into a thrown error before it even tries),
+          // but silent-and-discarded is its own incident: a real one already
+          // cost a day of on-chain forensics to diagnose (the routing peer's
+          // own error -- "no current day pass, or today's signature is not yet on
+          // file" -- gives no hint that a chain-RPC outage upstream is the
+          // actual cause). Logging what failed costs nothing and turns the
+          // next occurrence into a one-line diagnosis instead of a repeat of
+          // that. The retry right after this in selectRoute will simply
+          // 402 again and surface as a normal RoutingPeerError.
           const code = (err as { code?: unknown } | null)?.code;
-          console.warn(`[LevantoRouter] daily signing skipped: ${code ?? (err instanceof Error ? err.message : err)}`);
+          console.warn(`[LevantoRouter] day-pass signing skipped: ${code ?? (err instanceof Error ? err.message : err)}`);
         })
         .finally(() => {
           this.signingInFlight = null;
@@ -408,12 +409,15 @@ export class LevantoRouter {
   }
 
   /**
-   * Daily digest (decisions doc SS6.9, software-arch doc SS2.7): same daily
-   * cadence as the SpendingAuth signature above, but its own request, not
-   * bundled into it (SS3.6 -- SpendingAuthMetadata is the wrong shape, and
-   * PaymentMux's MessageType enum is closed). Unlike signing, no signing key
-   * is involved -- this is plain stats -- so the plugin sends it directly
-   * with its own fetchImpl rather than needing a host-mediated method.
+   * Daily digest (decisions doc SS6.9, software-arch doc SS2.7): its own
+   * calendar-day cadence, independent of day-pass signing (runlog
+   * 2026-09-0X made signing purely reactive to the seller's 402s, with no
+   * calendar-day concept of its own left at all -- the digest still has one,
+   * since it's reporting stats, not moving money). Its own request, not
+   * bundled into a SpendingAuth (SS3.6 -- SpendingAuthMetadata is the wrong
+   * shape, and PaymentMux's MessageType enum is closed). No signing key is
+   * involved -- this is plain stats -- so the plugin sends it directly with
+   * its own fetchImpl rather than needing a host-mediated method.
    * Best-effort: a failed send must never block or fail routing (SS2.7:
    * "not required for correct routing to work"), so errors are swallowed
    * and retried on the next selectRoute call rather than surfaced.
@@ -422,9 +426,9 @@ export class LevantoRouter {
    * performance digest" per day only makes sense as a finished tally (SS3.6's
    * retention model -- each day's digest accumulates as a permanent record),
    * and at the moment this fires (the first selectRoute of a new calendar
-   * day, same trigger as ensureSignedToday) today's own ledger rows don't
-   * exist yet. Sent the same way signing works one day "late" relative to
-   * the toggle -- yesterday's numbers, flushed at the start of today.
+   * day) today's own ledger rows don't exist yet. Sent one day "late"
+   * relative to the toggle -- yesterday's numbers, flushed at the start of
+   * today.
    */
   private async sendDailyDigestIfNeeded(): Promise<void> {
     if (!this.config.sellerPeerId) return; // nowhere to send it yet
@@ -511,7 +515,7 @@ export class LevantoRouter {
     defaultRoutedModel?: string | null,
   ): Promise<RouteCandidate[] | null> {
     // Kept fresh regardless of which model this particular call is for --
-    // the subscription-enable toggle is a standing preference, not tied to
+    // the day-pass-enable toggle is a standing preference, not tied to
     // the model happening to be selected on this one request (decisions doc
     // SS14 item 29).
     if (routingPreferences) this.cachedRoutingPreferences = routingPreferences;
@@ -560,10 +564,6 @@ export class LevantoRouter {
       }
     }
 
-    // Pay-first (decisions doc SS6.2): today's signature must be on file
-    // before this call, not after -- and only now, since a pinned reuse
-    // above never reaches the network at all.
-    await this.ensureSignedToday();
     // Same daily cadence, its own request (SS2.7) -- fire-and-forget, never
     // blocks or fails the routing call itself.
     await this.sendDailyDigestIfNeeded();
@@ -598,7 +598,7 @@ export class LevantoRouter {
 
     const doFetch = this.config.fetchImpl ?? fetch;
     const timeoutMs = this.config.routeTimeoutMs ?? DEFAULT_ROUTE_TIMEOUT_MS;
-    // Computed once, reused across the not-subscribed self-heal retry below
+    // Computed once, reused across the no-day-pass self-heal retry below
     // -- one nonce per selectRoute call is fine (replay protection is about
     // rejecting an OLD signature replayed on a LATER call, not about
     // single-use within the same call), and avoids re-signing twice for
@@ -648,32 +648,31 @@ export class LevantoRouter {
 
     const routingCallStartedAt = Date.now();
     let res = await attemptRoute();
-    let rejectionMessage = res.ok ? null : await parseRejectionMessage(res);
 
-    // Not-subscribed self-heal (runlog: bootstrap's SpendingAuth sends can
-    // fail to durably reach the seller with zero feedback to the buyer --
-    // ensureSignedToday's own once-per-day throttle then blocks any retry
-    // until the next calendar day, stranding an Auto conversation that
-    // believes it's paid up). If the seller reports specifically "not
-    // subscribed" and the toggle is genuinely on, force one fresh signing
-    // attempt and retry the routing call once -- bounded to a single retry
-    // so a seller that's down for an unrelated reason doesn't loop here.
-    if (
-      res.status === 402
-      && rejectionMessage?.toLowerCase().includes('not subscribed')
-      && this.cachedRoutingPreferences?.autoSubscriptionEnabled
-    ) {
-      this.lastSignedDayKey = null;
-      await this.ensureSignedToday();
+    // Fully reactive day-pass payment (runlog 2026-09-0X): the client
+    // keeps no clock of its own for this -- it signs only because the
+    // seller's response just said payment is required, exactly once per
+    // lapse, the same shape ordinary per-request metered billing already
+    // uses (seller decides a charge is due, buyer signs in response, never
+    // the other way around). One retry only: covers both a genuinely
+    // brand-new buyer (no channel at all yet) and a returning one whose last
+    // charge fell outside the seller's rolling window --
+    // signSubscriptionOnDemand doesn't need to know which case it is, and a
+    // second 402 after the retry just falls through to the throw below like
+    // any other rejection.
+    if (res.status === 402 && this.config.signDailyIfNeeded && this.config.sellerPeerId) {
+      await this.signSubscriptionOnDemand();
       res = await attemptRoute();
-      rejectionMessage = res.ok ? null : await parseRejectionMessage(res);
     }
+
+    const rejectionMessage = res.ok ? null : await parseRejectionMessage(res);
 
     const routingLatencyMs = Date.now() - routingCallStartedAt;
     if (!res.ok) {
-      // Includes the 402 "not subscribed today" case. Same reasoning as the
-      // unreachable branch above -- throws instead of falling through to a
-      // pipeline that can't handle the Auto sentinel.
+      // Includes the 402 "no current day pass" case (the retry above already had
+      // its one chance to clear it). Same reasoning as the unreachable
+      // branch above -- throws instead of falling through to a pipeline
+      // that can't handle the Auto sentinel.
       throw new RoutingPeerError('rejected', rejectionMessage!, res.status);
     }
 
@@ -786,6 +785,10 @@ export class LevantoRouter {
       inputMessagePreview: trimForInputMessage(lastUserText) || null,
     });
 
+    // No signing here (runlog 2026-09-0X): a response reaching this point is
+    // already proof the seller considered the day pass current when it
+    // served this request -- see signSubscriptionOnDemand's doc comment for
+    // why the client never re-decides that on its own.
     return ranked.map((c) => pinnedToRouteCandidate(c, substituteModel(req, c.serviceId)));
   }
 }

@@ -1990,7 +1990,7 @@ describe('BuyerPaymentManager', () => {
     expect(channel!.requestCount).toBe(2);
   });
 
-  describe('signCumulativeAuth (model-routing flat-fee subscription)', () => {
+  describe('signCumulativeAuth (model-routing flat-fee day pass)', () => {
     const DAY_MS = 24 * 60 * 60 * 1000;
     // Kept well under makeConfig's maxPerRequestUsdc (100_000n = $0.10) --
     // authorizeSpending silently no-ops (empty channelId) above that, per
@@ -2056,7 +2056,7 @@ describe('BuyerPaymentManager', () => {
       // Regression for a real live incident: a channel open under four
       // hours signed six days' worth in a single call, because the old
       // design let one call catch up an unbounded (config-capped) backlog
-      // in one shot. A subscription must be structurally incapable of
+      // in one shot. A day pass must be structurally incapable of
       // charging more than dailyAmountUsdc per calendar day -- this cap no
       // longer depends on any caller-supplied config at all.
       vi.useFakeTimers();

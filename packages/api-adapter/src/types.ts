@@ -30,7 +30,7 @@ export const WELL_KNOWN_SERVICE_API_PROTOCOLS = [
   // package's ServiceApiProtocol type stays assignable to/from that one.
   // detectRequestServiceApiProtocol never returns it (no real request maps
   // to it), and it needs no adapter-fallback entry.
-  'antseed-subscription',
+  'antseed-day-pass',
 ] as const;
 
 export type ServiceApiProtocol = (typeof WELL_KNOWN_SERVICE_API_PROTOCOLS)[number];

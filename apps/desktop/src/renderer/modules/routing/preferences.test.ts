@@ -22,7 +22,7 @@ const fallbackPreferences: VprRoutingPreferences = {
   allowedPeerIds: [],
   blockedPeerIds: [],
   cqt: 5,
-  autoSubscriptionEnabled: false,
+  autoDayPassEnabled: false,
 };
 
 test('migrates the previous zero default to the new 6.0 minimum', () => {
@@ -81,7 +81,7 @@ test('valid VPR preferences and route selection save and load', () => {
     allowedPeerIds: ['peer-1'],
     blockedPeerIds: ['peer-2', 'peer-3'],
     cqt: 7,
-    autoSubscriptionEnabled: true,
+    autoDayPassEnabled: true,
     selectedRouterPackage: '@antseed/router-custom',
   };
   const routeSelection: VprRouteSelection = {
@@ -110,16 +110,16 @@ test('buyer config projection includes every field the router-levanto payment ga
     allowedPeerIds: fallbackPreferences.allowedPeerIds,
     blockedPeerIds: fallbackPreferences.blockedPeerIds,
     cqt: fallbackPreferences.cqt,
-    autoSubscriptionEnabled: fallbackPreferences.autoSubscriptionEnabled,
+    autoDayPassEnabled: fallbackPreferences.autoDayPassEnabled,
     selectedRouterPackage: null,
     autoRouting: fallbackPreferences.autoRouting,
   });
 });
 
-test('buyer config projection forwards autoRouting -- router-levanto\'s ensureSignedToday also gates real-money signing on this', () => {
-  // Regression: a buyer trying to stop subscription billing reasonably
+test('buyer config projection forwards autoRouting -- router-levanto\'s signSubscriptionOnDemand also gates real-money signing on this', () => {
+  // Regression: a buyer trying to stop day-pass billing reasonably
   // reached for the "Auto select seller" switch instead of the separate
-  // control that owns autoSubscriptionEnabled, and billing kept running
+  // control that owns autoDayPassEnabled, and billing kept running
   // because this field used to be dropped from the projection entirely.
   const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, autoRouting: false });
   assert.equal(projected.autoRouting, false);
@@ -128,28 +128,28 @@ test('buyer config projection forwards autoRouting -- router-levanto\'s ensureSi
 test('buyer config projection forwards which router plugin is selected -- process-manager.ts reads this back to decide which router to start', () => {
   const projected = buyerModelRoutingPreferences({
     ...fallbackPreferences,
-    autoSubscriptionEnabled: true,
+    autoDayPassEnabled: true,
     selectedRouterPackage: '@antseed/router-custom',
   });
   assert.equal(projected.selectedRouterPackage, '@antseed/router-custom');
 });
 
-test('preferences saved before selectedRouterPackage existed default it to router-levanto once autoSubscriptionEnabled is on -- an upgrade must not strand an existing subscriber', () => {
+test('preferences saved before selectedRouterPackage existed default it to router-levanto once autoDayPassEnabled is on -- an upgrade must not strand an existing day-pass buyer', () => {
   localStorage.setItem(
     VPR_PREFERENCES_STORAGE_KEY,
-    JSON.stringify({ ...fallbackPreferences, autoSubscriptionEnabled: true }),
+    JSON.stringify({ ...fallbackPreferences, autoDayPassEnabled: true }),
   );
   assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, '@antseed/router-levanto');
 });
 
-test('preferences saved before selectedRouterPackage existed stay unselected when autoSubscriptionEnabled was never on', () => {
+test('preferences saved before selectedRouterPackage existed stay unselected when autoDayPassEnabled was never on', () => {
   localStorage.setItem(VPR_PREFERENCES_STORAGE_KEY, JSON.stringify(fallbackPreferences));
   assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, null);
 });
 
-test('buyer config projection forwards the subscription-enable toggle (decisions doc SS14 item 29) -- real money gate, must not drop silently', () => {
-  const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, autoSubscriptionEnabled: true });
-  assert.equal(projected.autoSubscriptionEnabled, true);
+test('buyer config projection forwards the day-pass-enable toggle (decisions doc SS14 item 29) -- real money gate, must not drop silently', () => {
+  const projected = buyerModelRoutingPreferences({ ...fallbackPreferences, autoDayPassEnabled: true });
+  assert.equal(projected.autoDayPassEnabled, true);
 });
 
 test('cqt dial value (decisions doc SS8.1) round-trips through save/load', () => {

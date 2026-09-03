@@ -19,6 +19,209 @@ in. Newest entries at the top.
 
 ---
 
+## [2026-09-03] Fully reactive day-pass billing: rolling 24h+grace window, client does no timing of its own, "subscription" renamed to "day pass" throughout
+
+**Type:** Supersedes the 2026-09-02 entry's own design in two ways, found live and by
+explicit product decision. Spans both repos again: this fork and the private sibling
+`levanto-routing-server`, one shared log per that repo's `CLAUDE.md`.
+
+**What changed, and why.**
+
+1. **The seller's gate now expires.** The 09-02 pass made `isSubscribed` (now
+   `isDayPassCurrent`) just `hasSession` -- a channel existing at all, forever, with no
+   recency check. That's an unbounded free-ride: a buyer could pay for one day and keep
+   routing for free indefinitely after, since nothing ever re-checked. `isDayPassCurrent`
+   (`day-pass-gate.ts`, formerly `subscription-gate.ts`) now also requires the channel's
+   `updatedAt` to be within a rolling 24h + 10min grace of now. The grace exists only to
+   cover one request's serve-then-sign round trip under postpaid billing -- not extra free
+   usage -- so a request arriving within it still gets billed for a fresh day immediately
+   after being served.
+
+2. **The client does no timing of its own at all.** The 09-02 pass had the client
+   (`plugins/router-levanto/src/router.ts`) track its own `lastSignedDayKey` and decide,
+   from a calendar-day comparison, when to sign -- both before the first-ever call
+   (bootstrap) and after every successful response. Found live: calendar-day boundaries
+   don't match a rolling window (a charge at 11:58pm could be followed by another one two
+   minutes later), and mirroring the actual per-request metered-inference pattern more
+   closely means the client shouldn't be deciding this at all -- the seller already decides,
+   via the gate above. `signSubscriptionOnDemand` (`ensureSignedToday`, renamed) now signs
+   *only* when a routing call comes back 402, then retries once. This one mechanism now
+   covers both a genuinely brand-new buyer (no channel yet) and a returning buyer whose
+   last charge fell outside the seller's window -- `signDailyIfNeeded` already branches on
+   which case it is, so the client doesn't need to. No post-response signing exists anymore:
+   a 200 already proves the seller considered the buyer current when it served that request.
+
+3. **"Subscription" is renamed to "day pass" throughout both repos**, including the
+   wire-advertised service type (`'antseed-subscription'` -> `'antseed-day-pass'`, a real
+   protocol-level union type spanning `packages/protocol/src/service-api.ts`,
+   `packages/api-adapter/src/types.ts`, and `packages/node/src/discovery/
+   service-catalog.ts` -- not a loose string, all three had to move together). Key renames:
+   `isSubscribed`/`SubscriptionSource` -> `isDayPassCurrent`/`DayPassSource`
+   (`levanto-routing-server`), `ModelRoutingPreferences.autoSubscriptionEnabled` ->
+   `autoDayPassEnabled` (the persisted preferences field, propagated everywhere it's
+   read/written -- not migrated, this project has no wide install base to preserve saved
+   config for yet), `apps/cli/src/proxy/daily-subscription-signing.ts` -> `day-pass-signing.ts`,
+   the buyer-proxy admin route `/_antseed/subscription-price` -> `/_antseed/day-pass-price`,
+   the IPC channel and bridge method `chatAiGetSubscriptionPrice` -> `chatAiGetDayPassPrice`.
+   No functional behavior changes here, purely naming -- called out separately from items 1-2
+   because of the wire-protocol coupling: a client on the old name cannot recognize a seller
+   advertising the new one at all, not just degrade gracefully.
+
+**Consequence worth stating plainly:** because 3 is a wire-breaking rename, the production
+routing peer and every client (`apps/cli`/`apps/desktop`) must move together -- there is no
+partial-rollout path where an old client keeps working against a renamed seller, or vice
+versa. Confirmed this by deploying the seller first and having a stale client fail to
+recognize it exactly as predicted, before both sides were brought back in sync in the same
+push.
+
+---
+
+## [2026-09-02] $0.89/day, postpaid, usage-only billing -- reverses pay-first, calendar-day billing, and the background signing trigger
+
+**Type:** Deliberate business decision, reversing four things the ground truth docs
+currently lock in. Spans both repos: this fork (`antseed-fork`, the client/buyer side) and
+the private sibling `levanto-routing-server` (the routing-peer/seller side) -- confirmed
+with the user that both are in scope and both are edited in this pass, sharing this one log
+per `levanto-routing-server/CLAUDE.md`.
+
+**What was decided.** Levanto raised the daily subscription fee from $0.59 to $0.89, and
+changed the billing model to mirror ordinary AntSeed per-request inference billing: charge
+only for days the buyer actually sends a prompt (not every day the toggle happens to be on),
+sign the day's `SpendingAuth` only *after* that day's first routing call succeeds (not
+before), and remove every trigger that isn't a real prompt -- no background timer, no
+toggle-flip trigger.
+
+**What this reverses, by section:**
+- **§6.2 ("pay-first"):** *"the client signs today's cumulative ... before making any
+  routing calls that day, not after using it."* Now the opposite: sign after.
+- **§6.7 / §9.1 (calendar-day billing):** *"a day is billed regardless of whether a routing
+  call actually fired that day, but only while the toggle is on."* Now pure active-usage-day
+  billing -- no toggle-day billing, no ~30-day catch-up/backlog/forgiveness mechanism,
+  because there's no backlog left to catch up once idle days are simply never billed.
+- **§13 item 9 / §14 item 27 (the "usage-independent" 15-minute background signing timer,
+  and buyer-proxy's toggle-flip immediate trigger):** both deleted outright. The only thing
+  that can trigger a sign or a routing call now is the user sending a prompt.
+- **§14 item 20 (seller-side gate additionally requires `authMax > 0`,** i.e. today's
+  signature already on file): dropped. The gate is now just `hasSession` -- a channel
+  existing at all, trusting the postpaid signature to follow.
+
+**Design: how postpaid orders relative to bootstrap.** Ordinary AntSeed metered inference
+already separates two things: a `ReserveAuth` (locks capacity, no money moves, seller-
+initiated on-chain call) established *before* any request to a new seller, and a per-request
+`SpendingAuth` signed *after* that request completes. This applies the same shape here,
+including for the very first prompt a brand-new subscriber ever sends: the channel still
+opens lazily (`authorizeSpending` -> `reserve()`) on that first `selectRoute()` call, before
+attempting the routing dispatch -- that's capacity, not a charge. Only the `SpendingAuth`
+(the actual $0.89 charge) is deferred until after that first routing call succeeds, same as
+every later day.
+
+**Consequence, stated explicitly, not glossed over:** the very first routing request a
+brand-new subscriber ever makes is now served by the seller with zero prior signed
+cumulative on file -- `reserve()`'s own bootstrap step only signs a zero-amount "reserve
+proof," so `authMax` is still `'0'` at that moment. This reopens the exact free-rider
+exposure §6.2 originally designed pay-first to avoid, bounded to about one day's charge
+(~$0.89) per buyer per usage gap -- the same order of trust ordinary per-request metered
+billing already extends per session. This is the direct, intended consequence of "mimic the
+inference dynamic," not an oversight.
+
+**What changed, `antseed-fork`:**
+- `apps/cli/src/cli/commands/buyer/start.ts`: `dailyAmountUsdc` 590_000n -> 890_000n.
+  Deleted the `scheduleDailySigningChecks(...)` wiring block and its 15-minute interval
+  constant entirely -- `router.configureDailySigning(signDailyIfNeeded)` stays (the router
+  still needs the signing closure, it's just never auto-invoked).
+- `apps/cli/src/proxy/daily-subscription-signing.ts`: deleted `scheduleDailySigningChecks`
+  and the `DailySigningTrigger` interface. `createSignDailyIfNeeded`'s internal mechanics
+  (bootstrap, ordinary-day, preemptive top-up) are unchanged -- confirmed by reading
+  `signCumulativeAuth` directly: it already computes `daysElapsed` from real wall-clock time
+  since the last signature and grants at most one more day per call regardless of gap
+  length, which is exactly what active-usage-day billing needs. There was never a separate
+  backlog amount to remove.
+- `apps/cli/src/proxy/buyer-proxy.ts`: deleted `_reloadRoutingPreferences`'s toggle-flip
+  `triggerDailySigningCheck()` call -- flipping the subscription preference now causes zero
+  network or signing activity.
+- `plugins/router-levanto/src/router.ts` (`selectRoute`): removed the pre-flight
+  `await this.ensureSignedToday()` before the routing fetch, and the "not-subscribed
+  self-heal" retry block (existed specifically to recover from the old pay-first failure
+  mode). Added `await this.ensureSignedToday()` after a successful response is fully
+  processed, right before returning the ranked candidates -- awaited, not fire-and-forget,
+  matching `sendDailyDigestIfNeeded`'s existing pattern in the same function (only adds real
+  latency on the first successful call of the day; every later call that day is a same-tick
+  no-op via `lastSignedDayKey`). Deleted `triggerDailySigningCheck()` entirely -- nothing
+  calls it after the two removals above.
+- `packages/node/src/interfaces/buyer-router.ts`: removed the now-dead
+  `Router.triggerDailySigningCheck` optional member. `configureDailySigning` and
+  `updateRoutingPreferences` stay -- both still real and used.
+- Tests rewritten to match (not just left broken): `plugins/router-levanto/src/router.test.ts`'s
+  `'pay-first daily signing'` describe block now asserts sign-after instead of sign-before;
+  its `triggerDailySigningCheck`-specific tests were converted to exercise the same gating
+  logic through `selectRoute` + `updateRoutingPreferences` instead, since that's the only
+  remaining path to it. `apps/cli/src/proxy/daily-subscription-signing.test.ts`'s five
+  `scheduleDailySigningChecks` tests were deleted along with the function.
+
+**What changed, `levanto-routing-server`:**
+- `src/local-peer-daemon.ts`: `DAILY_SUBSCRIPTION_USDC` 0.59 -> 0.89 (this single constant
+  already drives both the advertised `antseed-subscription` price and the seller-side
+  `maxCumulativeIncreasePerAuth` backstop, so nothing else needed a separate literal
+  change). `src/e2e/full-lifecycle-onchain.test.ts`'s own `DAILY_AMOUNT` updated to match,
+  along with its neighboring comments' now-stale dollar-figure arithmetic.
+- `src/subscription-gate.ts`: `isSubscribedToday` (required `hasSession && updatedAt is
+  today && authMax > 0`) replaced with `isSubscribed` (just `hasSession`). The
+  `SubscriptionSource` interface dropped `getChannelByPeer` entirely -- nothing left needs
+  channel timestamp/amount data, only whether a channel exists at all.
+- `src/routing-server-handler.ts` (`handleRoute`): calls the renamed `isSubscribed`.
+  `paymentHistory.recordPaidDay(...)` is left in place (there's no existing "SpendingAuth
+  accepted" seller-side hook to move it to without deeper surgery into `packages/node`'s
+  core `SellerPaymentManager`, out of scope here) but its comment now states plainly that
+  serving a route no longer proves payment landed -- see the minor gap noted below.
+- Tests rewritten across all four files that exercised the old gate: `routing-server-handler.test.ts`
+  (the two now-obsolete "returns 402" tests for a stale signature / zero-amount bootstrap
+  reserve proof became a single "serves a route" test asserting the new, intended 200;
+  `SubscriptionSource` test fixtures collapsed to just `SUBSCRIBED`/`NOT_SUBSCRIBED`, since
+  the interface only has one boolean-returning method left), `e2e/thin-loop.test.ts`,
+  `e2e/full-lifecycle.test.ts`, and `e2e/full-lifecycle-onchain.test.ts` (both real-anvil
+  tests: the bootstrap test now asserts routing succeeds *before* any signature exists, and
+  the former "catch-up burst" test became "a long idle gap does not block routing," keeping
+  only the still-genuine, contract-level assertion that raising the on-chain ceiling for a
+  new day requires two separate transactions regardless of gap length).
+
+**Minor accepted gap, not fixed this pass:** `paymentHistory.recordPaidDay` now fires at
+route-serving time, not at signature-received time. A buyer who is routed but never actually
+signs, whose channel is later closed, could still pass `handleDigest`'s `hasEverPaid`
+fallback for that one day. Low-stakes -- doesn't affect real on-chain settlement (that's
+driven by actual `SpendingAuth`/`settle()` calls, untouched by this), only whether a
+post-closure digest submission for an unpaid day gets accepted. No seller-side hook exists
+today to move this to "signature actually accepted" without touching `packages/node`'s core
+`SellerPaymentManager` -- left as a known, narrow gap rather than expanding this change's
+scope to fix it.
+
+**Cross-repo dependency:** the routing peer's advertised price
+(`/_antseed/subscription-price`, decisions doc §14 item 31) is driven by the same
+`DAILY_SUBSCRIPTION_USDC` constant now at $0.89, so the desktop's disclosure copy
+(`RouterInfoDialog.tsx`, which reads the price live with no hardcoded fallback figure) stays
+correct automatically once a real routing-peer deployment picks up this change -- nothing
+further needed client-side for that.
+
+**Verification.** `antseed-fork`: `plugins/router-levanto` (`pnpm test`, 75/75, including the
+rewritten `router.test.ts`), `apps/cli` (`pnpm test`) -- confirmed by diffing against a
+`git stash`-clean baseline that all 9 pre-existing failures there (a `topUpReserve` deposit-
+verification-read gap from an earlier, unrelated fix; two stale `routingPreferences` merge/
+reload test fixtures) are unchanged before and after this change, i.e. this change introduces
+zero new failures. `levanto-routing-server`: `pnpm run build` (tsc) clean; `pnpm test` 47/48,
+the one failure (`ranks candidates and returns a well-formed decisions-doc SS4.4 response`,
+a ranking-order assertion against the mock sidecar) confirmed pre-existing via the same
+stash-diff method, unrelated to subscription gating. Both the mocked-RPC
+(`e2e/full-lifecycle.test.ts`) and the real local-anvil (`e2e/full-lifecycle-onchain.test.ts`,
+genuine `reserve()`/`topUp()`/`settle()` transactions) end-to-end suites pass against the new
+postpaid gate and pricing, including a real on-chain confirmation that the first-ever routing
+request for a brand-new subscriber succeeds before any signature exists.
+
+**Ground truth reference:** `docs/model-routing-architecture-and-open-decisions.md` §6.2,
+§6.7, §9.1, §13 item 9, §14 items 20 and 27; `levanto-routing-server`'s own
+`software-architecture.md` §3.3 reference. None of the four docs are edited to reflect this
+-- this entry is the record of the deviation, per `CLAUDE.md`'s ground-truth discipline.
+
+---
+
 ## [2026-08-31] `autoRouting: false` now also stops subscription signing, alongside `autoSubscriptionEnabled`
 
 **Type:** Decision, filling a gap the docs are silent on -- found live, not theoretical.
