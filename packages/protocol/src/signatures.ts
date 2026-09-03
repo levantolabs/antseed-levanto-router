@@ -1,4 +1,4 @@
-import { type AbstractSigner, type TypedDataDomain, AbiCoder, hexlify, id, keccak256, randomBytes } from 'ethers';
+import { type AbstractSigner, type TypedDataDomain, AbiCoder, hexlify, id, keccak256, randomBytes, verifyTypedData } from 'ethers';
 
 // =========================================================================
 // EIP-712 Types — AntSeed SpendingAuth (cumulative payment authorization)
@@ -40,6 +40,29 @@ export const FREE_USAGE_AUTH_TYPES = {
     { name: 'sequence', type: 'uint256' },
     { name: 'metadataHash', type: 'bytes32' },
     { name: 'deadline', type: 'uint256' },
+  ],
+};
+
+/**
+ * Proves who is actually sending a `/_antseed/route` request (model-routing
+ * decisions doc SS13 item 8, previously unresolved: `x-antseed-buyer-peer-id`
+ * was a client-asserted, unverified header -- anyone reaching a routing
+ * peer's HTTP surface could claim to be any buyer). Off-chain only, never
+ * submitted to a contract -- EIP-712 typed data is reused here purely for
+ * its existing, audited structured-signing shape and because the buyer's
+ * `PeerId` already *is* their EVM address (`peer-id.ts`), not because this
+ * needs on-chain verification. `routingPeer` binds the signature to one
+ * specific routing peer (a signature captured by peer A can't be replayed
+ * against peer B); `issuedAt` + `nonce` bound the replay window on the
+ * receiving side (a short-lived, in-memory seen-nonce cache is enough -- this
+ * is an HTTP auth check, not a channel authorization).
+ */
+export const ROUTE_REQUEST_AUTH_TYPES = {
+  RouteRequestAuth: [
+    { name: 'buyer', type: 'address' },
+    { name: 'routingPeer', type: 'address' },
+    { name: 'issuedAt', type: 'uint256' },
+    { name: 'nonce', type: 'bytes32' },
   ],
 };
 
@@ -101,6 +124,13 @@ export interface FreeUsageAuthMessage {
   deadline: bigint;
 }
 
+export interface RouteRequestAuthMessage {
+  buyer: string;
+  routingPeer: string;
+  issuedAt: bigint;
+  nonce: string; // bytes32 hex
+}
+
 export interface ReceiveAuthorizationMessage {
   from: string;
   to: string;
@@ -115,7 +145,7 @@ export interface ReceiveAuthorizationMessage {
 // =========================================================================
 
 /**
- * SpendingAuth metadata v3.
+ * SpendingAuth metadata v4.
  *
  * ABI layout:
  *   abi.encode(
@@ -124,15 +154,35 @@ export interface ReceiveAuthorizationMessage {
  *     uint256 cumulativeOutputTokens,
  *     uint256 cumulativeRequestCount,
  *     uint256 cumulativeOutputImages,
+ *     string  chargeType,
  *     ServiceTotal[] services
  *   )
  *
  * The first four fields intentionally match v1/v2 so legacy decoders can read
- * aggregate token/request counters by decoding only those fields. Service
- * entries are buyer-side attribution metadata for indexers: input tokens
- * include cached input, with cached input broken out separately. The service
- * tuple appends cumulativeOutputImages after the v2 fields; decoders must
- * switch on the leading version word before decoding the services array.
+ * aggregate token/request counters by decoding only those fields -- this is
+ * load-bearing, not just a convention: AntseedStats.sol's on-chain
+ * `_decodeMetadata` does a fixed, non-version-aware
+ * `abi.decode(metadata, (uint256,uint256,uint256,uint256))`, reading exactly
+ * the first 128 bytes of the head and ignoring everything after. Any new
+ * field, this version's `chargeType` included, MUST be appended after
+ * `cumulativeOutputImages` (v3) -- never inserted before or between the
+ * first four -- or every future on-chain stats record silently corrupts.
+ * Placement after a dynamic type (chargeType is a `string`) still can't
+ * disturb those first four static uint256 head slots, which is why
+ * `services[]` (already dynamic, present since v2) was always safe.
+ *
+ * `chargeType` distinguishes a flat, non-metered charge (e.g. a router's day
+ * pass) from ordinary per-request metered billing, since the latter's
+ * cumulativeInputTokens/OutputTokens/RequestCount are genuinely zero for a
+ * flat fee -- without this, that zeroed block reads as "no real activity"
+ * rather than "a real charge with nothing to meter." Two values in use:
+ * 'metered' (the default -- see encodeMetadata) and 'flat-subscription'.
+ * Kept as a plain string rather than a numeric enum for readability in a
+ * schema meant to be shared outside this codebase (AntSeed); revisit if the
+ * extra ABI cost of a dynamic type ever matters.
+ *
+ * Service entries are buyer-side attribution metadata for indexers: input
+ * tokens include cached input, with cached input broken out separately.
  *
  * Generated images are counted twice, deliberately:
  *   - cumulativeOutputImages holds the raw image count (ground truth),
@@ -153,8 +203,14 @@ export interface SpendingAuthMetadata {
   cumulativeRequestCount: bigint;
   /** Optional so FreeUsageMetadata-shaped objects remain assignable; encodes as 0. */
   cumulativeOutputImages?: bigint;
+  /** Optional -- encodes as 'metered' when absent (ordinary per-request billing never needs to set this explicitly). */
+  chargeType?: string;
   services?: SpendingAuthServiceMetadata[];
 }
+
+/** `chargeType` values in current use -- see SpendingAuthMetadata's own doc comment. */
+export const CHARGE_TYPE_METERED = 'metered';
+export const CHARGE_TYPE_FLAT_SUBSCRIPTION = 'flat-subscription';
 
 export interface SpendingAuthServiceMetadata {
   serviceId: string;
@@ -166,7 +222,7 @@ export interface SpendingAuthServiceMetadata {
   cumulativeOutputImages: bigint;
 }
 
-export const METADATA_VERSION = 3n;
+export const METADATA_VERSION = 4n;
 
 /**
  * Flat output-token equivalent credited per generated image in v3 metadata
@@ -188,13 +244,16 @@ export function encodeMetadata(metadata: SpendingAuthMetadata): string {
     a.serviceId < b.serviceId ? -1 : a.serviceId > b.serviceId ? 1 : 0,
   );
   return coder.encode(
-    ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', SERVICE_METADATA_ABI_TYPE],
+    // chargeType MUST stay after the first four uint256 fields -- see
+    // SpendingAuthMetadata's doc comment on why that position is load-bearing.
+    ['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'string', SERVICE_METADATA_ABI_TYPE],
     [
       METADATA_VERSION,
       metadata.cumulativeInputTokens,
       metadata.cumulativeOutputTokens,
       metadata.cumulativeRequestCount,
       metadata.cumulativeOutputImages ?? 0n,
+      metadata.chargeType ?? CHARGE_TYPE_METERED,
       services,
     ],
   );
@@ -263,6 +322,7 @@ export const ZERO_METADATA: SpendingAuthMetadata = {
   cumulativeOutputTokens: 0n,
   cumulativeRequestCount: 0n,
   cumulativeOutputImages: 0n,
+  chargeType: CHARGE_TYPE_METERED,
   services: [],
 };
 
@@ -453,6 +513,30 @@ export async function signFreeUsageAuth(
   msg: FreeUsageAuthMessage,
 ): Promise<string> {
   return signer.signTypedData(domain, FREE_USAGE_AUTH_TYPES, msg);
+}
+
+export async function signRouteRequestAuth(
+  signer: AbstractSigner,
+  domain: TypedDataDomain,
+  msg: RouteRequestAuthMessage,
+): Promise<string> {
+  return signer.signTypedData(domain, ROUTE_REQUEST_AUTH_TYPES, msg);
+}
+
+/**
+ * Recovers the signer address from a `RouteRequestAuth` signature. Pure
+ * (no chain read) -- callers compare the result against the claimed
+ * `buyerPeerId` (as `'0x' + buyerPeerId`, since PeerId IS the EVM address)
+ * and against their own `routingPeer` address, and separately enforce the
+ * `issuedAt`/`nonce` replay window. Throws if the signature is malformed;
+ * callers should treat that the same as a verification failure.
+ */
+export function recoverRouteRequestAuthSigner(
+  domain: TypedDataDomain,
+  msg: RouteRequestAuthMessage,
+  signature: string,
+): string {
+  return verifyTypedData(domain, ROUTE_REQUEST_AUTH_TYPES, msg, signature);
 }
 
 export interface SignedReceiveAuthorization {

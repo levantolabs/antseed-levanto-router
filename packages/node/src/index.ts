@@ -33,7 +33,8 @@ export {
 // Re-exported so CLI callers can format/parse gas balances without depending
 // on ethers directly.
 export { formatEther, parseEther } from 'ethers';
-export type { Router } from './interfaces/buyer-router.js';
+export type { Router, RouteCandidate, RoutingDecisionRow, RouteAuthHeaders } from './interfaces/buyer-router.js';
+export type { ConversationIdentity } from './routing/conversation-identity.js';
 
 // Types (re-export everything)
 export * from './types/index.js';
@@ -174,6 +175,8 @@ export {
   signFreeUsageOpen,
   signFreeUsageAuth,
   signSetOperator,
+  signRouteRequestAuth,
+  recoverRouteRequestAuthSigner,
   buildReceiveAuthorization,
   makeChannelsDomain,
   makeDepositsDomain,
@@ -184,6 +187,7 @@ export {
   FREE_USAGE_OPEN_TYPES,
   FREE_USAGE_AUTH_TYPES,
   SET_OPERATOR_TYPES,
+  ROUTE_REQUEST_AUTH_TYPES,
   RECEIVE_WITH_AUTHORIZATION_TYPES,
   computeMetadataHash,
   encodeMetadata,
@@ -204,6 +208,7 @@ export type {
   SetOperatorMessage,
   FreeUsageOpenMessage,
   FreeUsageAuthMessage,
+  RouteRequestAuthMessage,
   ReceiveAuthorizationMessage,
   SignedReceiveAuthorization,
   SpendingAuthMetadata,
@@ -273,8 +278,8 @@ export {
   type ScoredModelRoute,
 } from './routing/model-route-ranking.js';
 
-export type { AntseedPlugin, AntseedProviderPlugin, AntseedRouterPlugin, AntseedVerifierPlugin, Prover, VerifyContext, VerifyResult, ClaimResult, SellerRequest, SellerResponse, PluginConfigKey, ConfigField } from './interfaces/plugin.js'
-export { ANTSEED_ATTEST_PATH } from './interfaces/plugin.js'
+export type { AntseedPlugin, AntseedProviderPlugin, AntseedRouterPlugin, AntseedVerifierPlugin, Prover, RoutingServerHandler, VerifyContext, VerifyResult, ClaimResult, SellerRequest, SellerResponse, PluginConfigKey, ConfigField } from './interfaces/plugin.js'
+export { ANTSEED_ATTEST_PATH, ANTSEED_ROUTE_DIGEST_PATH, ANTSEED_ROUTE_PATH } from './interfaces/plugin.js'
 
 // Reputation
 export { UptimeTracker } from './reputation/uptime-tracker.js';

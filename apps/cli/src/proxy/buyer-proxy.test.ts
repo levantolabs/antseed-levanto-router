@@ -238,6 +238,8 @@ test('BuyerProxy reloads model routing preferences from config', async (t) => {
     minTrustScore: 72,
     allowedPeerIds: [allowedPeerId],
     blockedPeerIds: [],
+    cqt: 5,
+    autoDayPassEnabled: false,
   })
 })
 
@@ -761,7 +763,9 @@ test('conversation routing keeps the actual peer as a soft preference and fails 
   assert.deepEqual(attempts, [preferred.peerId, rankedFirst.peerId])
 
   const stored = (proxy as any)._conversations.get('vpr:conversation-soft-affinity')
-  assert.equal(stored?.pinnedModel, `${rankedFirst.peerId}@Kimi K3`)
+  // A model-only request never pins -- soft peer affinity below is derived
+  // from lastModel, not pinnedModel.
+  assert.equal(stored?.pinnedModel, null)
   assert.equal(stored?.lastModel, `${rankedFirst.peerId}@Kimi K3`)
 
   attempts.length = 0
@@ -2795,6 +2799,32 @@ test('route control endpoint sets, persists, and returns the default routed mode
   assert.deepEqual(JSON.parse(cleared.body), { ok: true, model: null })
 })
 
+test('savings-baseline endpoint sets, persists, and returns the chosen baseline model', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'antseed-buyer-baseline-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: dir,
+    node: { router: null } as any,
+  })
+
+  const initial = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions/baseline' }))
+  assert.deepEqual(JSON.parse(initial.body), { ok: true, baseline: null })
+
+  const set = await invokeProxy(proxy, makeProxyRequest({ path: '/_antseed/routing-decisions/baseline', body: { baseline: 'gpt-5.6-sol' } }))
+  assert.equal(set.statusCode, 200)
+  assert.deepEqual(JSON.parse(set.body), { ok: true, baseline: 'gpt-5.6-sol' })
+
+  const get = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions/baseline' }))
+  assert.deepEqual(JSON.parse(get.body), { ok: true, baseline: 'gpt-5.6-sol' })
+
+  const persisted = JSON.parse(await readFile(join(dir, 'buyer.state.json'), 'utf-8')) as Record<string, unknown>
+  assert.equal(persisted['savingsBaselineModel'], 'gpt-5.6-sol')
+
+  const cleared = await invokeProxy(proxy, makeProxyRequest({ path: '/_antseed/routing-decisions/baseline', body: { baseline: '' } }))
+  assert.deepEqual(JSON.parse(cleared.body), { ok: true, baseline: null })
+})
+
 test('buyer-usage endpoint reports lastActivityAt, null until a request is dispatched', async () => {
   const proxy = new BuyerProxy({
     port: 0,
@@ -2813,6 +2843,50 @@ test('buyer-usage endpoint reports lastActivityAt, null until a request is dispa
   assert.equal(parsed.ok, true)
   assert.equal(typeof parsed.lastActivityAt, 'number')
   assert.ok((parsed.lastActivityAt ?? 0) > 0)
+})
+
+test('routing-decisions endpoint returns the registered router\'s ledger (model-routing software-arch doc SS2.5)', async () => {
+  const rows = [{
+    atMs: 1, actualModel: 'gpt-5.6-luna', actualPeer: '0xAAA', actualPromptTokens: 100,
+    actualCachedTokens: 0, actualCompletionTokens: 40, actualUsdcPaid: 0.001,
+    predictedCostUsd: 0.001, predictedInputTokens: 100, predictedCachedInputTokens: 0,
+    predictedOutputTokens: 40, cqt: 5, routingLatencyMs: 50,
+  }]
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: { getRoutingDecisions: () => rows } } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  const parsed = JSON.parse(res.body) as { ok: boolean; rows: unknown[] }
+  assert.equal(parsed.ok, true)
+  assert.deepEqual(parsed.rows, rows)
+})
+
+test('routing-decisions endpoint returns an empty list, not an error, for a router without getRoutingDecisions', async () => {
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: { selectPeer: () => null, onResult: () => {} } } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(JSON.parse(res.body), { ok: true, rows: [] })
+})
+
+test('routing-decisions endpoint returns an empty list when there is no registered router at all', async () => {
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: { router: null } as any,
+  })
+
+  const res = await invokeProxy(proxy, makeProxyRequest({ method: 'GET', path: '/_antseed/routing-decisions' }))
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(JSON.parse(res.body), { ok: true, rows: [] })
 })
 
 test('requests with the routed-model alias fail clearly when no default route is set', async () => {
@@ -3505,4 +3579,80 @@ test('getSweepReceipt returns cached relayer receipts case-insensitively', () =>
   assert.equal(proxy.getSweepReceipt(nonce), receipt)
   assert.equal(proxy.getSweepReceipt(nonce.toLowerCase()), receipt)
   assert.equal(proxy.getSweepReceipt('0x' + '00'.repeat(32)), null)
+})
+
+// _discoverPeersFromNetwork merges node.resolveDirectPeers() (the
+// directPeerAddresses local-dev escape hatch) into the general peer catalog
+// alongside DHT results, since a DHT crawl genuinely cannot find a
+// local-only peer under NAT hairpinning -- see node.ts's resolveDirectPeers
+// doc comment and the 2026-08-26 runlog entry this closes.
+test('_discoverPeersFromNetwork includes direct-address peers when DHT finds nothing', async () => {
+  const directPeer = makePeer('d', ['direct-model'])
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: {
+      router: null,
+      discoverPeers: async () => [],
+      resolveDirectPeers: async () => [directPeer],
+    } as any,
+  })
+
+  const peers = await (proxy as any)._discoverPeersFromNetwork()
+  assert.deepEqual(peers, [directPeer])
+})
+
+test('_discoverPeersFromNetwork merges DHT and direct-address peers, deduping by peerId', async () => {
+  const dhtPeer = makePeer('a', ['dht-model'])
+  const directOnlyPeer = makePeer('b', ['direct-only-model'])
+  // Same peerId as dhtPeer but a different object (e.g. fresher metadata) --
+  // the direct-address source is the "known good" one and should win.
+  const dhtPeerViaDirect: PeerInfo = { ...dhtPeer, providers: ['dht-model-via-direct'] }
+
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: {
+      router: null,
+      discoverPeers: async () => [dhtPeer],
+      resolveDirectPeers: async () => [directOnlyPeer, dhtPeerViaDirect],
+    } as any,
+  })
+
+  const peers = await (proxy as any)._discoverPeersFromNetwork()
+  assert.equal(peers.length, 2)
+  const byId = new Map(peers.map((p: PeerInfo) => [p.peerId, p]))
+  assert.deepEqual(byId.get(dhtPeer.peerId), dhtPeerViaDirect)
+  assert.deepEqual(byId.get(directOnlyPeer.peerId), directOnlyPeer)
+})
+
+test('_discoverPeersFromNetwork is unaffected when resolveDirectPeers is absent or empty (real production buyers)', async () => {
+  const dhtPeer = makePeer('a', ['dht-model'])
+
+  const proxyNoDirectPeers = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: {
+      router: null,
+      discoverPeers: async () => [dhtPeer],
+      resolveDirectPeers: async () => [],
+    } as any,
+  })
+  assert.deepEqual(await (proxyNoDirectPeers as any)._discoverPeersFromNetwork(), [dhtPeer])
+})
+
+test('_discoverPeersFromNetwork falls back to DHT-only results if resolveDirectPeers rejects', async () => {
+  const dhtPeer = makePeer('a', ['dht-model'])
+  const proxy = new BuyerProxy({
+    port: 0,
+    dataDir: '/tmp/antseed-test',
+    node: {
+      router: null,
+      discoverPeers: async () => [dhtPeer],
+      resolveDirectPeers: async () => { throw new Error('boom') },
+    } as any,
+  })
+
+  const peers = await (proxy as any)._discoverPeersFromNetwork()
+  assert.deepEqual(peers, [dhtPeer])
 })

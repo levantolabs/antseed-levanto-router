@@ -70,7 +70,7 @@ import type {
   ProviderStreamCallbacks,
 } from "./interfaces/seller-provider.js";
 import type { Router } from "./interfaces/buyer-router.js";
-import type { Prover } from "./interfaces/plugin.js";
+import type { Prover, RoutingServerHandler } from "./interfaces/plugin.js";
 import { NatTraversal } from "./p2p/nat-traversal.js";
 import { signUtf8 } from "./p2p/identity.js";
 import {
@@ -224,6 +224,19 @@ export interface NodeConfig {
   displayName?: string;
   /** Publicly reachable seller address override ("host:port") announced in metadata. */
   publicAddress?: string;
+  /**
+   * Local-development escape hatch: known peerId -> "host:port" endpoints to
+   * fetch metadata from directly, bypassing DHT-based address discovery for
+   * exactly those peers. DHT announce/lookup records a peer's *observed*
+   * source address; a buyer and seller on the same machine are recorded
+   * under that machine's own public-facing address, which is unreachable
+   * from itself under NAT hairpinning (near-universal under WSL2's extra
+   * NAT layer). Every other guarantee (schema validation, signature
+   * verification, peerId match) is unchanged -- this only replaces how the
+   * endpoint is found, not how the fetched metadata is trusted. NOT a
+   * production NAT-traversal mechanism; undefined/empty is a no-op.
+   */
+  directPeerAddresses?: Record<string, string>;
   /** External ownership claims announced in signed peer metadata. */
   verifications?: PeerVerifications;
   /** Extra peer capability strings to advertise (e.g. supported verifier SDKs). */
@@ -328,6 +341,7 @@ export class AntseedNode extends EventEmitter {
   private _connectionManager: ConnectionManager | null = null;
   private _providers: Provider[] = [];
   private _provers: Prover[] = [];
+  private _routingServerHandler: RoutingServerHandler | null = null;
   private _router: Router | null = null;
   private _started = false;
   private _announcer: PeerAnnouncer | null = null;
@@ -449,6 +463,15 @@ export class AntseedNode extends EventEmitter {
     this._provers.push(prover);
   }
 
+  /** Register the seller-side handler for the reserved model-routing-decision path (single instance). */
+  registerRoutingServerHandler(handler: RoutingServerHandler): void {
+    this._routingServerHandler = handler;
+  }
+
+  get routingServerHandler(): RoutingServerHandler | null {
+    return this._routingServerHandler;
+  }
+
   setRouter(router: Router): void {
     this._router = router;
   }
@@ -465,6 +488,19 @@ export class AntseedNode extends EventEmitter {
   /** Buyer-side payment negotiator (null if payments not configured for buyer). */
   get buyerNegotiator(): BuyerPaymentNegotiator | null {
     return this._buyerNegotiator;
+  }
+
+  /**
+   * Real on-chain channels client (null if payments not configured). Exposed
+   * for buyer-side code outside this class that needs a genuine on-chain
+   * read after a `topUpReserve()` call -- `topUpReserve`'s own AuthAck
+   * doesn't update the buyer's cached reserve ceiling for anything but the
+   * very first reserve (confirmed by reading `BuyerPaymentManager.handleAuthAck`);
+   * `reconcileReserveAmount(sellerPeerId, onChainAmount)` is the documented
+   * way to resync from here (model-routing decisions doc SS13 item 11).
+   */
+  get channelsClient(): ChannelsClient | null {
+    return this._channelsClient;
   }
 
   /**
@@ -966,6 +1002,21 @@ export class AntseedNode extends EventEmitter {
       return null;
     }
 
+    const directAddress = this._config.directPeerAddresses?.[normalized];
+    if (directAddress) {
+      debugLog(`[Node] findPeer(${normalized.slice(0, 12)}...) via configured direct address ${directAddress}`);
+      const { host, port } = parsePeerAddress(directAddress);
+      const direct = await this._peerLookup.resolveKnownPeer(normalized, { host, port });
+      if (direct) {
+        const peer = this._lookupResultToPeerInfo(direct);
+        this._attachCachedExternalVerificationResults([peer]);
+        this._queueExternalVerification([peer]);
+        await this._enrichPeersWithOnChainStats([peer]);
+        return peer;
+      }
+      debugWarn(`[Node]   direct address ${directAddress} for ${normalized.slice(0, 12)}... did not resolve; falling back to DHT`);
+    }
+
     debugLog(`[Node] findPeer(${normalized.slice(0, 12)}...) via per-peer DHT topic`);
     let results = await this._peerLookup.findByPeerId(normalized);
     if (results.length === 0) {
@@ -990,6 +1041,54 @@ export class AntseedNode extends EventEmitter {
     this._queueExternalVerification([peer]);
     await this._enrichPeersWithOnChainStats([peer]);
     return peer;
+  }
+
+  /**
+   * Resolve every peer configured via `directPeerAddresses` (the local-dev
+   * NAT-hairpinning escape hatch — see that field's own doc comment) without
+   * touching the DHT at all, the same way `findPeer`'s direct-address branch
+   * does for a single known peer. Used to seed the general peer catalog
+   * (buyer-proxy's `_getPeers`) with peers a DHT crawl genuinely cannot find
+   * on this machine, so Discover/model-picker aren't empty just because
+   * local-only discovery doesn't work here.
+   *
+   * A no-op returning `[]` when `directPeerAddresses` is unset/empty — real
+   * production buyers never configure this, so this method costs them
+   * nothing. Failures resolve individual entries to nothing rather than
+   * rejecting the whole batch; one misconfigured/unreachable direct peer
+   * must not blank out the others.
+   */
+  async resolveDirectPeers(): Promise<PeerInfo[]> {
+    const entries = Object.entries(this._config.directPeerAddresses ?? {});
+    if (entries.length === 0) return [];
+    if (!this._peerLookup) {
+      throw buyerFault("Node not started or not in buyer mode", "node-not-started");
+    }
+
+    const resolved = await Promise.all(entries.map(async ([peerId, address]) => {
+      const normalized = peerId.trim().toLowerCase().replace(/^0x/, "");
+      if (!/^[0-9a-f]{40}$/.test(normalized)) return null;
+      try {
+        const { host, port } = parsePeerAddress(address);
+        const direct = await this._peerLookup!.resolveKnownPeer(normalized, { host, port });
+        if (!direct) {
+          debugWarn(`[Node] resolveDirectPeers: direct address ${address} for ${normalized.slice(0, 12)}... did not resolve`);
+          return null;
+        }
+        return this._lookupResultToPeerInfo(direct);
+      } catch (err) {
+        debugWarn(`[Node] resolveDirectPeers: failed to resolve ${normalized.slice(0, 12)}... at ${address}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    }));
+
+    const peers = resolved.filter((p): p is PeerInfo => p !== null);
+    if (peers.length > 0) {
+      this._attachCachedExternalVerificationResults(peers);
+      this._queueExternalVerification(peers);
+      await this._enrichPeersWithOnChainStats(peers);
+    }
+    return peers;
   }
 
   /**
@@ -1111,6 +1210,31 @@ export class AntseedNode extends EventEmitter {
     if (negotiator) {
       this._paymentMuxes.set(peer.peerId, negotiator.getOrCreatePaymentMux(peer.peerId, conn));
     }
+  }
+
+  /**
+   * Get (connecting first if needed) a real `PaymentMux` for a specific
+   * peer, for buyer-side code outside this class that needs to sign and
+   * send payment messages to a peer it isn't necessarily chatting through
+   * (model-routing decisions doc SS13 item 11) -- e.g. a routing-client
+   * host paying a flat daily day-pass fee to a routing peer, as opposed
+   * to per-request billing to a chat-completion seller. `_paymentMuxes` has
+   * no public getter otherwise; mirrors `requestChannelClose`'s own
+   * find-then-`connectToPeer` pattern.
+   */
+  async getOrConnectPaymentMux(peerId: string): Promise<PaymentMux> {
+    const existing = this._paymentMuxes.get(peerId as PeerId);
+    if (existing) return existing;
+    const peer = await this.findPeer(peerId);
+    if (!peer) {
+      throw new Error(`Peer ${peerId.slice(0, 12)}... could not be found on the network.`);
+    }
+    await this.connectToPeer(peer);
+    const mux = this._paymentMuxes.get(peerId as PeerId);
+    if (!mux) {
+      throw new Error(`Failed to establish a payment channel with peer ${peerId.slice(0, 12)}...`);
+    }
+    return mux;
   }
 
   /**
@@ -1403,6 +1527,10 @@ export class AntseedNode extends EventEmitter {
       reannounceIntervalMs: DEFAULT_DHT_CONFIG.reannounceIntervalMs,
       operationTimeoutMs: this._config.dhtOperationTimeoutMs ?? DEFAULT_DHT_CONFIG.operationTimeoutMs,
       allowPrivateIPs: this._config.allowPrivateIPs,
+      // Isolated local testing must not be reachable from the LAN/WAN --
+      // noOfficialBootstrap already means "never dial the real network", so
+      // reuse it here to also mean "never accept a connection from it".
+      ...(this._config.noOfficialBootstrap ? { bindHost: "127.0.0.1" } : {}),
     };
   }
 
@@ -1587,26 +1715,33 @@ export class AntseedNode extends EventEmitter {
     await this._connectionManager.startListening({
       peerId: identity.peerId,
       port: signalingPort,
-      host: "0.0.0.0",
+      host: this._config.noOfficialBootstrap ? "127.0.0.1" : "0.0.0.0",
     });
 
     // Resolve actual bound port (important when port 0 is used for OS-assigned)
     const actualSignalingPort = this._connectionManager.getListeningPort() ?? signalingPort;
     const actualDhtPort = this._dht.getPort();
 
-    // NAT traversal: automatically map ports via UPnP/NAT-PMP
-    this._nat = new NatTraversal();
-    const natResult = await this._nat.mapPorts([
-      { port: actualSignalingPort, protocol: "TCP" },
-      { port: actualDhtPort, protocol: "UDP" },
-    ]);
-
-    if (natResult.success) {
-      this.emit("nat:mapped", natResult);
+    // NAT traversal: automatically map ports via UPnP/NAT-PMP. Skipped for
+    // isolated local testing (noOfficialBootstrap) -- mapping a port on the
+    // router is exactly the reachability this mode exists to prevent, and
+    // it would defeat the loopback bind above.
+    if (this._config.noOfficialBootstrap) {
+      debugLog("[NAT] Skipped — noOfficialBootstrap is set (isolated local testing)");
     } else {
-      debugWarn("[NAT] UPnP/NAT-PMP mapping failed — seller may not be reachable from the internet");
-      debugWarn("[NAT] Ensure port forwarding is configured manually, or peers on the same LAN can still connect");
-      this.emit("nat:failed");
+      this._nat = new NatTraversal();
+      const natResult = await this._nat.mapPorts([
+        { port: actualSignalingPort, protocol: "TCP" },
+        { port: actualDhtPort, protocol: "UDP" },
+      ]);
+
+      if (natResult.success) {
+        this.emit("nat:mapped", natResult);
+      } else {
+        debugWarn("[NAT] UPnP/NAT-PMP mapping failed — seller may not be reachable from the internet");
+        debugWarn("[NAT] Ensure port forwarding is configured manually, or peers on the same LAN can still connect");
+        this.emit("nat:failed");
+      }
     }
 
     // Set up announcer for providers
@@ -1673,6 +1808,7 @@ export class AntseedNode extends EventEmitter {
       identity,
       providers: this._providers,
       provers: this._provers,
+      routingServerHandler: this._routingServerHandler,
       sellerPaymentManager: this._sellerPaymentManager,
       sellerFreeUsageManager: this._sellerFreeUsageManager,
       sessionTracker: this._sessionTracker,
