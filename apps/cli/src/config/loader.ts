@@ -408,6 +408,10 @@ function mergeBuyerRoutingPreferences(
   const preferFreePeers = value['preferFreePeers'];
   const maxInputUsdPerMillion = value['maxInputUsdPerMillion'];
   const minTrustScore = value['minTrustScore'];
+  const cqt = value['cqt'];
+  const autoDayPassEnabled = value['autoDayPassEnabled'];
+  const autoRouting = value['autoRouting'];
+  const selectedRouterPackage = value['selectedRouterPackage'];
   return {
     preferFreePeers: preferFreePeers === undefined
       ? fallback.preferFreePeers
@@ -420,7 +424,32 @@ function mergeBuyerRoutingPreferences(
       : toFiniteOrNaN(minTrustScore),
     allowedPeerIds: normalizeRoutingPeerIds(value['allowedPeerIds'], fallback.allowedPeerIds),
     blockedPeerIds: normalizeRoutingPeerIds(value['blockedPeerIds'], fallback.blockedPeerIds),
+    cqt: cqt === undefined ? fallback.cqt : toFiniteOrNaN(cqt),
+    autoDayPassEnabled: autoDayPassEnabled === undefined
+      ? fallback.autoDayPassEnabled
+      : autoDayPassEnabled as boolean,
+    autoRouting: autoRouting === undefined ? fallback.autoRouting : autoRouting as boolean,
+    selectedRouterPackage: selectedRouterPackage === undefined
+      ? fallback.selectedRouterPackage
+      : (typeof selectedRouterPackage === 'string' ? selectedRouterPackage : null),
+    agreedDayPassPricesUsdc: normalizeAgreedDayPassPrices(
+      value['agreedDayPassPricesUsdc'],
+      fallback.agreedDayPassPricesUsdc,
+    ),
   };
+}
+
+/** Seller peer id -> agreed day-pass price (whole USD), dropping any malformed entries rather than the whole map. */
+function normalizeAgreedDayPassPrices(
+  value: unknown,
+  fallback: Record<string, number> | undefined,
+): Record<string, number> {
+  if (!isRecord(value)) return fallback ?? {};
+  const out: Record<string, number> = {};
+  for (const [peerId, price] of Object.entries(value)) {
+    if (typeof price === 'number' && Number.isFinite(price) && price >= 0) out[peerId] = price;
+  }
+  return out;
 }
 
 function cloneBuyerVerification(

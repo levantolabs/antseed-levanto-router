@@ -9,6 +9,7 @@ import {
   buildRouterRuntimeEnvFromBuyerConfig,
   isCompatibleBuyerProxy,
   resolveBuyerRouterName,
+  resolveDirectPeerAddresses,
 } from './start.js';
 
 async function withProbeServer(
@@ -109,6 +110,23 @@ test('buyer start bootstrap entries respect explicit configured nodes', () => {
 test('buyer start defaults router name to local', () => {
   assert.equal(resolveBuyerRouterName({}), 'local');
   assert.equal(resolveBuyerRouterName({ router: 'claude-code' }), 'claude-code');
+});
+
+test('resolveDirectPeerAddresses is a no-op for absent/empty/malformed input', () => {
+  assert.equal(resolveDirectPeerAddresses(undefined), undefined);
+  assert.equal(resolveDirectPeerAddresses(''), undefined);
+  assert.equal(resolveDirectPeerAddresses('   '), undefined);
+  assert.equal(resolveDirectPeerAddresses('not json'), undefined);
+  assert.equal(resolveDirectPeerAddresses('[]'), undefined);
+  assert.equal(resolveDirectPeerAddresses('null'), undefined);
+  assert.equal(resolveDirectPeerAddresses('{}'), undefined);
+});
+
+test('resolveDirectPeerAddresses parses a valid peerId -> host:port map, normalizing keys', () => {
+  const raw = JSON.stringify({ 'C199453FD6B1c6823634ef9b3702eb5aeca71265': ' 127.0.0.1:6892 ', bad: 42 });
+  assert.deepEqual(resolveDirectPeerAddresses(raw), {
+    'c199453fd6b1c6823634ef9b3702eb5aeca71265': '127.0.0.1:6892',
+  });
 });
 
 test('buyer start recognizes legacy proxies that only return no_peer_pinned', async () => {

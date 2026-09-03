@@ -17,6 +17,12 @@ export interface DHTNodeConfig {
   operationTimeoutMs: number;
   /** Allow private/loopback IPs in lookup results. Default: false. Set true for local testing. */
   allowPrivateIPs?: boolean;
+  /**
+   * Bind the DHT UDP socket to this address instead of all interfaces.
+   * Set to "127.0.0.1" for isolated local testing so the node cannot be
+   * reached from the LAN/WAN and passively rejoin the public swarm.
+   */
+  bindHost?: string;
 }
 
 export const DEFAULT_DHT_CONFIG: Omit<DHTNodeConfig, "peerId"> = {
@@ -159,7 +165,7 @@ export class DHTNode {
         clearTimeout(timeout);
       };
 
-      this.dht.listen(this.config.port, () => {
+      const onListening = (): void => {
         // Socket is bound; now wait for DHT bootstrap to complete.
         // The 'ready' event fires when the routing table has been populated.
         this.dht!.on("ready", () => {
@@ -167,7 +173,13 @@ export class DHTNode {
           this.events.emit("ready");
           resolve();
         });
-      });
+      };
+
+      if (this.config.bindHost) {
+        this.dht.listen(this.config.port, this.config.bindHost, onListening);
+      } else {
+        this.dht.listen(this.config.port, onListening);
+      }
 
       this.dht.on("error", (err: Error) => {
         cleanup();

@@ -111,6 +111,7 @@ export class DepositWatcher {
   private _mode: DepositWatchMode = 'off'
   private _lingerDeadline = 0
   private _lastBalance = 0n
+  private _pollInFlight = false
   private _sweepInFlight = false
   private _lastSweepAttemptAt = 0
   private _lastEvent: DepositWatchEvent | null = null
@@ -184,33 +185,38 @@ export class DepositWatcher {
   }
 
   private async _poll(): Promise<void> {
-    if (this._stopped) return
-    let balance: bigint
+    if (this._stopped || this._pollInFlight) return
+    this._pollInFlight = true
     try {
-      balance = await this._deps.depositsClient.getUSDCBalance(this._deps.address)
-    } catch {
-      return // transient RPC failure — try again next tick
-    }
-    if (this._mode === 'background') {
-      if (balance > 0n || this._sweepInFlight) {
-        this._lingerDeadline = Date.now() + DEPOSIT_WATCH_LINGER_MS
-      } else if (Date.now() > this._lingerDeadline) {
-        if (this._deps.idleIntervalMs === null) this.stop()
-        else this._setMode('idle', this._deps.idleIntervalMs ?? DEPOSIT_WATCH_IDLE_INTERVAL_MS)
-        return
+      let balance: bigint
+      try {
+        balance = await this._deps.depositsClient.getUSDCBalance(this._deps.address)
+      } catch {
+        return // transient RPC failure — try again next tick
       }
-    }
-    if (balance > this._lastBalance) {
-      const delta = balance - this._lastBalance
-      this._lastBalance = balance
-      this._emit({ phase: 'received', amountBaseUnits: delta.toString() })
-      void this.sweepNow()
-    } else if (balance < this._lastBalance) {
-      this._lastBalance = balance
-    } else if (balance > 0n && !this._sweepInFlight && Date.now() - this._lastSweepAttemptAt > SWEEP_RETRY_COOLDOWN_MS) {
-      // Funds from an earlier failed/partial sweep are still sitting in the
-      // wallet — retry once the cooldown passes.
-      void this.sweepNow()
+      if (this._mode === 'background') {
+        if (balance > 0n || this._sweepInFlight) {
+          this._lingerDeadline = Date.now() + DEPOSIT_WATCH_LINGER_MS
+        } else if (Date.now() > this._lingerDeadline) {
+          if (this._deps.idleIntervalMs === null) this.stop()
+          else this._setMode('idle', this._deps.idleIntervalMs ?? DEPOSIT_WATCH_IDLE_INTERVAL_MS)
+          return
+        }
+      }
+      if (balance > this._lastBalance) {
+        const delta = balance - this._lastBalance
+        this._lastBalance = balance
+        this._emit({ phase: 'received', amountBaseUnits: delta.toString() })
+        void this.sweepNow()
+      } else if (balance < this._lastBalance) {
+        this._lastBalance = balance
+      } else if (balance > 0n && !this._sweepInFlight && Date.now() - this._lastSweepAttemptAt > SWEEP_RETRY_COOLDOWN_MS) {
+        // Funds from an earlier failed/partial sweep are still sitting in the
+        // wallet — retry once the cooldown passes.
+        void this.sweepNow()
+      }
+    } finally {
+      this._pollInFlight = false
     }
   }
 

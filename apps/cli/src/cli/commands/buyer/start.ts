@@ -7,7 +7,7 @@ import { homedir } from 'node:os'
 import { createConnection } from 'node:net'
 import { getGlobalOptions } from '../types.js'
 import { loadConfig } from '../../../config/loader.js'
-import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
+import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, loadOrCreateIdentity, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
 import type { NodePaymentsConfig } from '@antseed/node'
 import { OFFICIAL_BOOTSTRAP_NODES, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
 import { setupShutdownHandler } from '../../shutdown.js'
@@ -16,6 +16,7 @@ import { ensurePluginsUpToDate } from '../../../plugins/drift.js'
 import { resolvePluginPackage } from '../../../plugins/registry.js'
 import { BuyerProxy, type DepositWatcherAbsenceReason } from '../../../proxy/buyer-proxy.js'
 import { DepositWatcher } from '../../../proxy/deposit-watcher.js'
+import { createSignRouteAuth } from '../../../proxy/route-auth-signing.js'
 import { curatedVerifierIds, resolveVerifierPolicy, type VerifierPolicy } from '../../../plugins/verifier.js'
 import { resolveEffectiveBuyerConfig, type BuyerRuntimeOverrides } from '../../../config/effective.js'
 import type { BuyerCLIConfig } from '../../../config/types.js'
@@ -53,6 +54,32 @@ export function buildRouterRuntimeEnvFromBuyerConfig(buyerConfig: BuyerCLIConfig
 
 export function resolveBuyerRouterName(options: { router?: string }): string {
   return (options.router as string | undefined) ?? 'local'
+}
+
+/**
+ * Local-development escape hatch (see `Node.directPeerAddresses` doc in
+ * packages/node/src/node.ts): known peerId -> "host:port" endpoints to
+ * fetch metadata from directly, bypassing DHT-based address discovery for
+ * exactly those peers. Set via `ANTSEED_DIRECT_PEER_ADDRESSES_JSON`, a JSON
+ * object mapping peerId to "host:port". Malformed/absent input is a no-op
+ * (undefined), not an error -- this is a niche debugging aid, not something
+ * that should ever break a normal `buyer start`.
+ */
+export function resolveDirectPeerAddresses(rawJson: string | undefined): Record<string, string> | undefined {
+  if (!rawJson || rawJson.trim().length === 0) return undefined
+  try {
+    const parsed: unknown = JSON.parse(rawJson)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const out: Record<string, string> = {}
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        out[key.trim().toLowerCase()] = value.trim()
+      }
+    }
+    return Object.keys(out).length > 0 ? out : undefined
+  } catch {
+    return undefined
+  }
 }
 
 export function buildBuyerBootstrapEntries(
@@ -226,6 +253,12 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         buyerOverrides: runtimeOverrides,
       })
 
+      // Loaded early, before the node itself starts, purely so router plugins
+      // (e.g. router-levanto's LEVANTO_BUYER_PEER_ID) can be told this
+      // buyer's own peerId at construction time -- idempotent, the node's
+      // own startup reads the same identity file again later.
+      const buyerIdentity = await loadOrCreateIdentity(globalOpts.dataDir)
+
       let router
       let toolHints: Array<{ name: string; envVar: string }> = []
       const routerName = resolveBuyerRouterName({ router: options.router as string | undefined })
@@ -247,7 +280,10 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         const spinner = ora(`Loading router plugin "${instance.package}"...`).start()
         try {
           const plugin = await loadRouterPlugin(instance.package)
-          const runtimeEnv = buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig)
+          const runtimeEnv = {
+            ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
+            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+          }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv, instance.config as Record<string, string>)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))
@@ -263,7 +299,10 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         const spinner = ora(`Loading router plugin "${routerName}"...`).start()
         try {
           const plugin = await loadRouterPlugin(routerName)
-          const runtimeEnv = buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig)
+          const runtimeEnv = {
+            ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
+            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+          }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))
@@ -342,6 +381,12 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       const resolvedRouterName = options.instance
         ? (await getInstance(join(homedir(), '.antseed', 'config.json'), options.instance))?.package
         : routerName
+      // Only a short plugin id (e.g. "levanto") reads as a real name once
+      // title-cased for the routing-savings dashboard header -- an
+      // --instance package string (e.g. "@antseed/router-levanto" or a
+      // local path) doesn't, so leave it out and let the dashboard fall
+      // back to its generic title in that case.
+      const dashboardRouterName = resolvedRouterName && /^[a-z0-9-]+$/i.test(resolvedRouterName) ? resolvedRouterName : undefined
       const versions = getPackageVersions(resolvedRouterName ?? undefined)
       if (Object.keys(versions).length > 0) {
         console.log(chalk.dim(`Package versions: ${Object.entries(versions).map(([k, v]) => `${k}@${v}`).join(', ')}`))
@@ -377,10 +422,20 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       }
       console.log('')
 
+      const directPeerAddresses = resolveDirectPeerAddresses(process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON'])
+      // Local-dev isolation escape hatch, same family as ANTSEED_DIRECT_PEER_ADDRESSES_JSON
+      // above -- without this, a buyer bootstrapped through a local-only peer still
+      // transitively discovers the real public AntSeed network (dht1/dht2.antseed.com),
+      // since that peer is itself a full participant of it unless told otherwise. Real
+      // production usage must never set this (it would make the buyer unable to find any
+      // real seller at all), so it's env-gated, not a default.
+      const noOfficialBootstrap = process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] === '1'
+
       const node = new AntseedNode({
         role: 'buyer',
         bootstrapNodes,
         allowPrivateIPs: true,
+        ...(noOfficialBootstrap ? { noOfficialBootstrap: true } : {}),
         dataDir: globalOpts.dataDir,
         configPath: globalOpts.config,
         metadataFetchTimeoutMs: effectiveBuyerConfig.metadataFetchTimeoutMs,
@@ -388,6 +443,7 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         maxStreamDurationMs: effectiveBuyerConfig.maxStreamDurationMs,
         payments: paymentsConfig,
         verification: effectiveBuyerConfig.verification,
+        ...(directPeerAddresses ? { directPeerAddresses } : {}),
       })
 
       node.setRouter(router)
@@ -398,6 +454,20 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       } catch (err) {
         nodeSpinner.fail(chalk.red(`Failed to connect: ${(err as Error).message}`))
         process.exit(1)
+      }
+
+      // Optional Router capability (model-routing decisions doc SS13 item
+      // 8): a router that talks to a bare, unauthenticated routing-peer HTTP
+      // endpoint implements configureRouteAuthSigning to receive a real
+      // signing closure, proving requests actually come from this buyer's
+      // own PeerId. Independent of paymentsConfig?.enabled -- this proves
+      // identity, not a payment; the buyer's Identity/wallet exists
+      // regardless of whether payments are configured.
+      if (router.configureRouteAuthSigning && node.identity) {
+        router.configureRouteAuthSigning(createSignRouteAuth(node.identity, {
+          evmChainId: chainConfig.evmChainId,
+          channelsContractAddress: chainConfig.channelsContractAddress,
+        }))
       }
 
       if (paymentsConfig?.enabled) {
@@ -459,6 +529,7 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         configPath: globalOpts.config,
         routingPreferences: effectiveBuyerConfig.routingPreferences,
         backgroundRefreshIntervalMs: effectiveBuyerConfig.peerRefreshIntervalMs,
+        routerName: dashboardRouterName,
         ...(verifierPolicy ? { verifier: verifierPolicy } : {}),
       })
       let ownsProxyListener = false

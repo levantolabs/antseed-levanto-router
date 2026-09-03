@@ -281,6 +281,35 @@ export class PeerLookup {
     return this.resolveLookupResults(shuffle(peers), { metadataPeerId: normalized });
   }
 
+  /**
+   * Resolve a peer's metadata directly from a caller-supplied endpoint,
+   * skipping DHT-based address discovery entirely. Local-development escape
+   * hatch: DHT announce/lookup records a peer's *observed* source address,
+   * which for a buyer and seller running on the same machine is that
+   * machine's own public-facing address -- unreachable from itself under
+   * NAT hairpinning (near-universal under WSL2's extra NAT layer). This
+   * bypasses that one broken step only; every other guarantee is identical
+   * to the DHT path -- the same metadata fetch, schema validation, and
+   * signature verification, still checked against `peerId` genuinely
+   * matching. NOT a production NAT-traversal mechanism -- it requires the
+   * caller to already know a real, reachable address for the peer.
+   */
+  async resolveKnownPeer(peerId: string, endpoint: PeerEndpoint): Promise<LookupResult | null> {
+    const normalized = peerId.trim().toLowerCase().replace(/^0x/, "");
+    if (!/^[0-9a-f]{40}$/.test(normalized)) return null;
+    const result = await this._resolveSinglePeer(endpoint);
+    if (result === null) return null;
+    if (result.metadata.peerId.toLowerCase() !== normalized) {
+      debugWarn(
+        `[PeerLookup] resolveKnownPeer(${normalized.slice(0, 12)}...): endpoint `
+        + `${endpoint.host}:${endpoint.port} answered as a different peer `
+        + `(${result.metadata.peerId.slice(0, 12)}...) -- refusing to substitute it.`,
+      );
+      return null;
+    }
+    return result;
+  }
+
   private async resolveLookupResults(
     peers: PeerEndpoint[],
     options?: ResolveLookupResultsOptions,
