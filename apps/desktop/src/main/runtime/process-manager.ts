@@ -5,6 +5,7 @@ import path from 'node:path';
 
 import { desktopSystemProxyCliDataDir } from '../dev-instance.js';
 import { WORKSPACE_APPS_DIR } from '../paths.js';
+import { ACTIVE_CONFIG_PATH } from './active-config.js';
 
 const { join, resolve } = path;
 
@@ -74,6 +75,204 @@ function normalizeRouterIdentifier(value: string | undefined): string {
   }
 
   return raw;
+}
+
+/**
+ * Applies the buyer's selected model router (Preferences' "Select model
+ * router" dropdown, persisted as `buyer.routingPreferences.
+ * selectedRouterPackage` -- VprPreferencesView.tsx) to a connect-mode start.
+ * That dropdown is the real choice this override used to stand in for before
+ * it existed (runlog: "local routing-peer daemon", 2026-08-26).
+ *
+ * Loading a router package is no longer gated on `autoDayPassEnabled` (real
+ * incident: that flag can be live-synced to an already-running buyer daemon
+ * via buyer-proxy's own hot-reload path, but nothing respawns the daemon, so
+ * a user who enables Levanto Auto after the daemon already started -- the
+ * common case, since it auto-starts before Preferences is ever opened -- got
+ * stuck sending `levanto-auto` requests to a process that never loaded
+ * router-levanto at all: a 502 "No policy-allowed peer currently serves
+ * model levanto-auto" with no indication a restart was needed). The plugin
+ * loading itself is harmless to do unconditionally -- nothing can actually
+ * route through it unless the "Levanto Auto" catalog entry is selectable at
+ * all, which is itself gated on the same preference and reacts live
+ * (levanto-auto.ts's withLevantoAutoCatalogEntry). What still must not
+ * happen unconditionally is forcing *every* connect-mode start (including a
+ * genuine mainnet buyer with the dropdown explicitly left on "None") onto
+ * devnet-shaped defaults (a local routing-peer URL/seller id, devnet peer
+ * addresses, official-bootstrap disabled) -- so an explicit "None" choice
+ * (`selectedRouterPackage: null`, distinct from the field never having been
+ * set) still passes `opts` through unchanged.
+ *
+ * Which routing peer and env gets injected for Levanto specifically depends
+ * on the buyer's own configured chain (`payments.crypto.chainId`, same
+ * config file): `base-local` gets the devnet-shaped defaults (a local
+ * `local-peer-daemon.ts` instance, devnet peer addresses, official-bootstrap
+ * disabled); anything else (real chains default to `base-mainnet`, same as
+ * `createDefaultConfig()`) gets the real, staked Levanto routing peer
+ * instead, with none of the devnet isolation flags -- those would cut a real
+ * buyer off from the real dht1/dht2.antseed.com swarm entirely.
+ *
+ * Applied here, at the single point every connect-mode `start()` call
+ * ultimately funnels through (`ProcessManager.start` itself), rather than at
+ * each individual caller -- there are at least two independent places that
+ * start the connect runtime (a main-process auto-start on first chat message,
+ * and a renderer-side auto-start on app boot that races ahead of it using its
+ * own, unrelated router preference), and applying the override in only one of
+ * them left the other silently winning the race with the wrong router. A
+ * single choke point means neither caller needs to know this override exists.
+ *
+ * The dropdown itself now offers any installed router plugin, not just
+ * Levanto (`buyer.routingPreferences.selectedRouterPackage`), but the
+ * devnet/mainnet routing-peer env below is Levanto-specific operational
+ * wiring this override was built to carry -- generalizing *that* would mean
+ * knowing a given plugin's own configSchema values, which is out of scope
+ * here. So: when a non-Levanto package is selected, this only sets
+ * `opts.router` to that package (the CLI loads whatever plugin that names,
+ * using its own config); the env injection and chain-dependent defaults
+ * below apply only when router-levanto specifically is selected.
+ */
+/**
+ * router-levanto's own package name -- the historical, and still only,
+ * router this override knows how to wire real operational defaults for
+ * (routing-peer URL, seller peer id, devnet isolation flags below). A
+ * different selected plugin still gets its package name passed through as
+ * `opts.router` so the CLI loads it, but none of that Levanto-specific env
+ * injection applies to it; see `applyLevantoRouterDemoOverride`.
+ */
+const LEVANTO_ROUTER_PACKAGE = '@antseed/router-levanto';
+
+/**
+ * Reads `buyer.routingPreferences.selectedRouterPackage` straight off disk,
+ * no caching -- the config file is the one source of truth the renderer's
+ * dropdown, a config-file edit, and this main-process check all agree on,
+ * and a start() call is infrequent enough that a sync file read here is not
+ * a real cost. Defaults to router-levanto on anything missing/unreadable/a
+ * pre-migration config shape, matching preferences.ts's own migration
+ * default so both independent readers of this same config field agree.
+ *
+ * Returns `null` only for an EXPLICIT "None" choice (VprPreferencesView.tsx
+ * writes `selectedRouterPackage: null` there, distinct from the field simply
+ * never having been set) -- callers must treat that as "load no router at
+ * all", not fall back to Levanto the way missing/unreadable config does.
+ * Collapsing the two used to be harmless back when this function's result
+ * was only consulted after an `autoDayPassEnabled` gate that already
+ * excluded both cases; now that loading the plugin no longer depends on
+ * that gate (see applyLevantoRouterDemoOverride's own doc comment), an
+ * explicit "None" has to stay distinguishable or it would silently load
+ * Levanto anyway.
+ */
+function resolveSelectedRouterPackage(): string | null {
+  try {
+    const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      buyer?: { routingPreferences?: { selectedRouterPackage?: unknown } };
+    };
+    const pkg = parsed.buyer?.routingPreferences?.selectedRouterPackage;
+    if (pkg === null) return null;
+    return typeof pkg === 'string' && pkg.trim().length > 0 ? pkg : LEVANTO_ROUTER_PACKAGE;
+  } catch {
+    return LEVANTO_ROUTER_PACKAGE;
+  }
+}
+
+type RoutingPeerChainId = 'base-local' | 'base-sepolia' | 'base-mainnet';
+
+/**
+ * Reads the buyer's own configured chain straight off disk, no caching.
+ * Defaults to
+ * `base-mainnet` on anything unreadable/unset, matching `createDefaultConfig()`'s
+ * own default: real chains are this app's normal state, `base-local` is the
+ * opt-in special case, not the other way around.
+ */
+function resolveConfiguredChainId(): RoutingPeerChainId {
+  try {
+    const raw = readFileSync(ACTIVE_CONFIG_PATH, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      payments?: { crypto?: { chainId?: unknown } };
+    };
+    const chainId = parsed.payments?.crypto?.chainId;
+    if (chainId === 'base-local' || chainId === 'base-sepolia') return chainId;
+    return 'base-mainnet';
+  } catch {
+    return 'base-mainnet';
+  }
+}
+
+export function applyLevantoRouterDemoOverride(
+  opts: StartOptions,
+  resolveChainId: () => RoutingPeerChainId = resolveConfiguredChainId,
+  resolveRouterPackage: () => string | null = resolveSelectedRouterPackage,
+): StartOptions {
+  if (opts.mode !== 'connect') return opts;
+
+  const selectedPackage = resolveRouterPackage();
+  // Explicit "None" (VprPreferencesView.tsx writes selectedRouterPackage:
+  // null for it) -- opts pass through unchanged, same as before. No longer
+  // gated on autoDayPassEnabled at all: that toggle only ever controlled
+  // real billing/signing behavior *inside* an already-loaded router plugin
+  // (already correctly live-reloadable via buyer-proxy's own
+  // _reloadRoutingPreferences), not whether the plugin gets loaded in the
+  // first place. Gating plugin *loading* on it too created a real bug: the
+  // renderer's live preference sync (app.ts's syncBuyerRoutingPreferences)
+  // can flip autoDayPassEnabled on an already-running buyer daemon, but
+  // nothing respawns that daemon -- so a user who enables Levanto Auto
+  // after the daemon already started (the common case: it auto-starts
+  // before Preferences is ever opened) got stuck sending `levanto-auto`
+  // requests to a process that never loaded router-levanto at all, a 502
+  // "No policy-allowed peer currently serves model levanto-auto" with no
+  // indication a restart was needed. The "Levanto Auto" catalog entry is
+  // itself already gated on this same preference, and reacts live
+  // (levanto-auto.ts's withLevantoAutoCatalogEntry) -- so nothing can
+  // actually route through this plugin unless the user has opted in,
+  // whether or not the plugin happens to be loaded.
+  if (selectedPackage === null) return opts;
+
+  if (selectedPackage !== LEVANTO_ROUTER_PACKAGE) {
+    return { ...opts, router: selectedPackage };
+  }
+
+  if (resolveChainId() === 'base-local') {
+    return {
+      ...opts,
+      router: 'levanto',
+      env: {
+        ...opts.env,
+        // Without this, router-levanto's RoutingLedger (routing_decisions,
+        // savings-dashboard data) falls back to in-memory-only and is wiped
+        // on every connect-mode subprocess restart -- this was a real
+        // incident (a live 12-agent mainnet data run vanished on restart).
+        LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
+        LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
+        LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
+        // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
+        // override"), not a production NAT solution -- see resolveDirectPeerAddresses
+        // in apps/cli's buyer start command for what actually consumes this.
+        ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
+          ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}',
+        // Isolates this demo buyer from the real public AntSeed network -- without
+        // it, bootstrapping through the local-only routing peer still transitively
+        // discovers real public sellers, since that peer is itself connected to
+        // dht1/dht2.antseed.com. Local-dev only, same reasoning as the two vars above.
+        ANTSEED_NO_OFFICIAL_BOOTSTRAP: process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1',
+      },
+    };
+  }
+
+  // Real chain (base-mainnet / base-sepolia): point at the real, staked
+  // Levanto routing peer instead, and skip the devnet isolation flags above
+  // entirely -- ANTSEED_NO_OFFICIAL_BOOTSTRAP would cut this buyer off from
+  // the real dht1/dht2.antseed.com swarm, and the direct-peer JSON names
+  // devnet-only mock sellers that don't exist on a real chain.
+  return {
+    ...opts,
+    router: 'levanto',
+    env: {
+      ...opts.env,
+      LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
+      LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://18.219.72.232:8787',
+      LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? '4c63288576d1befdbdd5f4734b4c9d4c3d8791be',
+    },
+  };
 }
 
 function resolveAlignedNodeFromMarker(): string | null {
@@ -163,6 +362,8 @@ function detectNodeArch(nodeBinary: string): string | null {
     const output = execFileSync(nodeBinary, ['-p', 'process.arch'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
     }).trim();
     return output.length > 0 ? output : null;
   } catch {
@@ -175,6 +376,8 @@ function detectNodeMajorVersion(nodeBinary: string): number | null {
     const output = execFileSync(nodeBinary, ['-p', 'process.versions.node.split(".")[0]'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 3_000,
+      killSignal: 'SIGKILL',
     }).trim();
     const major = Number(output);
     return Number.isFinite(major) && major > 0 ? major : null;
@@ -394,6 +597,7 @@ export function resolveCommandArgs(opts: StartOptions): string[] {
 export class ProcessManager {
   private readonly processes = new Map<RuntimeMode, ChildProcessWithoutNullStreams>();
   private readonly attachedModes = new Set<RuntimeMode>();
+  private readonly startPromises = new Map<RuntimeMode, Promise<RuntimeProcessState>>();
   private runtimeNativeAligned = false;
   private runtimeNativeAlignmentPromise: Promise<void> | null = null;
   private readonly states = new Map<RuntimeMode, RuntimeProcessState>([
@@ -451,11 +655,25 @@ export class ProcessManager {
     }
   }
 
-  async start(opts: StartOptions): Promise<RuntimeProcessState> {
+  async start(rawOpts: StartOptions): Promise<RuntimeProcessState> {
+    const opts = applyLevantoRouterDemoOverride(rawOpts);
     const mode = opts.mode;
     if (this.processes.has(mode)) {
       throw new Error(`${mode} is already running`);
     }
+    const inFlightStart = this.startPromises.get(mode);
+    if (inFlightStart) {
+      return inFlightStart;
+    }
+
+    const startPromise = this.spawnForMode(mode, opts).finally(() => {
+      this.startPromises.delete(mode);
+    });
+    this.startPromises.set(mode, startPromise);
+    return startPromise;
+  }
+
+  private async spawnForMode(mode: RuntimeMode, opts: StartOptions): Promise<RuntimeProcessState> {
     this.attachedModes.delete(mode);
 
     const cliExecution = resolveCliExecution();
@@ -535,10 +753,12 @@ export class ProcessManager {
     });
 
     child.on('exit', (code, signal) => {
-      this.processes.delete(mode);
-      state.running = false;
-      state.pid = null;
-      state.lastExitCode = code;
+      if (this.processes.get(mode) === child) {
+        this.processes.delete(mode);
+        state.running = false;
+        state.pid = null;
+        state.lastExitCode = code;
+      }
       const reason = signal ? `signal=${signal}` : `code=${String(code)}`;
       this.onLog(mode, 'system', `Process exited (${reason})`);
     });
@@ -791,7 +1011,12 @@ export class ProcessManager {
         child.kill('SIGKILL');
       }, 5_000);
       const forceKillTimeout = timeout;
-      const resolveTimeout = setTimeout(finish, 7_500);
+      const resolveTimeout = setTimeout(() => {
+        this.processes.delete(mode);
+        state.running = false;
+        state.pid = null;
+        finish();
+      }, 7_500);
 
       child.once('exit', finish);
 

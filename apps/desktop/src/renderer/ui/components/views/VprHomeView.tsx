@@ -26,6 +26,8 @@ import {
   selectFavoriteVprCatalog,
   selectRecommendedVprCatalog,
 } from '../../../modules/catalog/recommended';
+import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { selectDefaultVprModel } from '../../../modules/catalog/model-catalog';
 import { connectVprProfile } from '../../../modules/routing/proxy-sync';
 import { buyerConversationsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
 import { useCachedResource } from '../../../modules/app/cached-resource';
@@ -87,6 +89,7 @@ export function VprHomeView({ onSelectView }: Props) {
     // Unfiltered discover list, for routed-peer name resolution.
     allRows: state.discoverRows,
     showRoutedPeer: state.vprFloatShowRoutedPeer,
+    autoDayPassEnabled: state.vprRoutingPreferences.autoDayPassEnabled ?? false,
   }), shallowEqual);
   const proxyResource = useCachedResource(systemProxyResource);
   const conversationsResource = useCachedResource(buyerConversationsResource);
@@ -115,7 +118,29 @@ export function VprHomeView({ onSelectView }: Props) {
 
   const runtimeOn = snap.processes.some((process) => process.mode === 'connect' && process.running === true);
 
-  const selectedModel = snap.selection.model;
+  // Levanto Router is now selectable from this "model for new chats" card
+  // too, the same as the chat model picker -- both surfaces share the same
+  // underlying vprRouteSelection state (there is deliberately no separate
+  // copy of it for this page), so no extra plumbing is needed beyond no
+  // longer filtering the Auto sentinel out of this card's own catalog view.
+  const rawSelectedModel = snap.selection.model;
+  const selectedModel = useMemo(() => {
+    // No selection at all yet (e.g. before any chat has ever set the shared
+    // vprRouteSelection) -- default to Levanto Auto when enabled, same as
+    // controller.ts's own new-chat defaulting, so this card never shows
+    // "nothing selected" while a real default is available.
+    if (!rawSelectedModel) {
+      return snap.autoDayPassEnabled
+        ? selectDefaultVprModel(snap.catalog, null, undefined, true)
+        : selectDefaultVprModel(snap.catalog, null);
+    }
+    // A stale Auto selection left over from before the router was disabled --
+    // fall back to a real model instead of showing a now-unusable sentinel.
+    if (isLevantoAutoEntry(rawSelectedModel) && !snap.autoDayPassEnabled) {
+      return selectDefaultVprModel(snap.catalog, null);
+    }
+    return rawSelectedModel;
+  }, [rawSelectedModel, snap.catalog, snap.autoDayPassEnabled]);
   const selectedEntry = useMemo(
     () => (selectedModel
       ? findCatalogEntry(snap.catalog, selectedModel.provider, selectedModel.serviceId) ?? undefined
@@ -254,7 +279,13 @@ export function VprHomeView({ onSelectView }: Props) {
   // whole list is capped — favorites included — so the menu can't outgrow the
   // hero; everything past the cap lives behind "All models".
   const dropdownEntries = useMemo(() => {
-    const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text');
+    // Real models only for the favorites/recommended/free-lead scoring below
+    // -- none of that logic means anything for the synthetic Auto entry
+    // (no price, no free-seller flag, not "recommended" by any real
+    // measure). It still always appears in the final list: selectedEntry
+    // (computed from the full, unfiltered catalog) gets hoisted to the front
+    // below whenever it's the current selection, Auto included.
+    const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text' && !isLevantoAutoEntry(entry));
     const favoriteEntries = selectFavoriteVprCatalog(textCatalog, favorites);
     const recommended = selectRecommendedVprCatalog(textCatalog)
       .filter((entry) => !favorites.has(catalogEntryKey(entry)));
@@ -373,6 +404,26 @@ export function VprHomeView({ onSelectView }: Props) {
 
   const defaultModelLabel = selectedEntry?.label
     ?? (selectedModel ? displayModelLabel(selectedModel.serviceId, selectedModel.label) : 'No model');
+
+  /* Nudge to enable Auto model routing when no router is on -- reuses the
+     Add Balance banner's exact visual shape (title + text + single primary
+     action). No dismiss/close of its own: unlike a one-time deposit nudge,
+     its own show condition (no router enabled) already makes it disappear
+     the moment the user acts on it. */
+  const routerBanner = !snap.autoDayPassEnabled ? (
+    <div className={styles.balanceBanner}>
+      <button
+        type="button"
+        className={styles.balanceBody}
+        onClick={() => onSelectView?.('preferences')}
+      >
+        <span className={styles.balanceTitle}>Enable auto model routing</span>
+        <span className={styles.balanceText}>
+          Automatically picks the best model and seller for every message, to optimise your spending and performance.
+        </span>
+      </button>
+    </div>
+  ) : null;
 
   /* Recent chats sample — full width, same rows as the floating pill; every
      interaction leads to the dedicated Chats page where chats are managed. */
@@ -735,6 +786,8 @@ export function VprHomeView({ onSelectView }: Props) {
               </div>
             ) : null}
 
+            {routerBanner}
+
             {reminderCard}
 
             {recentChats}
@@ -770,6 +823,8 @@ export function VprHomeView({ onSelectView }: Props) {
         /* Routed apps + recent chats (the ask input lives in the hero) */
         <div className={styles.connectGroup}>
           {appsPitch}
+
+          {routerBanner}
 
           {reminderCard}
 

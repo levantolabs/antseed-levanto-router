@@ -66,6 +66,7 @@ type Conversation = {
   service: string;
   provider: string;
   peerId: string;
+  routeMode?: 'auto' | 'pinned';
   messages: unknown[];
   createdAt: number;
   updatedAt: number;
@@ -343,7 +344,7 @@ test('new chat created while previous response is pending keeps its own model an
   let resolveFirstSend: ((value: { ok: true }) => void) | null = null;
 
   const bridge: DesktopBridge = {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const id = `conv-${conversations.length + 1}`;
       conversations.push({
@@ -352,6 +353,7 @@ test('new chat created while previous response is pending keeps its own model an
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1148,7 +1150,7 @@ test('discover-selected draft keeps its peer if another discover chat is opened 
   let resolveFirstCreate: ((value: { ok: true; data: Conversation }) => void) | null = null;
 
   const bridge: DesktopBridge = {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const conversation: Conversation = {
         id: `conv-${conversations.length + 1}`,
@@ -1156,6 +1158,7 @@ test('discover-selected draft keeps its peer if another discover chat is opened 
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1351,7 +1354,7 @@ function makeChatBridge(
   conversations: Conversation[] = [],
 ): DesktopBridge {
   return {
-    chatAiCreateConversation: async (service, provider, peerId) => {
+    chatAiCreateConversation: async (service, provider, peerId, routeMode) => {
       const now = Date.now();
       const conversation: Conversation = {
         id: `conv-${conversations.length + 1}`,
@@ -1359,6 +1362,7 @@ function makeChatBridge(
         service,
         provider: provider ?? '',
         peerId: peerId ?? '',
+        routeMode,
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -1438,6 +1442,75 @@ test('explicit dropdown pick overrides the VPR auto-selected model for a new cha
   assert.equal(uiState.vprModelPins['modelb'], 'peer-b');
 });
 
+test('a discover refresh with only real models never silently rebinds an active Auto selection', async () => {
+  installDomTimers();
+  const uiState = createInitialUiState();
+  const autoValue = `levanto${SEP}levanto-auto`;
+  uiState.chatSelectedServiceValue = autoValue;
+  uiState.vprRouteSelection = {
+    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    mode: 'auto',
+    peerId: null,
+  };
+  const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
+  const rows: DiscoverRow[] = [{ peerId: 'peer-a', serviceId: 'model-a' } as unknown as DiscoverRow];
+  const bridge: DesktopBridge = {
+    ...makeChatBridge(sends),
+    chatAiListDiscoverRows: async () => ({ ok: true, data: rows }),
+  };
+  const api = initChatModule({ bridge, uiState, appendSystemLog: () => undefined });
+
+  await waitFor(() => uiState.chatDiscoverRowsLoaded);
+  // The catalog now has exactly one real, sortable model ("model-a") and no
+  // entry for the Auto sentinel (no real seller ever advertises it) — this
+  // is precisely the shape that, before the fix, made
+  // findMatchingChatServiceOptionValue miss and fall through to whatever
+  // sorted first, silently rebinding chatSelectedServiceValue away from Auto.
+  assert.ok(uiState.chatServiceOptions.some((option) => option.id === 'model-a'));
+  assert.equal(uiState.chatSelectedServiceValue, autoValue);
+
+  api.sendMessage('still auto after refresh');
+  await waitFor(() => sends.length === 1);
+  assert.equal(sends[0]?.service, 'levanto-auto');
+  assert.equal(sends[0]?.provider, 'levanto');
+});
+
+test('a brand-new conversation with Auto selected sends the sentinel, not whichever real peer sorted first', async () => {
+  installDomTimers();
+  const uiState = createInitialUiState();
+  // The real, live-reported bug's exact starting state: vprRouteSelection
+  // correctly restored to Auto (e.g. from the persisted preference on app
+  // launch), but chatSelectedServiceValue still at its cold-start empty
+  // default -- applyChatServiceOptions deliberately leaves it empty while
+  // Auto is selected (see the test above), but getSelectedChatServiceSelection
+  // used to read that same empty value as "nothing selected yet" and fall
+  // through to chatServiceOptions[0], silently sending whatever real peer
+  // sorted first while the UI still showed "Levanto Model Router".
+  uiState.vprRouteSelection = {
+    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    mode: 'auto',
+    peerId: null,
+  };
+  const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
+  const rows: DiscoverRow[] = [{ peerId: 'peer-apex', serviceId: 'apex-crypto-agent' } as unknown as DiscoverRow];
+  const bridge: DesktopBridge = {
+    ...makeChatBridge(sends),
+    chatAiListDiscoverRows: async () => ({ ok: true, data: rows }),
+  };
+  const api = initChatModule({ bridge, uiState, appendSystemLog: () => undefined });
+
+  await waitFor(() => uiState.chatDiscoverRowsLoaded);
+  assert.ok(uiState.chatServiceOptions.some((option) => option.id === 'apex-crypto-agent'));
+  // The corrupting precondition: still genuinely empty, never touched.
+  assert.equal(uiState.chatSelectedServiceValue, '');
+
+  api.sendMessage('first message ever, Auto selected');
+  await waitFor(() => sends.length === 1);
+  assert.equal(sends[0]?.service, 'levanto-auto');
+  assert.equal(sends[0]?.provider, 'levanto');
+  assert.equal(sends[0]?.peerId, undefined);
+});
+
 test('active legacy conversation keeps its model without treating its saved peer as a pin', async () => {
   installDomTimers();
   const uiState = createInitialUiState();
@@ -1473,6 +1546,44 @@ test('active legacy conversation keeps its model without treating its saved peer
     provider: 'openai',
     peerId: undefined,
   });
+});
+
+test('reopening an auto-routed conversation whose service already resolved to a concrete model never pins the picker off Auto', async () => {
+  installDomTimers();
+  const uiState = createInitialUiState();
+  uiState.chatServiceOptions = [chatOption('model-a', 'peer-a')];
+  uiState.vprRouteSelection = {
+    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    mode: 'auto',
+    peerId: null,
+  };
+  // Simulates the drift bug 2B fixes: this Auto-routed conversation's own
+  // service has already resolved to the concrete model that served its last
+  // response (conversation-store.ts sets this the moment a routed response
+  // lands), even though it was never explicitly pinned (routeMode stays
+  // 'auto') and the global selection above is still genuinely Auto.
+  const conversations: Conversation[] = [{
+    id: 'conv-a',
+    title: 'Conversation A',
+    service: 'model-a',
+    provider: 'openai',
+    peerId: 'peer-a',
+    routeMode: 'auto',
+    messages: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    usage: { inputTokens: 0, outputTokens: 0 },
+  }];
+  const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
+  const api = initChatModule({ bridge: makeChatBridge(sends, conversations), uiState, appendSystemLog: () => undefined });
+
+  await api.refreshChatConversations();
+  await api.openConversation('conv-a');
+
+  // Must not have matched conv-a's drifted-concrete service -- doing so
+  // would flip isAutoModeActive (ChatView.tsx) false and permanently stick
+  // the picker on model-a instead of Levanto Auto.
+  assert.notEqual(uiState.chatSelectedServiceValue, `openai${SEP}model-a${SEP}peer-a`);
 });
 
 test('pinned VPR peer with missing option falls back to existing chat selected value', async () => {

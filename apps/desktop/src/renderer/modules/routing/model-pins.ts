@@ -9,6 +9,7 @@
  */
 
 import { canonicalModelKey, canonicalPersistedModelKey } from '../catalog/model-identity.js';
+import { isLevantoAutoEntry } from './levanto-auto.js';
 
 export const VPR_MODEL_PINS_STORAGE_KEY = 'antseed.desktop.vpr.modelPins';
 
@@ -54,6 +55,12 @@ export function vprModelPinFor(
   provider: string,
   serviceId: string,
 ): string | null {
+  // The Auto sentinel must never resolve to a fixed peer -- its whole design
+  // is that model AND peer are chosen per-request by the routing peer. Ignore
+  // any existing entry here (rather than only guarding the write below) so a
+  // store already corrupted by a pre-fix build self-heals on read, instead of
+  // requiring every affected user to manually clear localStorage.
+  if (isLevantoAutoEntry({ provider, serviceId })) return null;
   return pins[modelPinKey(provider, serviceId)] ?? null;
 }
 
@@ -65,6 +72,10 @@ export function setVprModelPin(
 ): VprModelPins {
   const id = peerId.trim();
   if (id.length === 0) return pins;
+  if (isLevantoAutoEntry({ provider, serviceId })) {
+    console.warn(`[VprModelPins] refusing to pin the Auto sentinel (${provider}/${serviceId}) to peer ${peerId.slice(0, 12)} -- this would silently strand every Auto-routed chat on one fixed seller. Caller should be fixed to never reach this with the sentinel.`);
+    return pins;
+  }
   return { ...pins, [modelPinKey(provider, serviceId)]: id };
 }
 

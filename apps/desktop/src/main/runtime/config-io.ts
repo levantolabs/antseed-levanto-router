@@ -157,7 +157,16 @@ function migrateDesktopBuyerDefaults(config: Record<string, unknown>): {
 
   const allowedPeerIds = validRoutingPeerIds(routingPreferences.allowedPeerIds);
   const blockedPeerIds = validRoutingPeerIds(routingPreferences.blockedPeerIds);
+  // Spread the existing object first -- this literal only validates/defaults
+  // the five fields below; without the spread, every OTHER field on
+  // ModelRoutingPreferences (cqt, autoDayPassEnabled) got silently
+  // dropped whenever this migration fired for an unrelated reason, since a
+  // narrower reconstructed object simply never had them. Found live: a real
+  // user's Levanto Auto toggle (autoDayPassEnabled) reset to off on
+  // every app launch, with no error, because this ran and rebuilt
+  // routingPreferences without it.
   const nextRoutingPreferences = {
+    ...routingPreferences,
     preferFreePeers: typeof routingPreferences.preferFreePeers === 'boolean'
       ? routingPreferences.preferFreePeers
       : DEFAULT_MODEL_ROUTING_PREFERENCES.preferFreePeers,
@@ -215,7 +224,16 @@ export async function ensureConfig(configPath = DEFAULT_CONFIG_PATH): Promise<vo
     return;
   }
 
-  const existing = await readConfig(configPath);
+  let existing: Record<string, unknown>;
+  try {
+    existing = await readConfig(configPath);
+  } catch (err) {
+    if (!(err instanceof SyntaxError)) throw err;
+    console.error(`[config-io] config.json is corrupt, resetting to defaults: ${err.message}`);
+    await rename(configPath, `${configPath}.corrupt-${Date.now()}`).catch(() => {});
+    await writeConfigAtomic(DEFAULT_CONFIG, configPath);
+    return;
+  }
   if (Object.keys(existing).length === 0) {
     await writeConfigAtomic(DEFAULT_CONFIG, configPath);
     return;
