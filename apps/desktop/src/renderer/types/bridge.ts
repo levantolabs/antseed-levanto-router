@@ -191,6 +191,7 @@ export type RouterPluginInfo = {
   description: string;
   autoRouteServiceId?: string;
   autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
 };
 
 export type RouterPluginListResult = {
@@ -350,7 +351,9 @@ export type DesktopBridge = {
 
   chatAiListConversations?: () => Promise<{ ok: boolean; data: unknown[] }>;
   chatAiListDiscoverRows?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
+  chatAiListRoutingDecisions?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
   chatAiGetDayPassPrice?: () => Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }>;
+  chatAiGetRoutingSavingsBaseline?: () => Promise<{ ok: boolean; data?: string | null; error?: string }>;
   chatAiGetConversation?: (id: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiCreateConversation?: (service: string, provider?: string, peerId?: string, routeMode?: 'auto' | 'pinned') => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiDeleteConversation?: (id: string) => Promise<{ ok: boolean }>;

@@ -13,6 +13,7 @@ import {
   decodeSweepRequest,
   faultAttributionOf,
   faultCodeOf,
+  getOpenRouterReferencePrices,
   isModelRouteEligible,
   modelRouteTotalPrice,
   peerSupportsCooperativeClose,
@@ -106,6 +107,7 @@ import { PeerAttributionTracker, HEARTBEAT_MS } from './peer-attribution.js'
 import { estimateAnthropicPromptTokens, isCountTokensPath } from './count-tokens.js'
 import { getCachedVerdict, runVerifier, verifierSupportFingerprint, type CachedVerdict, type VerifierPolicy, type SellerReach, type VerifyOutcome } from '../plugins/verifier.js'
 import { loadConfig } from '../config/loader.js'
+import { BAKED_COMPARABLE_PRICES_URL } from '../generated/baked-defaults.js'
 
 // Re-export for backward compatibility (used by tests and other consumers)
 export { selectCandidatePeersForRouting, type CandidatePeerRouteSelection } from './routing.js'
@@ -2018,6 +2020,34 @@ export class BuyerProxy {
         ok: true,
         offer: offer ? { peerId: offer.peerId, flatUsdPrice: offer.flatUsdPrice } : null,
       }))
+      return
+    }
+
+    if (path.startsWith('/_antseed/openrouter-reference-prices') && method === 'GET') {
+      // Retail-price comparison for the savings dashboard's "vs OpenRouter"
+      // figure (model-routing architecture doc SS4.6) -- kept separate from
+      // routing_decisions' own baselinePrices (AntSeed's own network price),
+      // since conflating the two would credit the router for savings that
+      // actually come from AntSeed's marketplace undercutting OpenRouter
+      // retail. Resolved server-side (not exposing the raw canonical map)
+      // so the dashboard's client-side JS never needs to replicate
+      // canonicalModelKey's normalization rules itself.
+      const url = new URL(path, 'http://localhost')
+      const requested = (url.searchParams.get('models') ?? '').split(',').map((m) => m.trim()).filter(Boolean)
+      // Same baked-default file `antseed buyer activity`'s Saved tile already
+      // reads (apps/cli/src/cli/commands/buyer/activity.ts) -- null for a
+      // from-source build, a real URL once scripts/bake-comparable-prices-url.mjs
+      // has run for a release. ANTSEED_COMPARABLE_PRICES_URL always overrides it.
+      const referenceMap = await getOpenRouterReferencePrices(BAKED_COMPARABLE_PRICES_URL)
+      const prices: Record<string, { inUsdPerM: number | null; outUsdPerM: number | null; cachedInUsdPerM: number | null } | null> = {}
+      for (const model of requested) {
+        const ref = referenceMap[canonicalModelKey(model)]
+        prices[model] = ref
+          ? { inUsdPerM: ref.input, outUsdPerM: ref.output, cachedInUsdPerM: ref.cachedInput }
+          : null
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, prices }))
       return
     }
 

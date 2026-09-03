@@ -25,6 +25,7 @@ export type ActiveAutoRouterPlugin = {
   serviceId: string;
   label: string;
   info?: { title: string; body: string };
+  savingsBaselineModel?: string;
 };
 
 /**
@@ -40,6 +41,7 @@ const LEVANTO_FALLBACK: ActiveAutoRouterPlugin = {
   provider: 'levanto',
   serviceId: 'levanto-auto',
   label: 'Levanto Router',
+  savingsBaselineModel: 'claude-opus-5',
 };
 const LEVANTO_FALLBACK_PACKAGE = '@antseed/router-levanto';
 
@@ -80,6 +82,7 @@ function resolveActiveAutoRouterPlugin(
       serviceId: match.autoRouteServiceId!,
       label: match.displayName,
       info: match.autoRouteInfo,
+      savingsBaselineModel: match.savingsBaselineModel,
     };
   }
   // Router list not loaded yet, or the selected package is no longer
@@ -110,6 +113,16 @@ export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provide
 /** The active plugin's info-dialog copy, or `null` when no Auto router is active. */
 export function activeAutoRouterInfo(): { title: string; body: string } | null {
   return active?.info ?? null;
+}
+
+/**
+ * The active plugin's declared savings-comparison baseline model, or
+ * Levanto's own default when no plugin is active/declares one -- the
+ * savings dashboard (router-savings.ts) always needs *some* default even
+ * while Auto is off, since it summarizes past `routing_decisions` history.
+ */
+export function activeAutoRouterSavingsBaselineModel(): string {
+  return active?.savingsBaselineModel ?? LEVANTO_FALLBACK.savingsBaselineModel!;
 }
 
 /**

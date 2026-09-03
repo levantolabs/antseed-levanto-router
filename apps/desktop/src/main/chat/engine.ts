@@ -479,6 +479,27 @@ export function registerPiChatHandlers({
     };
   });
 
+  ipcMain.handle('chat:ai-list-routing-decisions', async () => {
+    // routing_decisions local ledger (model-routing software-architecture
+    // doc SS2.5), for VPR's savings dashboard (decisions doc SS4.5). Proxies
+    // straight to buyer-proxy's own /_antseed/routing-decisions -- same
+    // localhost-fetch pattern as /_antseed/metering and /_antseed/route
+    // above, no new transport. Empty rows (not an error) whenever the
+    // registered router doesn't implement getRoutingDecisions (e.g. the
+    // default router-local) or the buyer runtime isn't up yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: [] };
+      const body = await response.json() as { ok?: boolean; rows?: unknown[] };
+      return { ok: true, data: Array.isArray(body.rows) ? body.rows : [] };
+    } catch {
+      return { ok: true, data: [] };
+    }
+  });
+
   ipcMain.handle('chat:ai-get-day-pass-price', async () => {
     // The real, live-advertised `type: 'day-pass'` price (model-routing
     // decisions doc SS13 item 6), for the Levanto Auto Preferences toggle's
@@ -494,6 +515,25 @@ export function registerPiChatHandlers({
       if (!response.ok) return { ok: true, data: null };
       const body = await response.json() as { ok?: boolean; offer?: { peerId?: string; flatUsdPrice?: number } | null };
       return { ok: true, data: body.offer ?? null };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle('chat:ai-get-routing-savings-baseline', async () => {
+    // The model id last chosen in the savings dashboard's baseline dropdown
+    // (apps/cli/src/proxy/buyer-proxy.ts's `_savingsBaselineModel`), so the
+    // Profile view's "Auto-routing savings" text compares against the same
+    // model the user picked there instead of silently using its own default.
+    // `null` (not an error) whenever no explicit choice has been made yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions/baseline`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: null };
+      const body = await response.json() as { ok?: boolean; baseline?: string | null };
+      return { ok: true, data: body.baseline ?? null };
     } catch {
       return { ok: true, data: null };
     }
