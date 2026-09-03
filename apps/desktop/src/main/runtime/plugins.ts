@@ -5,7 +5,9 @@ import { promisify } from 'node:util';
 import { builtinModules } from 'node:module';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { BrowserWindow } from 'electron';
+import type { AntseedRouterPlugin, ConfigField } from '@antseed/node';
 import type { AppendLogFn } from '../utils.js';
 import { WORKSPACE_APPS_DIR } from '../paths.js';
 
@@ -191,6 +193,63 @@ export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
   } catch {
     return [];
   }
+}
+
+export type RouterPluginMetadata = {
+  package: string;
+  version: string;
+  /** The plugin's own short `name` (AntseedPluginBase.name, e.g. 'levanto') -- used as the synthetic auto-route catalog entry's `provider` so a stored selection survives this metadata becoming plugin-driven. */
+  name: string;
+  displayName: string;
+  description: string;
+  autoRouteServiceId?: string;
+  autoRouteInfo?: { title: string; body: string };
+  configSchema?: ConfigField[];
+};
+
+/**
+ * Reads router-type plugin metadata (display name, auto-route sentinel,
+ * config schema) straight from each installed plugin's own module export --
+ * static data the plugin author already declares (packages/node's
+ * AntseedRouterPlugin) -- instead of the desktop hardcoding a second copy of
+ * it per plugin. Reads from disk, not a live buyer-proxy process, since
+ * callers need this before that process has even started (the Preferences
+ * dropdown, process-manager's startup config). On demand, not polled --
+ * installed router plugins change rarely enough that callers can cache the
+ * result themselves (same pattern as this app's other `useCachedResource`
+ * IPC reads) rather than this function maintaining its own cache.
+ */
+export async function listInstalledRouterPluginMetadata(): Promise<RouterPluginMetadata[]> {
+  const installed = await listInstalledPlugins();
+  const results: RouterPluginMetadata[] = [];
+  for (const { package: pkgName, version } of installed) {
+    const entryPath = path.resolve(path.join(DEFAULT_PLUGINS_DIR, 'node_modules', pkgName, 'dist', 'index.js'));
+    if (!entryPath.startsWith(path.resolve(DEFAULT_PLUGINS_DIR)) || !existsSync(entryPath)) continue;
+    try {
+      // eslint-disable-next-line no-await-in-loop -- small, rarely-called list; sequential imports keep failures isolated per plugin.
+      const mod = await import(pathToFileURL(entryPath).href) as Record<string, unknown>;
+      const candidates = Array.from(new Set([mod['default'], ...Object.values(mod)]))
+        .filter((value): value is Record<string, unknown> => !!value && typeof value === 'object');
+      const plugin = candidates.find(
+        (value) => value['type'] === 'router' && typeof value['createRouter'] === 'function',
+      ) as (AntseedRouterPlugin & Record<string, unknown>) | undefined;
+      if (!plugin) continue;
+      results.push({
+        package: pkgName,
+        version,
+        name: plugin.name,
+        displayName: plugin.displayName,
+        description: plugin.description,
+        autoRouteServiceId: plugin.autoRouteServiceId,
+        autoRouteInfo: plugin.autoRouteInfo,
+        configSchema: plugin.configSchema,
+      });
+    } catch {
+      // A plugin that fails to import (missing deps, broken build) just
+      // doesn't show up as an option -- same as if it were uninstalled.
+    }
+  }
+  return results;
 }
 
 interface NpmInvocation { bin: string; leadingArgs: string[] }

@@ -67,6 +67,17 @@ test('blank peer ids are not stored', () => {
   assert.deepEqual(setVprModelPin({}, 'openai', 'gpt-test', '   '), {});
 });
 
+test('refuses to pin the Auto sentinel to a peer -- it must always be chosen per-request, never stranded on one seller', () => {
+  const pins = setVprModelPin({}, 'levanto', 'levanto-auto', 'peer-1');
+  assert.deepEqual(pins, {});
+  assert.equal(vprModelPinFor(pins, 'levanto', 'levanto-auto'), null);
+});
+
+test('ignores an already-corrupted Auto sentinel pin from a pre-fix build instead of requiring a manual localStorage edit', () => {
+  const corrupted = { [modelPinKey('levanto', 'levanto-auto')]: 'peer-1' };
+  assert.equal(vprModelPinFor(corrupted, 'levanto', 'levanto-auto'), null);
+});
+
 test('loads pins persisted with legacy canonical model keys', () => {
   storage.set('antseed.desktop.vpr.modelPins', JSON.stringify({
     claudefable5: 'peer-1',

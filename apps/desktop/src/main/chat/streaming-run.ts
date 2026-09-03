@@ -245,7 +245,9 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
       preferredPeerByConversationId.set(conversationId, preferredPeerId);
       if (peerOverrideId && persistedPeer?.peerId !== peerOverrideId) {
         const peerLabel = getServiceCatalogEntries().find((entry) => entry.peerId === peerOverrideId)?.peerLabel;
-        void store.setPeer(conversationId, peerOverrideId, peerLabel, 'pinned');
+        void store.setPeer(conversationId, peerOverrideId, peerLabel, 'pinned').catch((err) => {
+          appendSystemLog(`Failed to persist pinned peer: ${asErrorMessage(err)}`);
+        });
       }
     }
     // Catalog entry for this (service, peer) pair drives both the API
@@ -709,7 +711,9 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
             // Persist peer to session file if it's new or changed
             if (peerId !== prevPeerId) {
               const peerLabel = getServiceCatalogEntries().find((e) => e.peerId === peerId)?.peerLabel;
-              void store.setPeer(conversationId, peerId, peerLabel);
+              void store.setPeer(conversationId, peerId, peerLabel).catch((err) => {
+                appendSystemLog(`Failed to persist peer for conversation ${conversationId.slice(0, 8)}...: ${asErrorMessage(err)}`);
+              });
             }
           }
           const assistantMessage = message as AssistantMessage & { meta?: AiMessageMeta };
@@ -846,12 +850,15 @@ export function createStreamingRunner(ctx: StreamingRunContext) {
 
       const completedAssistantMessage = pendingAssistantMessage as AiChatMessage | null;
       if (completedAssistantMessage) {
-        const routed = await fetchProxyConversationRoute(proxyPort, conversationId);
+        const routed = await fetchProxyConversationRoute(proxyPort, conversationId, appendSystemLog);
         if (routed?.peerId) {
           completedAssistantMessage.meta = {
             ...(completedAssistantMessage.meta ?? {}),
             peerId: routed.peerId,
             service: routed.service,
+            ...(routed.estimatedCostUsd !== undefined ? { estimatedCostUsd: routed.estimatedCostUsd } : {}),
+            ...(routed.latencyMs !== undefined ? { latencyMs: routed.latencyMs } : {}),
+            ...(routed.routeAlternatives ? { routeAlternatives: routed.routeAlternatives } : {}),
           };
           preferredPeerByConversationId.set(conversationId, routed.peerId);
           const peerLabel = getServiceCatalogEntries().find((entry) => entry.peerId === routed.peerId)?.peerLabel;

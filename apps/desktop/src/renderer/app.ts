@@ -23,6 +23,7 @@ import { initModelPickerSync } from './modules/catalog/picker-sync';
 import { applyVprRouteToConnectedProxy } from './modules/routing/proxy-sync';
 import { createVprRouteSelection, findCatalogEntry } from './modules/catalog/model-catalog';
 import { resolveVprChatOption } from './modules/chat/projection';
+import { isLevantoAutoEntry } from './modules/routing/levanto-auto';
 import {
   applyPeerListing,
   buyerModelRoutingPreferences,
@@ -284,6 +285,32 @@ function actionSelectVprModel(provider: string, serviceId: string, peerId: strin
     return;
   }
   uiState.chatImageRouteSelection = null;
+
+  if (isLevantoAutoEntry(entry)) {
+    // No fixed peer: unlike every other model, Auto's whole design is that
+    // model AND peer are both chosen per-request by the routing peer
+    // (buyer-proxy's selectRoute, gated on no explicit peer already pinning
+    // the request) -- resolveVprChatOption's normal peer-scoring path below
+    // doesn't apply here, since no real seller advertises "levanto-auto" for
+    // it to find a route through (decisions doc SS4.3, software-arch doc
+    // SS2.1/SS4.1). encodeChatServiceSelection with no peerId keeps
+    // handleServiceChange's own `peerId` empty, which is what already makes
+    // it choose 'auto' route mode and leave the conversation's peer unset.
+    const selection = createVprRouteSelection(entry, null);
+    chatApi.handleServiceChange(
+      chatApi.encodeChatServiceSelection(entry.serviceId, entry.provider),
+      undefined,
+      false,
+      'auto',
+    );
+    uiState.vprRouteSelection = selection;
+    saveVprRouteSelection(selection);
+    notifyUiStateChanged();
+    void vprFloatApi?.refresh();
+    void applyVprRouteToConnectedProxy(bridge, uiState);
+    return;
+  }
+
   // A bare model switch restores that model's own pin instead of dropping to
   // auto — pinning one model then browsing others must not unpin it. Only
   // clearVprPinnedPeer (the "Auto select seller" toggle) forgets a pin.
@@ -671,8 +698,13 @@ registerActions({
     saveVprRoutingPreferences(uiState.vprRoutingPreferences);
     syncBuyerRoutingPreferences();
     // Peer rules gate which sellers and models are visible at all, so a patch
-    // touching them has to re-derive the catalog, not just repaint.
-    if (patch.allowedPeerIds || patch.blockedPeerIds) {
+    // touching them has to re-derive the catalog, not just repaint. Same for
+    // autoDayPassEnabled: it gates whether "Levanto Auto" is even
+    // present in the catalog (levanto-auto.ts's withLevantoAutoCatalogEntry),
+    // so flipping it has to take effect immediately, not wait for the next
+    // unrelated recompute. `!== undefined` (not truthy) because turning the
+    // toggle off is `patch.autoDayPassEnabled === false`.
+    if (patch.allowedPeerIds || patch.blockedPeerIds || patch.autoDayPassEnabled !== undefined) {
       chatApi.applyPeerAccessRules();
     }
     notifyUiStateChanged();
