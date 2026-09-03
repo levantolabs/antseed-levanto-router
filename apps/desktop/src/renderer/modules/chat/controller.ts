@@ -17,7 +17,7 @@ import {
   ensureOpenRouterPrices,
   getCachedOpenRouterPrices,
 } from '../catalog/openrouter-baseline.js';
-import { isLevantoAutoSelected, withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
+import { isAutoRouterSelected, withAutoRouterCatalogEntry } from '../routing/auto-router.js';
 import { installedRouterPluginsResource } from '../app/vpr-resources.js';
 import type {
   DesktopBridge,
@@ -99,7 +99,7 @@ const CUMULATIVE_IMAGE_PROMPT_HEADER = 'Generate a new image using the full conv
 const CUMULATIVE_IMAGE_PROMPT_FOOTER = 'Return only the newly generated image.';
 
 /**
- * Snapshot of installed router plugins for `withLevantoAutoCatalogEntry`'s
+ * Snapshot of installed router plugins for `withAutoRouterCatalogEntry`'s
  * active-router resolution. Reads whatever `installedRouterPluginsResource`
  * has cached rather than awaiting a fresh fetch here -- every catalog
  * recompute below is synchronous, and the resource activates/refreshes
@@ -170,9 +170,9 @@ export type ChatModuleApi = {
   handleServiceFocus: () => void;
   handleServiceBlur: () => void;
   clearPinnedPeer: () => void;
-  /** Exposed for actionSelectVprModel's Levanto Auto branch, which needs a
+  /** Exposed for actionSelectVprModel's Auto-routing branch, which needs a
       `handleServiceChange` value with no matching `chatServiceOptions` entry
-      (no fixed peer to encode) -- see modules/routing/levanto-auto.ts. */
+      (no fixed peer to encode) -- see modules/routing/auto-router.ts. */
   encodeChatServiceSelection: (serviceId: string, provider: string | null, peerId?: string) => string;
   setChatPermissionMode: (mode: ChatPermissionMode) => void;
   decideToolApproval: (decision: ToolApprovalDecision, requestId?: string) => void;
@@ -1283,16 +1283,17 @@ export function initChatModule({
     }
 
     // The Auto sentinel can never resolve through vprOption above -- no real
-    // seller advertises "levanto-auto", so resolveVprChatOption always misses
-    // it by design (same reasoning as applyChatServiceOptions's own guard,
-    // which deliberately leaves chatSelectedServiceValue EMPTY while Auto is
-    // selected, precisely so a real catalog entry never gets written over
-    // it). Without this check, that empty value read as "nothing selected"
-    // below, falling through to chatServiceOptions[0] -- silently sending
-    // whatever real peer sorted first while the UI still showed "Levanto
-    // Model Router" selected. Checked here, ahead of chatSelectedServiceValue,
+    // seller advertises the active router's auto-sentinel serviceId, so
+    // resolveVprChatOption always misses it by design (same reasoning as
+    // applyChatServiceOptions's own guard, which deliberately leaves
+    // chatSelectedServiceValue EMPTY while Auto is selected, precisely so a
+    // real catalog entry never gets written over it). Without this check,
+    // that empty value read as "nothing selected" below, falling through to
+    // chatServiceOptions[0] -- silently sending whatever real peer sorted
+    // first while the UI still showed the active router selected. Checked
+    // here, ahead of chatSelectedServiceValue,
     // for the same reason: an empty value means Auto, not "unset".
-    if (isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+    if (isAutoRouterSelected(uiState.vprRouteSelection.model)) {
       return selectionForCurrentRoute({
         id: uiState.vprRouteSelection.model!.serviceId,
         provider: uiState.vprRouteSelection.model!.provider,
@@ -1360,15 +1361,16 @@ export function initChatModule({
     // dropped its service on re-hydration.
     const firstOptionFallback = hasActiveConversation ? null : (optionCandidates[0]?.value ?? null);
     // The Auto sentinel is exempt from the whole lookup/fallback chain below:
-    // no real seller ever advertises "levanto-auto", so `optionCandidates`
-    // (built purely from real discovered rows) can never contain it, and
-    // `findMatchingChatServiceOptionValue` always misses. Before this guard,
-    // that permanent miss fell through to `firstOptionFallback` — most
-    // dangerously during the timing window before a brand-new conversation
-    // is registered as active (`hasActiveConversation` false), silently and
-    // permanently rebinding a fresh Auto chat to whatever real model sorted
-    // first (e.g. "glm-5.2"), exactly the applyPeerAccessRules stranding bug
-    // fixed earlier, in this sibling function which lacked the same fix.
+    // no real seller ever advertises the active router's auto-sentinel
+    // serviceId, so `optionCandidates` (built purely from real discovered
+    // rows) can never contain it, and `findMatchingChatServiceOptionValue`
+    // always misses. Without this exemption, that permanent miss would fall
+    // through to `firstOptionFallback` — most dangerously during the timing
+    // window before a brand-new conversation is registered as active
+    // (`hasActiveConversation` false), silently and permanently rebinding a
+    // fresh Auto chat to whatever real model sorted first (e.g. "glm-5.2"),
+    // the same stranding risk `applyPeerAccessRules` guards against
+    // elsewhere.
     // Broader than checking `currentSelection` alone: `chatSelectedServiceValue`
     // can drift to a real model id even while the conversation (or, with none
     // active, the global preference) is still genuinely on Auto -- e.g.
@@ -1388,11 +1390,11 @@ export function initChatModule({
     // stomping a value that was already correct.
     const isPinnedConversation = hasActiveConversation && activeConversation?.routeMode === 'pinned';
     const isAutoConversation = !isPinnedConversation && (
-      isLevantoAutoSelected({
+      isAutoRouterSelected({
         provider: currentSelection.provider ?? '',
         serviceId: currentSelection.id,
       })
-      || isLevantoAutoSelected(uiState.vprRouteSelection.model)
+      || isAutoRouterSelected(uiState.vprRouteSelection.model)
     );
     const preferred = isAutoConversation
       ? (optionCandidates.some((o) => o.value === uiState.chatSelectedServiceValue) ? '' : uiState.chatSelectedServiceValue)
@@ -1546,7 +1548,7 @@ export function initChatModule({
       uiState.discoverRows,
       uiState.vprRoutingPreferences,
     );
-    uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
+    uiState.vprModelCatalog = withAutoRouterCatalogEntry(applyOpenRouterBaselines(
       projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
       getCachedOpenRouterPrices(),
     ), uiState.vprRoutingPreferences, currentRouterPlugins());
@@ -1562,7 +1564,7 @@ export function initChatModule({
     const selected = uiState.vprRouteSelection.model;
     if (
       selected
-      && !isLevantoAutoSelected(selected)
+      && !isAutoRouterSelected(selected)
       && routesForSelectedModel(uiState.vprRoutableRows, selected).length === 0
     ) {
       if (!adoptDefaultVprModel()) {
@@ -1617,10 +1619,10 @@ export function initChatModule({
     }
   }
 
-  // Service-discovery failures (notably the 12s IPC timeout above) used to be
-  // invisible in exported logs — the runtime looked healthy while the model
-  // list stayed empty. Log the first failure, then one summary per minute,
-  // plus the recovery, so a log export tells the story.
+  // Service-discovery failures (notably the 12s IPC timeout above) would
+  // otherwise be invisible in exported logs — the runtime would look healthy
+  // while the model list stayed empty. Log the first failure, then one
+  // summary per minute, plus the recovery, so a log export tells the story.
   let discoverFailureStreak = 0;
   let discoverFailureLogAt = 0;
   function noteDiscoverFailure(message: string): void {
@@ -1684,7 +1686,7 @@ export function initChatModule({
       // that excludes every discovered seller must empty the catalog, while a
       // transient empty discovery snapshot must leave the last one standing.
       if (rows.length > 0 || uiState.vprModelCatalog.length === 0) {
-        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(applyOpenRouterBaselines(
+        uiState.vprModelCatalog = withAutoRouterCatalogEntry(applyOpenRouterBaselines(
           projectRowsToVprModelCatalog(uiState.vprRoutableRows, isPricingRowEligible),
           getCachedOpenRouterPrices(),
         ), uiState.vprRoutingPreferences, currentRouterPlugins());
@@ -1694,7 +1696,7 @@ export function initChatModule({
       // "Popular" list can show the struck-through retail price.
       void ensureOpenRouterPrices().then((map) => {
         if (!map) return;
-        uiState.vprModelCatalog = withLevantoAutoCatalogEntry(
+        uiState.vprModelCatalog = withAutoRouterCatalogEntry(
           applyOpenRouterBaselines(uiState.vprModelCatalog, map),
           uiState.vprRoutingPreferences,
           currentRouterPlugins(),
@@ -2039,18 +2041,18 @@ export function initChatModule({
         // chat is explicitly pinned (routeMode 'pinned' always wins, even if
         // the global preference happens to be Auto elsewhere -- reopening a
         // pinned chat must show its own pin, not the unrelated global state),
-        // or whenever the global preference currently isn't Levanto Auto at
+        // or whenever the global preference currently isn't Auto at
         // all. conv.routeMode alone can't gate this: 'auto' also covers the
         // ordinary case of a chat created against one specific real model
         // with no explicit peer pin (soft peer-affinity only) -- that case's
         // conv.service was never the sentinel and matching it here is
         // correct, not a bug. The actual failure mode is narrower: a
-        // genuinely Levanto-Auto conversation's conv.service becomes the
+        // genuinely Auto-routed conversation's conv.service becomes the
         // concrete model that served the last response the moment it gets a
         // first reply, even though the global selection never left Auto --
         // matching THAT here would permanently flip the picker off Auto (see
         // applyChatServiceOptions's isAutoConversation, same bug family).
-        if (conv.routeMode === 'pinned' || !isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+        if (conv.routeMode === 'pinned' || !isAutoRouterSelected(uiState.vprRouteSelection.model)) {
           const preferredValue = findMatchingChatServiceOptionValue(
             optionCandidates,
             conv.service,

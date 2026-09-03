@@ -191,6 +191,7 @@ export type RouterPluginInfo = {
   description: string;
   autoRouteServiceId?: string;
   autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
 };
 
 export type RouterPluginListResult = {
@@ -350,7 +351,10 @@ export type DesktopBridge = {
 
   chatAiListConversations?: () => Promise<{ ok: boolean; data: unknown[] }>;
   chatAiListDiscoverRows?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
+  chatAiListRoutingDecisions?: () => Promise<{ ok: boolean; data?: unknown[]; error?: string }>;
   chatAiGetDayPassPrice?: () => Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }>;
+  chatAiGetDayPassPriceIncrease?: () => Promise<{ ok: boolean; data?: { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null; error?: string }>;
+  chatAiGetRoutingSavingsBaseline?: () => Promise<{ ok: boolean; data?: string | null; error?: string }>;
   chatAiGetConversation?: (id: string) => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiCreateConversation?: (service: string, provider?: string, peerId?: string, routeMode?: 'auto' | 'pinned') => Promise<{ ok: boolean; data?: unknown; error?: string }>;
   chatAiDeleteConversation?: (id: string) => Promise<{ ok: boolean }>;
@@ -371,7 +375,7 @@ export type DesktopBridge = {
   chatAiSelectPeer?: (payload: { conversationId?: string | null; peerId?: string | null; service?: string | null; provider?: string | null; routeMode?: 'auto' | 'pinned' | null }) => Promise<{ ok: boolean; error?: string }>;
   chatSetBuyerDefaultRoute?: (payload: { peerId?: string; service: string }) => Promise<{ ok: boolean; error?: string }>;
   /** Clears the buyer proxy's default route (posts an empty model) -- used
-   *  while Levanto Auto is selected, since it has no fixed peer/model to set
+   *  while Auto routing is selected, since it has no fixed peer/model to set
    *  as the default and `chatSetBuyerDefaultRoute` requires a non-empty one. */
   chatClearBuyerDefaultRoute?: () => Promise<{ ok: boolean; error?: string }>;
   chatSyncModelPicker?: (payload: import('../../shared/model-picker.js').ModelPickerSnapshot) => Promise<{ ok: boolean }>;

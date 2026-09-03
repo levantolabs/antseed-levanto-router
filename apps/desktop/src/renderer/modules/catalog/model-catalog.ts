@@ -7,7 +7,7 @@ import type {
 import { CODING_ONLY_SUFFIX_RE, canonicalModelKey, displayModelLabel, sameCanonicalModel } from './model-identity';
 import { entryMatchText, selectRecommendedVprCatalog } from './recommended';
 import { serviceModelKind } from './model-capabilities';
-import { isLevantoAutoEntry } from '../routing/levanto-auto';
+import { isAutoRouterEntry } from '../routing/auto-router';
 
 const VPR_MODEL_CATALOG_SEPARATOR = '\u0001';
 
@@ -187,7 +187,7 @@ export function selectDefaultVprModel(
   current: VprSelectedModel | null,
   freeRouteReputation: (entry: VprModelCatalogEntry) => number | null =
     (entry) => (entry.hasEligibleFreeSeller ? 0 : null),
-  preferLevantoRouter: boolean = false,
+  preferAutoRouter: boolean = false,
 ): VprSelectedModel | null {
   // Whenever the router is enabled, it's the default for any (re)selection
   // this function makes -- new chats, and a stranded/empty current selection
@@ -195,14 +195,14 @@ export function selectDefaultVprModel(
   // `current` selection outside this function's own two call sites (a live
   // dropdown pick never routes through here at all), so enabling the toggle
   // doesn't retroactively hijack an active conversation's model mid-thread.
-  if (preferLevantoRouter) {
-    const levantoEntry = catalog.find(isLevantoAutoEntry);
-    if (levantoEntry) {
+  if (preferAutoRouter) {
+    const autoRouterEntry = catalog.find(isAutoRouterEntry);
+    if (autoRouterEntry) {
       return {
-        provider: levantoEntry.provider,
-        serviceId: levantoEntry.serviceId,
-        label: levantoEntry.label,
-        categories: [...levantoEntry.categories],
+        provider: autoRouterEntry.provider,
+        serviceId: autoRouterEntry.serviceId,
+        label: autoRouterEntry.label,
+        categories: [...autoRouterEntry.categories],
       };
     }
   }

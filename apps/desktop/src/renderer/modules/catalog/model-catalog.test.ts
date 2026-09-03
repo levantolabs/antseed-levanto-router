@@ -8,7 +8,26 @@ import {
   selectDefaultVprModel,
   sortFreeModelsByPriority,
 } from './model-catalog.js';
-import { withLevantoAutoCatalogEntry } from '../routing/levanto-auto.js';
+import { withAutoRouterCatalogEntry } from '../routing/auto-router.js';
+import type { RouterPluginInfo } from '../../types/bridge.js';
+
+/**
+ * `withAutoRouterCatalogEntry` only adds an Auto entry once a real router
+ * plugin has actually been resolved -- no implicit fallback identity
+ * anymore (runlog 2026-09-0X), so this fixture stands in for "a router
+ * plugin is actually installed" wherever a test needs the entry present.
+ * Just a fixture value, not sourced from production code -- no real caller
+ * needs this literal anymore.
+ */
+const AUTO_ROUTER_SENTINEL_SERVICE_ID = 'levanto-auto';
+const LEVANTO_LIKE_ROUTER: RouterPluginInfo = {
+  package: '@antseed/router-levanto',
+  version: '0.0.1',
+  name: 'levanto',
+  displayName: 'Levanto Router',
+  description: 'test fixture',
+  autoRouteServiceId: AUTO_ROUTER_SENTINEL_SERVICE_ID,
+};
 
 function discoverRow(overrides: Partial<DiscoverRow> = {}): DiscoverRow {
   const peerId = overrides.peerId ?? 'p1';
@@ -173,22 +192,22 @@ test('selectDefaultVprModel falls back to the first sorted catalog entry', () =>
   });
 });
 
-test('selectDefaultVprModel prefers Levanto Router when enabled, ahead of a free model that would otherwise win', () => {
+test('selectDefaultVprModel prefers the auto router when enabled, ahead of a free model that would otherwise win', () => {
   const withFreeModel = projectRowsToVprModelCatalog([
     discoverRow({
       provider: 'openai', serviceId: 'free-mini', serviceLabel: 'Free Mini',
       inputUsdPerMillion: 0, outputUsdPerMillion: 0,
     }),
   ]);
-  const catalog = withLevantoAutoCatalogEntry(withFreeModel, { autoDayPassEnabled: true, selectedRouterPackage: null }, []);
+  const catalog = withAutoRouterCatalogEntry(withFreeModel, { autoDayPassEnabled: true, selectedRouterPackage: LEVANTO_LIKE_ROUTER.package }, [LEVANTO_LIKE_ROUTER]);
 
   const result = selectDefaultVprModel(catalog, null, undefined, true);
 
   assert.equal(result?.provider, 'levanto');
-  assert.equal(result?.serviceId, 'levanto-auto');
+  assert.equal(result?.serviceId, AUTO_ROUTER_SENTINEL_SERVICE_ID);
 });
 
-test('selectDefaultVprModel falls back to normal selection when preferLevantoRouter is true but the entry is absent', () => {
+test('selectDefaultVprModel falls back to normal selection when preferAutoRouter is true but the entry is absent', () => {
   const catalog = projectRowsToVprModelCatalog([
     discoverRow({
       provider: 'openai', serviceId: 'free-mini', serviceLabel: 'Free Mini',

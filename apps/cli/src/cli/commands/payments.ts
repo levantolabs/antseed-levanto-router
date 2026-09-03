@@ -1,9 +1,8 @@
 import type { Command } from 'commander';
 import chalk from 'chalk';
 
-// The payments portal this command used to launch is retired: deposits are
-// now fully in-terminal (`antseed deposit` + automatic gasless sweeping), so
-// `antseed payments` just points at the commands that replaced it.
+// Deposits are handled fully in-terminal (`antseed deposit` + automatic
+// gasless sweeping), so `antseed payments` just points at those commands.
 function printPaymentCommands(): void {
   console.log('');
   console.log(chalk.bold('The payments portal has been retired. Use these commands instead:'));

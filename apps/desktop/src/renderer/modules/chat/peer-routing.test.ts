@@ -5,6 +5,30 @@ import { createInitialUiState } from '../../core/state.js';
 import { initChatModule } from './controller.js';
 import type { DesktopBridge } from '../../types/bridge.js';
 import type { DiscoverRow } from '../../core/state.js';
+import { installedRouterPluginsResource } from '../app/vpr-resources.js';
+import type { RouterPluginInfo } from '../../types/bridge.js';
+
+/**
+ * `withAutoRouterCatalogEntry` (called internally by controller.ts on every
+ * catalog recompute) only recognizes the Auto entry once a real router
+ * plugin has actually been resolved -- no implicit fallback identity
+ * anymore (runlog 2026-09-0X). Seeding the resource's cache directly (not
+ * via a bridge mock + waiting for an async load) keeps every recompute in
+ * this file seeing a real, matching plugin, the same way a real desktop
+ * app with router-levanto actually installed would. Just a fixture value,
+ * not sourced from production code -- no real caller needs this literal
+ * anymore.
+ */
+const AUTO_ROUTER_SENTINEL_SERVICE_ID = 'levanto-auto';
+const LEVANTO_LIKE_ROUTER: RouterPluginInfo = {
+  package: '@antseed/router-levanto',
+  version: '0.0.1',
+  name: 'levanto',
+  displayName: 'Levanto Router',
+  description: 'test fixture',
+  autoRouteServiceId: AUTO_ROUTER_SENTINEL_SERVICE_ID,
+};
+installedRouterPluginsResource.setData([LEVANTO_LIKE_ROUTER]);
 
 const SEP = '\u0001';
 
@@ -1423,8 +1447,8 @@ test('explicit dropdown pick overrides the VPR auto-selected model for a new cha
   const sends: Array<{ conversationId: string; message: string; service?: string; provider?: string; peerId?: string }> = [];
   const api = initChatModule({ bridge: makeChatBridge(sends), uiState, appendSystemLog: () => undefined });
 
-  // The user explicitly picks model-b in the ChatView dropdown; the pick must
-  // win over the VPR default (previously it was silently overridden).
+  // The user explicitly picks model-b in the ChatView dropdown; the pick
+  // must win over the VPR default.
   api.handleServiceChange(`openai${SEP}model-b${SEP}peer-b`);
   api.sendMessage('explicit pick wins');
   await waitFor(() => sends.length === 1);
@@ -1445,10 +1469,10 @@ test('explicit dropdown pick overrides the VPR auto-selected model for a new cha
 test('a discover refresh with only real models never silently rebinds an active Auto selection', async () => {
   installDomTimers();
   const uiState = createInitialUiState();
-  const autoValue = `levanto${SEP}levanto-auto`;
+  const autoValue = `levanto${SEP}${AUTO_ROUTER_SENTINEL_SERVICE_ID}`;
   uiState.chatSelectedServiceValue = autoValue;
   uiState.vprRouteSelection = {
-    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    model: { provider: 'levanto', serviceId: AUTO_ROUTER_SENTINEL_SERVICE_ID, label: 'Levanto Auto', categories: [] },
     mode: 'auto',
     peerId: null,
   };
@@ -1471,7 +1495,7 @@ test('a discover refresh with only real models never silently rebinds an active 
 
   api.sendMessage('still auto after refresh');
   await waitFor(() => sends.length === 1);
-  assert.equal(sends[0]?.service, 'levanto-auto');
+  assert.equal(sends[0]?.service, AUTO_ROUTER_SENTINEL_SERVICE_ID);
   assert.equal(sends[0]?.provider, 'levanto');
 });
 
@@ -1487,7 +1511,7 @@ test('a brand-new conversation with Auto selected sends the sentinel, not whiche
   // through to chatServiceOptions[0], silently sending whatever real peer
   // sorted first while the UI still showed "Levanto Model Router".
   uiState.vprRouteSelection = {
-    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    model: { provider: 'levanto', serviceId: AUTO_ROUTER_SENTINEL_SERVICE_ID, label: 'Levanto Auto', categories: [] },
     mode: 'auto',
     peerId: null,
   };
@@ -1506,7 +1530,7 @@ test('a brand-new conversation with Auto selected sends the sentinel, not whiche
 
   api.sendMessage('first message ever, Auto selected');
   await waitFor(() => sends.length === 1);
-  assert.equal(sends[0]?.service, 'levanto-auto');
+  assert.equal(sends[0]?.service, AUTO_ROUTER_SENTINEL_SERVICE_ID);
   assert.equal(sends[0]?.provider, 'levanto');
   assert.equal(sends[0]?.peerId, undefined);
 });
@@ -1553,7 +1577,7 @@ test('reopening an auto-routed conversation whose service already resolved to a 
   const uiState = createInitialUiState();
   uiState.chatServiceOptions = [chatOption('model-a', 'peer-a')];
   uiState.vprRouteSelection = {
-    model: { provider: 'levanto', serviceId: 'levanto-auto', label: 'Levanto Auto', categories: [] },
+    model: { provider: 'levanto', serviceId: AUTO_ROUTER_SENTINEL_SERVICE_ID, label: 'Levanto Auto', categories: [] },
     mode: 'auto',
     peerId: null,
   };

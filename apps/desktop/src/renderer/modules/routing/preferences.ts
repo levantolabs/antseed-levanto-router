@@ -1,5 +1,6 @@
 import type { VprPeerListing, VprRoutingPreferences, VprRouteSelection } from '../../core/state';
 import type { ModelRoutingPreferences } from '@antseed/node/model-routing';
+import { LEVANTO_ROUTER_PACKAGE } from '../../../shared/router-plugin-defaults.js';
 
 export const VPR_PREFERENCES_STORAGE_KEY = 'antseed.desktop.vpr.preferences';
 export const VPR_ROUTE_SELECTION_STORAGE_KEY = 'antseed.desktop.vpr.routeSelection';
@@ -44,6 +45,16 @@ function readNullableString(value: unknown, fallback: string | null): string | n
 
 function readNonNegativeFiniteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
+/** Seller peer id -> agreed day-pass price (whole USD), dropping any malformed entries rather than the whole map. */
+function readAgreedDayPassPrices(value: unknown, fallback: Record<string, number>): Record<string, number> {
+  if (!isStoredObject(value)) return fallback;
+  const out: Record<string, number> = {};
+  for (const [peerId, price] of Object.entries(value)) {
+    if (typeof price === 'number' && Number.isFinite(price) && price >= 0) out[peerId] = price;
+  }
+  return out;
 }
 
 /** CQT dial (decisions doc SS8.1): only these five discrete positions are valid. */
@@ -130,7 +141,11 @@ export function loadVprRoutingPreferences(fallback: VprRoutingPreferences): VprR
     // day-pass buyer with an Auto entry that resolves to nothing.
     selectedRouterPackage: readNullableString(
       parsed.selectedRouterPackage,
-      fallback.selectedRouterPackage ?? (autoDayPassEnabled ? '@antseed/router-levanto' : null),
+      fallback.selectedRouterPackage ?? (autoDayPassEnabled ? LEVANTO_ROUTER_PACKAGE : null),
+    ),
+    agreedDayPassPricesUsdc: readAgreedDayPassPrices(
+      parsed.agreedDayPassPricesUsdc,
+      fallback.agreedDayPassPricesUsdc ?? {},
     ),
   };
 }
@@ -160,6 +175,7 @@ export function buyerModelRoutingPreferences(
     autoDayPassEnabled: value.autoDayPassEnabled,
     selectedRouterPackage: value.selectedRouterPackage ?? null,
     autoRouting: value.autoRouting,
+    agreedDayPassPricesUsdc: value.agreedDayPassPricesUsdc ?? {},
   };
 }
 

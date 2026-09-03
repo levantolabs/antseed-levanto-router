@@ -13,6 +13,7 @@ import {
   VPR_PREFERENCES_STORAGE_KEY,
   VPR_ROUTE_SELECTION_STORAGE_KEY,
 } from './preferences.js';
+import { LEVANTO_ROUTER_PACKAGE } from '../../../shared/router-plugin-defaults.js';
 
 const fallbackPreferences: VprRoutingPreferences = {
   autoRouting: true,
@@ -83,6 +84,7 @@ test('valid VPR preferences and route selection save and load', () => {
     cqt: 7,
     autoDayPassEnabled: true,
     selectedRouterPackage: '@antseed/router-custom',
+    agreedDayPassPricesUsdc: { cccccccccccccccccccccccccccccccccccccccc: 0.89 },
   };
   const routeSelection: VprRouteSelection = {
     model: {
@@ -102,7 +104,34 @@ test('valid VPR preferences and route selection save and load', () => {
   assert.deepEqual(loadVprRouteSelection(fallbackRouteSelection), routeSelection);
 });
 
-test('buyer config projection includes every field the router-levanto payment gate reads', () => {
+test('agreedDayPassPricesUsdc drops malformed entries instead of the whole map', () => {
+  localStorage.setItem(VPR_PREFERENCES_STORAGE_KEY, JSON.stringify({
+    ...fallbackPreferences,
+    agreedDayPassPricesUsdc: {
+      cccccccccccccccccccccccccccccccccccccccc: 0.89,
+      dddddddddddddddddddddddddddddddddddddddd: 'not-a-number',
+      eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee: -1,
+    },
+  }));
+
+  assert.deepEqual(
+    loadVprRoutingPreferences(fallbackPreferences).agreedDayPassPricesUsdc,
+    { cccccccccccccccccccccccccccccccccccccccc: 0.89 },
+  );
+});
+
+test('agreedDayPassPricesUsdc falls back to the fallback map when nothing is stored', () => {
+  const fallbackWithAgreedPrice: VprRoutingPreferences = {
+    ...fallbackPreferences,
+    agreedDayPassPricesUsdc: { cccccccccccccccccccccccccccccccccccccccc: 1.2 },
+  };
+  assert.deepEqual(
+    loadVprRoutingPreferences(fallbackWithAgreedPrice).agreedDayPassPricesUsdc,
+    { cccccccccccccccccccccccccccccccccccccccc: 1.2 },
+  );
+});
+
+test('buyer config projection includes every field an installed router plugin\'s payment gate reads', () => {
   assert.deepEqual(buyerModelRoutingPreferences(fallbackPreferences), {
     preferFreePeers: fallbackPreferences.preferFreePeers,
     maxInputUsdPerMillion: fallbackPreferences.maxInputUsdPerMillion,
@@ -113,10 +142,11 @@ test('buyer config projection includes every field the router-levanto payment ga
     autoDayPassEnabled: fallbackPreferences.autoDayPassEnabled,
     selectedRouterPackage: null,
     autoRouting: fallbackPreferences.autoRouting,
+    agreedDayPassPricesUsdc: {},
   });
 });
 
-test('buyer config projection forwards autoRouting -- router-levanto\'s signSubscriptionOnDemand also gates real-money signing on this', () => {
+test('buyer config projection forwards autoRouting -- an installed router\'s real-money signing can gate on this too', () => {
   // Regression: a buyer trying to stop day-pass billing reasonably
   // reached for the "Auto select seller" switch instead of the separate
   // control that owns autoDayPassEnabled, and billing kept running
@@ -139,7 +169,7 @@ test('preferences saved before selectedRouterPackage existed default it to route
     VPR_PREFERENCES_STORAGE_KEY,
     JSON.stringify({ ...fallbackPreferences, autoDayPassEnabled: true }),
   );
-  assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, '@antseed/router-levanto');
+  assert.equal(loadVprRoutingPreferences(fallbackPreferences).selectedRouterPackage, LEVANTO_ROUTER_PACKAGE);
 });
 
 test('preferences saved before selectedRouterPackage existed stay unselected when autoDayPassEnabled was never on', () => {

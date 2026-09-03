@@ -6,9 +6,10 @@ import { peerAccessSummaryLabel } from '../../../modules/routing/peer-access';
 import { buildVprPeerOptions } from '../../../modules/routing/tools';
 import { reputationScaleLabel, sellerMetaLabel, sellerReputationLabel } from '../../../modules/catalog/seller-format';
 import { CQT_LABELS, cqtToPositionIndex, positionIndexToCqt } from '../../../modules/routing/cqt';
-import { AUTO_DAY_PASS_MIN_TRUST_SCORE } from '../../../modules/routing/levanto-auto';
+import { AUTO_DAY_PASS_MIN_TRUST_SCORE } from '../../../modules/routing/auto-router';
+import { LEVANTO_ROUTER_PACKAGE } from '../../../../shared/router-plugin-defaults.js';
 import { useCachedResource } from '../../../modules/app/cached-resource';
-import { installedRouterPluginsResource } from '../../../modules/app/vpr-resources';
+import { dayPassPriceIncreaseResource, installedRouterPluginsResource } from '../../../modules/app/vpr-resources';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
 import { activeThemeMode, applyThemeMode, type ThemeMode } from '../../lib/theme';
@@ -24,7 +25,6 @@ type Props = { onSelectView?: (view: import('../../types').ViewName) => void };
 
 const TELEMETRY_DOC_URL = 'https://github.com/AntSeed/antseed/blob/main/docs/telemetry.md';
 
-const LEVANTO_ROUTER_PACKAGE = '@antseed/router-levanto';
 const GENERIC_ROUTER_DESCRIPTION = 'Select an auto model router to optimise your spend and performance.';
 const LEVANTO_ROUTER_DESCRIPTION = 'The router picks the best model and seller for every message, balancing '
   + 'cost against quality.';
@@ -74,6 +74,28 @@ export function VprPreferencesView({ onSelectView }: Props) {
   const [pendingRouterPlugin, setPendingRouterPlugin] = useState<RouterPluginInfo | null>(null);
   const { data: routerPlugins } = useCachedResource(installedRouterPluginsResource);
   const availableRouters = routerPlugins ?? [];
+
+  // Reopens the router info dialog on its own once the connect daemon
+  // reports it's capping the active seller's day-pass signing below what
+  // it's actually advertising (day-pass-signing.ts's onPriceCappedChange) --
+  // so re-confirming a price increase doesn't require the buyer to notice a
+  // failed chat request first. Trusts that a currently-active notice is
+  // about whichever router is actually selected, since only one router/
+  // seller relationship is ever active at a time in this app; doesn't
+  // reopen while some other pick is already pending confirmation.
+  const { data: priceIncreaseNotice } = useCachedResource(dayPassPriceIncreaseResource);
+  useEffect(() => {
+    if (!priceIncreaseNotice || pendingRouterPlugin) return;
+    if (!snap.preferences.autoDayPassEnabled || !snap.preferences.selectedRouterPackage) return;
+    const activePlugin = availableRouters.find((r) => r.package === snap.preferences.selectedRouterPackage);
+    if (activePlugin) setPendingRouterPlugin(activePlugin);
+  }, [
+    priceIncreaseNotice,
+    pendingRouterPlugin,
+    snap.preferences.autoDayPassEnabled,
+    snap.preferences.selectedRouterPackage,
+    availableRouters,
+  ]);
 
   const peerOptions = useMemo(
     () => buildVprPeerOptions(snap.lastPeers, snap.discoverRows),
@@ -386,13 +408,27 @@ export function VprPreferencesView({ onSelectView }: Props) {
         isOpen={pendingRouterPlugin !== null}
         plugin={pendingRouterPlugin}
         onClose={() => setPendingRouterPlugin(null)}
-        onConfirm={() => {
+        onConfirm={(offer) => {
           if (!pendingRouterPlugin) return;
           actions.updateVprRoutingPreferences({
             autoDayPassEnabled: true,
             selectedRouterPackage: pendingRouterPlugin.package,
             ...(snap.preferences.minTrustScore < AUTO_DAY_PASS_MIN_TRUST_SCORE
               ? { minTrustScore: AUTO_DAY_PASS_MIN_TRUST_SCORE }
+              : {}),
+            // Records this as the buyer's agreed price for this seller --
+            // day-pass signing must never exceed it until explicitly
+            // re-confirmed here again. No peerId/price means the routing
+            // peer isn't currently advertising one; nothing to record yet,
+            // day-pass-signing.ts's own first-signature bootstrap will
+            // record whatever the live price turns out to be instead.
+            ...(offer?.peerId && typeof offer.flatUsdPrice === 'number'
+              ? {
+                agreedDayPassPricesUsdc: {
+                  ...snap.preferences.agreedDayPassPricesUsdc,
+                  [offer.peerId]: offer.flatUsdPrice,
+                },
+              }
               : {}),
           });
           setPendingRouterPlugin(null);

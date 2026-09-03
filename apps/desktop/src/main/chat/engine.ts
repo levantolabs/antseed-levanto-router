@@ -479,9 +479,30 @@ export function registerPiChatHandlers({
     };
   });
 
+  ipcMain.handle('chat:ai-list-routing-decisions', async () => {
+    // routing_decisions local ledger (model-routing software-architecture
+    // doc SS2.5), for VPR's savings dashboard (decisions doc SS4.5). Proxies
+    // straight to buyer-proxy's own /_antseed/routing-decisions -- same
+    // localhost-fetch pattern as /_antseed/metering and /_antseed/route
+    // above, no new transport. Empty rows (not an error) whenever the
+    // registered router doesn't implement getRoutingDecisions (e.g. the
+    // default router-local) or the buyer runtime isn't up yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: [] };
+      const body = await response.json() as { ok?: boolean; rows?: unknown[] };
+      return { ok: true, data: Array.isArray(body.rows) ? body.rows : [] };
+    } catch {
+      return { ok: true, data: [] };
+    }
+  });
+
   ipcMain.handle('chat:ai-get-day-pass-price', async () => {
     // The real, live-advertised `type: 'day-pass'` price (model-routing
-    // decisions doc SS13 item 6), for the Levanto Auto Preferences toggle's
+    // decisions doc SS13 item 6), for the Auto-routing Preferences toggle's
     // disclosure copy. Localhost-fetch to the buyer-proxy -- no new
     // transport. `null` (not an error) whenever no routing peer has been
     // discovered yet or none advertises a day-pass price; the toggle falls
@@ -494,6 +515,45 @@ export function registerPiChatHandlers({
       if (!response.ok) return { ok: true, data: null };
       const body = await response.json() as { ok?: boolean; offer?: { peerId?: string; flatUsdPrice?: number } | null };
       return { ok: true, data: body.offer ?? null };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle('chat:ai-get-day-pass-price-increase', async () => {
+    // Whether the connect daemon is currently capping some seller's
+    // day-pass signing below what it's actually advertising (buyer-proxy's
+    // own /_antseed/day-pass-price-increase, sourced from
+    // day-pass-signing.ts's onPriceCappedChange). `null` (not an error)
+    // whenever nothing is currently capped or the daemon isn't reachable --
+    // the caller just doesn't reopen the router dialog in that case.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/day-pass-price-increase`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: null };
+      const body = await response.json() as { ok?: boolean; notice?: { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null };
+      return { ok: true, data: body.notice ?? null };
+    } catch {
+      return { ok: true, data: null };
+    }
+  });
+
+  ipcMain.handle('chat:ai-get-routing-savings-baseline', async () => {
+    // The model id last chosen in the savings dashboard's baseline dropdown
+    // (apps/cli/src/proxy/buyer-proxy.ts's `_savingsBaselineModel`), so the
+    // Profile view's "Auto-routing savings" text compares against the same
+    // model the user picked there instead of silently using its own default.
+    // `null` (not an error) whenever no explicit choice has been made yet.
+    try {
+      const port = await resolveProxyPort(configPath);
+      const response = await fetch(`${LOCALHOST_URL}:${port}/_antseed/routing-decisions/baseline`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (!response.ok) return { ok: true, data: null };
+      const body = await response.json() as { ok?: boolean; baseline?: string | null };
+      return { ok: true, data: body.baseline ?? null };
     } catch {
       return { ok: true, data: null };
     }
@@ -1072,7 +1132,7 @@ export function registerPiChatHandlers({
     return { ok: true };
   });
 
-  // Levanto Auto has no fixed peer/model to post as the default route --
+  // Auto routing has no fixed peer/model to post as the default route --
   // `setBuyerDefaultRoute` above correctly declines to update it while Auto
   // is selected, but "decline to update" leaves whatever concrete route was
   // set before Auto was chosen sitting there indefinitely, since nothing

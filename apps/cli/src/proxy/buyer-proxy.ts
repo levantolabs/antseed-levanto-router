@@ -13,6 +13,7 @@ import {
   decodeSweepRequest,
   faultAttributionOf,
   faultCodeOf,
+  getOpenRouterReferencePrices,
   isModelRouteEligible,
   modelRouteTotalPrice,
   peerSupportsCooperativeClose,
@@ -106,6 +107,7 @@ import { PeerAttributionTracker, HEARTBEAT_MS } from './peer-attribution.js'
 import { estimateAnthropicPromptTokens, isCountTokensPath } from './count-tokens.js'
 import { getCachedVerdict, runVerifier, verifierSupportFingerprint, type CachedVerdict, type VerifierPolicy, type SellerReach, type VerifyOutcome } from '../plugins/verifier.js'
 import { loadConfig } from '../config/loader.js'
+import { BAKED_COMPARABLE_PRICES_URL } from '../generated/baked-defaults.js'
 
 // Re-export for backward compatibility (used by tests and other consumers)
 export { selectCandidatePeersForRouting, type CandidatePeerRouteSelection } from './routing.js'
@@ -114,8 +116,7 @@ export { parsePeerPinnedService, rewritePeerPinnedServiceInBody, substituteRoute
 /**
  * Why this daemon runs no hot-wallet deposit watcher — surfaced on
  * `/_antseed/deposits/status` so UIs can name the actual cause instead of
- * guessing (a missing watcher used to be indistinguishable from "this chain
- * has no deposit relay").
+ * guessing.
  */
 export type DepositWatcherAbsenceReason = 'external-daemon' | 'payments-disabled' | 'no-deposit-relay'
 
@@ -158,11 +159,22 @@ export interface BuyerProxyConfig {
   verifier?: VerifierPolicy
   /**
    * The active router plugin's short id (`AntseedRouterPlugin.name`, e.g.
-   * `levanto`) -- title-cased for display on the routing-savings dashboard
+   * `acme`) -- title-cased for display on the routing-savings dashboard
    * (`GET /_antseed/routing-decisions/dashboard`), e.g. "Model-routing
-   * savings (Levanto)". Undefined falls back to a generic title.
+   * savings (Acme)". Undefined falls back to a generic title.
    */
   routerName?: string
+  /**
+   * Live read of whatever day-pass-signing.ts's `onPriceCappedChange` most
+   * recently reported (`null` when no seller's live price is currently
+   * being capped) -- exposed via `GET /_antseed/day-pass-price-increase` so
+   * the desktop app can poll it and reopen its router info dialog on its
+   * own, without the user having to notice a failed request first. A
+   * getter, not a plain value, since day-pass-signing.ts's signing cycle
+   * (which produces this) runs entirely independently of any single HTTP
+   * request this proxy handles.
+   */
+  getDayPassPriceIncreaseNotice?: () => { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null
 }
 
 // 401/403 are included: sellers relay upstream auth failures (revoked or
@@ -765,6 +777,7 @@ export class BuyerProxy {
   private readonly _stateFile: string
   private readonly _configPath: string | null
   private readonly _routerName: string | undefined
+  private readonly _getDayPassPriceIncreaseNotice: (() => { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null) | undefined
   private _stateFileWatching = false
   private _configFileWatching = false
   private _pinnedPeer: string | null
@@ -862,6 +875,7 @@ export class BuyerProxy {
     this._stateFile = join(config.dataDir, 'buyer.state.json')
     this._configPath = config.configPath ?? null
     this._routerName = config.routerName
+    this._getDayPassPriceIncreaseNotice = config.getDayPassPriceIncreaseNotice
     this._conversations = new ConversationStore(config.dataDir)
     this._pinnedPeer = config.pinnedPeerId?.toLowerCase() ?? null
     this._routingPreferences = config.routingPreferences
@@ -1992,12 +2006,9 @@ export class BuyerProxy {
     }
 
     if (path === '/_antseed/router-name' && method === 'GET') {
-      // The active router plugin's short id, so a host that renders the
-      // savings dashboard elsewhere (apps/payments' portal, since the
-      // dashboard itself no longer lives on this control-plane origin --
-      // see the removed /_antseed/routing-decisions/dashboard route) can
-      // still title it "Model-routing savings (Levanto)" instead of the
-      // generic fallback.
+      // The active router plugin's short id, so a host rendering the
+      // savings dashboard elsewhere (apps/payments' portal) can title it
+      // "Model-routing savings (Acme)" instead of the generic fallback.
       res.writeHead(200, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: true, routerName: this._routerName ?? null }))
       return
@@ -2005,9 +2016,9 @@ export class BuyerProxy {
 
     if (path === '/_antseed/day-pass-price' && method === 'GET') {
       // Generic read of any discovered peer's advertised `type: 'day-pass'`
-      // offer (model-routing decisions doc SS13 item 6) -- for the Levanto
-      // Auto Preferences toggle to show a real, live daily price instead of
-      // a bare "starts a day pass" with no number. `null` (not an
+      // offer (model-routing decisions doc SS13 item 6) -- for a router
+      // plugin's Auto Preferences toggle to show a real, live daily price
+      // instead of a bare "starts a day pass" with no number. `null` (not an
       // error) whenever no such offer has been discovered yet -- a buyer who
       // hasn't found a routing peer over the network, or one advertising
       // nothing, sees the generic copy rather than a broken price.
@@ -2018,6 +2029,47 @@ export class BuyerProxy {
         ok: true,
         offer: offer ? { peerId: offer.peerId, flatUsdPrice: offer.flatUsdPrice } : null,
       }))
+      return
+    }
+
+    if (path === '/_antseed/day-pass-price-increase' && method === 'GET') {
+      // Whether day-pass-signing.ts is currently capping some seller's
+      // signing at a price below what it's actually advertising -- lets a
+      // host UI (desktop's router info dialog) reopen itself on its own the
+      // moment this becomes true, instead of the buyer only finding out
+      // once a routed request happens to fail. `null` (not an error)
+      // whenever nothing is currently capped.
+      const notice = this._getDayPassPriceIncreaseNotice?.() ?? null
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, notice }))
+      return
+    }
+
+    if (path.startsWith('/_antseed/openrouter-reference-prices') && method === 'GET') {
+      // Retail-price comparison for the savings dashboard's "vs OpenRouter"
+      // figure (model-routing architecture doc SS4.6) -- kept separate from
+      // routing_decisions' own baselinePrices (AntSeed's own network price),
+      // since conflating the two would credit the router for savings that
+      // actually come from AntSeed's marketplace undercutting OpenRouter
+      // retail. Resolved server-side (not exposing the raw canonical map)
+      // so the dashboard's client-side JS never needs to replicate
+      // canonicalModelKey's normalization rules itself.
+      const url = new URL(path, 'http://localhost')
+      const requested = (url.searchParams.get('models') ?? '').split(',').map((m) => m.trim()).filter(Boolean)
+      // Same baked-default file `antseed buyer activity`'s Saved tile already
+      // reads (apps/cli/src/cli/commands/buyer/activity.ts) -- null for a
+      // from-source build, a real URL once scripts/bake-comparable-prices-url.mjs
+      // has run for a release. ANTSEED_COMPARABLE_PRICES_URL always overrides it.
+      const referenceMap = await getOpenRouterReferencePrices(BAKED_COMPARABLE_PRICES_URL)
+      const prices: Record<string, { inUsdPerM: number | null; outUsdPerM: number | null; cachedInUsdPerM: number | null } | null> = {}
+      for (const model of requested) {
+        const ref = referenceMap[canonicalModelKey(model)]
+        prices[model] = ref
+          ? { inUsdPerM: ref.input, outUsdPerM: ref.output, cachedInUsdPerM: ref.cachedInput }
+          : null
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true, prices }))
       return
     }
 
@@ -3360,8 +3412,8 @@ export class BuyerProxy {
           })
           // Cache "warmth" feed (model-routing software-arch doc SS4.3) --
           // not part of the generic onResult() shape above, since most
-          // routers have no use for it; router-levanto's own extension,
-          // called only when it implements it.
+          // routers have no use for it; an optional per-plugin extension,
+          // called only when a router implements it.
           if (conversation && requestedService) {
             router.recordObservedCache?.(
               conversation,
@@ -3473,8 +3525,8 @@ export class BuyerProxy {
           })
           // Cache "warmth" feed (model-routing software-arch doc SS4.3) --
           // not part of the generic onResult() shape above, since most
-          // routers have no use for it; router-levanto's own extension,
-          // called only when it implements it.
+          // routers have no use for it; an optional per-plugin extension,
+          // called only when a router implements it.
           if (conversation && requestedService) {
             router.recordObservedCache?.(
               conversation,

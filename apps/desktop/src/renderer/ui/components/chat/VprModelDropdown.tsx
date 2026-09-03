@@ -12,7 +12,7 @@ import {
   selectFavoriteVprCatalog,
   selectRecommendedVprCatalog,
 } from '../../../modules/catalog/recommended';
-import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { isAutoRouterEntry } from '../../../modules/routing/auto-router';
 import { BrandIcon } from '../brand/BrandIcon';
 import styles from './VprModelDropdown.module.scss';
 
@@ -83,17 +83,17 @@ export function VprModelDropdown({
     [catalog, kind],
   );
 
-  // "Levanto Auto" (decisions doc SS4.3) gets its own dedicated slot above
+  // The Auto entry (decisions doc SS4.3) gets its own dedicated slot above
   // Favorites/Recommended, not mixed into the curated lineup below -- it's a
   // flat day pass, not one model priced across N sellers, so it's pulled
   // out before the ranking/favoriting logic (built for real catalog entries)
   // ever sees it.
   const autoEntry = useMemo(
-    () => modeCatalog.find(isLevantoAutoEntry) ?? null,
+    () => modeCatalog.find(isAutoRouterEntry) ?? null,
     [modeCatalog],
   );
   const rankableCatalog = useMemo(
-    () => modeCatalog.filter((entry) => !isLevantoAutoEntry(entry)),
+    () => modeCatalog.filter((entry) => !isAutoRouterEntry(entry)),
     [modeCatalog],
   );
 
@@ -109,7 +109,7 @@ export function VprModelDropdown({
     const top = (kind === 'image' ? rankableCatalog : selectRecommendedVprCatalog(rankableCatalog))
       .filter((entry) => !favorites.has(catalogEntryKey(entry)))
       .slice(0, kind === 'image' ? rankableCatalog.length : TOP_MODEL_COUNT);
-    if (selectedEntry?.kind === kind && !isLevantoAutoEntry(selectedEntry) && !top.includes(selectedEntry) && !favoriteEntries.includes(selectedEntry)) {
+    if (selectedEntry?.kind === kind && !isAutoRouterEntry(selectedEntry) && !top.includes(selectedEntry) && !favoriteEntries.includes(selectedEntry)) {
       return [selectedEntry, ...top.slice(0, TOP_MODEL_COUNT - 1)];
     }
     return top;
@@ -167,7 +167,7 @@ export function VprModelDropdown({
     );
   }
 
-  function renderLevantoAutoEntry(entry: VprModelCatalogEntry) {
+  function renderAutoRouterEntry(entry: VprModelCatalogEntry) {
     const active = isSelected(entry, selectedProvider, selectedServiceId);
     return (
       <button
@@ -212,7 +212,7 @@ export function VprModelDropdown({
       </button>
       {open && (
         <div className={styles.modelDropdownMenu} role="listbox">
-          {autoEntry && renderLevantoAutoEntry(autoEntry)}
+          {autoEntry && renderAutoRouterEntry(autoEntry)}
           {favoriteEntries.length > 0 && (
             <>
               <div className={styles.modelDropdownSection}>

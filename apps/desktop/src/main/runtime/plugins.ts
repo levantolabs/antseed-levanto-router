@@ -198,12 +198,13 @@ export async function listInstalledPlugins(): Promise<InstalledPlugin[]> {
 export type RouterPluginMetadata = {
   package: string;
   version: string;
-  /** The plugin's own short `name` (AntseedPluginBase.name, e.g. 'levanto') -- used as the synthetic auto-route catalog entry's `provider` so a stored selection survives this metadata becoming plugin-driven. */
+  /** The plugin's own short `name` (AntseedPluginBase.name, e.g. 'acme-router') -- used as the synthetic auto-route catalog entry's `provider` so a stored selection survives this metadata becoming plugin-driven. */
   name: string;
   displayName: string;
   description: string;
   autoRouteServiceId?: string;
   autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
   configSchema?: ConfigField[];
 };
 
@@ -242,6 +243,7 @@ export async function listInstalledRouterPluginMetadata(): Promise<RouterPluginM
         description: plugin.description,
         autoRouteServiceId: plugin.autoRouteServiceId,
         autoRouteInfo: plugin.autoRouteInfo,
+        savingsBaselineModel: plugin.savingsBaselineModel,
         configSchema: plugin.configSchema,
       });
     } catch {

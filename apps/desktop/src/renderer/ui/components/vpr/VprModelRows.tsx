@@ -3,7 +3,7 @@ import { HugeiconsIcon } from '@hugeicons/react';
 import { ArrowRight01Icon, Settings02Icon, StarIcon, Tick02Icon } from '@hugeicons/core-free-icons';
 import type { VprModelCatalogEntry } from '../../../core/state';
 import { favoriteModelKey } from '../../../modules/catalog/favorites';
-import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { isAutoRouterEntry } from '../../../modules/routing/auto-router';
 import { sameCanonicalModel } from '../../../modules/catalog/model-identity';
 import { modelCapabilitySummary } from '../../../modules/catalog/model-capabilities';
 import { modelTagsFor } from '../../../modules/catalog/model-metadata';
@@ -96,7 +96,7 @@ function ModelRow({ entry, checked, favorite, badge, compact, dense, chevron = t
   // A simplified row instead: icon + name + the same one-line explainer used
   // in the chat composer's own dropdown (VprModelDropdown.tsx), no
   // price/peer/discount/capability content that doesn't apply to it.
-  if (isLevantoAutoEntry(entry)) {
+  if (isAutoRouterEntry(entry)) {
     return (
       <button
         type="button"

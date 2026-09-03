@@ -93,6 +93,7 @@ type RouterPluginInfo = {
   description: string;
   autoRouteServiceId?: string;
   autoRouteInfo?: { title: string; body: string };
+  savingsBaselineModel?: string;
 };
 
 type RouterPluginListResult = {
@@ -292,8 +293,17 @@ const api = {
   chatAiListDiscoverRows(): Promise<{ ok: boolean; data?: unknown[]; error?: string }> {
     return ipcRenderer.invoke('chat:ai-list-discover-rows');
   },
+  chatAiListRoutingDecisions(): Promise<{ ok: boolean; data?: unknown[]; error?: string }> {
+    return ipcRenderer.invoke('chat:ai-list-routing-decisions');
+  },
   chatAiGetDayPassPrice(): Promise<{ ok: boolean; data?: { peerId?: string; flatUsdPrice?: number } | null; error?: string }> {
     return ipcRenderer.invoke('chat:ai-get-day-pass-price');
+  },
+  chatAiGetDayPassPriceIncrease(): Promise<{ ok: boolean; data?: { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null; error?: string }> {
+    return ipcRenderer.invoke('chat:ai-get-day-pass-price-increase');
+  },
+  chatAiGetRoutingSavingsBaseline(): Promise<{ ok: boolean; data?: string | null; error?: string }> {
+    return ipcRenderer.invoke('chat:ai-get-routing-savings-baseline');
   },
   chatAiDeleteConversation(id: string): Promise<{ ok: boolean }> {
     return ipcRenderer.invoke('chat:ai-delete-conversation', id);

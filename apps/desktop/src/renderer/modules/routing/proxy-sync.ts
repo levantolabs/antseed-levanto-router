@@ -4,7 +4,7 @@ import { chooseBestVprRoute } from './select';
 import { routesForSelectedModel } from '../catalog/view-models';
 import { CODING_ONLY_SUFFIX_RE } from '../catalog/model-identity';
 import { activeProfilesFromRuntimeState, buildVprPeerOptions } from './tools';
-import { isLevantoAutoSelected } from './levanto-auto';
+import { isAutoRouterSelected } from './auto-router';
 
 declare const __ANTSEED_SYSTEM_PROXY_PORT__: number;
 
@@ -31,14 +31,15 @@ function resolveRouteTarget(uiState: RendererUiState): VprRouteTarget | null {
   const selection = uiState.vprRouteSelection;
   if (!selection.model) return null;
   // Auto has no real advertised service and must never resolve to a
-  // peer-pinned default route -- `LevantoRouter.selectRoute` makes this
-  // conversation's routing decision itself, per real request. Without this
-  // guard, a stale `mode: 'pinned-peer'` selection left over from an earlier
-  // explicit peer pin (selection.model already back to the Auto sentinel)
-  // falls through this function's peerId fallback below and posts a bogus
-  // `<peerId>@levanto-auto` default route, which every peer correctly
-  // rejects as "Service levanto-auto is not served by this peer".
-  if (isLevantoAutoSelected(selection.model)) return null;
+  // peer-pinned default route -- the active router plugin's own
+  // `selectRoute` makes this conversation's routing decision itself, per
+  // real request. Without this guard, a stale `mode: 'pinned-peer'`
+  // selection left over from an earlier explicit peer pin (selection.model
+  // already back to the Auto sentinel) falls through this function's
+  // peerId fallback below and posts a bogus `<peerId>@<sentinel>` default
+  // route, which every peer correctly rejects as "Service <sentinel> is
+  // not served by this peer".
+  if (isAutoRouterSelected(selection.model)) return null;
   const selectedEntry = uiState.vprModelCatalog.find((entry) => (
     entry.provider === selection.model?.provider && entry.serviceId === selection.model.serviceId
   ));
@@ -113,7 +114,7 @@ async function startProfilesOnRoute(
  * main dedupes repeat values and the buyer proxy may not be running yet, so
  * this is safe to call from polling refreshes.
  *
- * Levanto Auto has no fixed peer/model `resolveRouteTarget` can return, so it
+ * Auto routing has no fixed peer/model `resolveRouteTarget` can return, so it
  * actively clears the route instead of merely skipping the update -- without
  * this, a route set before Auto was selected (or written by the null-selection
  * auto-fill's free-model fallback) sits there indefinitely, and the `antseed`
@@ -133,7 +134,7 @@ export async function syncBuyerDefaultRoute(
     if (generation !== routeSyncGeneration) return;
     const target = resolveRouteTarget(uiState);
     if (!target) {
-      if (isLevantoAutoSelected(uiState.vprRouteSelection.model)) {
+      if (isAutoRouterSelected(uiState.vprRouteSelection.model)) {
         await bridge.chatClearBuyerDefaultRoute?.().catch(() => undefined);
       }
       return;

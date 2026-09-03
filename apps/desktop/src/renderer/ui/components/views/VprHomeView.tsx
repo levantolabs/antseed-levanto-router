@@ -26,10 +26,11 @@ import {
   selectFavoriteVprCatalog,
   selectRecommendedVprCatalog,
 } from '../../../modules/catalog/recommended';
-import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { isAutoRouterEntry, AUTO_ROUTER_LABEL } from '../../../modules/routing/auto-router';
 import { selectDefaultVprModel } from '../../../modules/catalog/model-catalog';
 import { connectVprProfile } from '../../../modules/routing/proxy-sync';
-import { buyerConversationsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
+import { computeRouterSavings } from '../../../modules/routing/router-savings';
+import { buyerConversationsResource, routingDecisionsResource, systemProxyResource } from '../../../modules/app/vpr-resources';
 import { useCachedResource } from '../../../modules/app/cached-resource';
 import { shallowEqual, useUiSelector } from '../../hooks/useUiSelector';
 import { useActions } from '../../hooks/useActions';
@@ -118,7 +119,7 @@ export function VprHomeView({ onSelectView }: Props) {
 
   const runtimeOn = snap.processes.some((process) => process.mode === 'connect' && process.running === true);
 
-  // Levanto Router is now selectable from this "model for new chats" card
+  // The Auto router is now selectable from this "model for new chats" card
   // too, the same as the chat model picker -- both surfaces share the same
   // underlying vprRouteSelection state (there is deliberately no separate
   // copy of it for this page), so no extra plumbing is needed beyond no
@@ -126,7 +127,7 @@ export function VprHomeView({ onSelectView }: Props) {
   const rawSelectedModel = snap.selection.model;
   const selectedModel = useMemo(() => {
     // No selection at all yet (e.g. before any chat has ever set the shared
-    // vprRouteSelection) -- default to Levanto Auto when enabled, same as
+    // vprRouteSelection) -- default to Auto routing when enabled, same as
     // controller.ts's own new-chat defaulting, so this card never shows
     // "nothing selected" while a real default is available.
     if (!rawSelectedModel) {
@@ -136,7 +137,7 @@ export function VprHomeView({ onSelectView }: Props) {
     }
     // A stale Auto selection left over from before the router was disabled --
     // fall back to a real model instead of showing a now-unusable sentinel.
-    if (isLevantoAutoEntry(rawSelectedModel) && !snap.autoDayPassEnabled) {
+    if (isAutoRouterEntry(rawSelectedModel) && !snap.autoDayPassEnabled) {
       return selectDefaultVprModel(snap.catalog, null);
     }
     return rawSelectedModel;
@@ -219,6 +220,18 @@ export function VprHomeView({ onSelectView }: Props) {
   }, [snap.catalog]);
   const expectedSavingsPct = measuredSavings?.pct ?? projectedSavingsPct;
 
+  // Router savings (decisions doc SS4.5): a second, separate figure scoped to
+  // Auto-routed requests specifically -- shown alongside "AntSeed savings"
+  // above, never combined into it, per SS4.6's three-tier diagram ("both
+  // numbers shown together... otherwise the router looks responsible for
+  // savings that actually come from AntSeed's marketplace"). Absent entirely
+  // (not zero) for a buyer who has never used Auto routing.
+  const routingDecisions = useCachedResource(routingDecisionsResource, true).data;
+  const routerSavings = useMemo(
+    () => computeRouterSavings(routingDecisions ?? undefined),
+    [routingDecisions],
+  );
+
   // The usage tiles come from the payments summary; nudge a refresh when the
   // connected variant becomes visible (module-level throttle absorbs bursts).
   const hasConnectedApps = connectedProfiles.length > 0;
@@ -288,7 +301,7 @@ export function VprHomeView({ onSelectView }: Props) {
     // entered `top` at all via scoring, and the old "hoist selected to
     // front" step only ever surfaces whatever IS selected, so Auto simply
     // never appeared in the list).
-    const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text' && !isLevantoAutoEntry(entry));
+    const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text' && !isAutoRouterEntry(entry));
     const favoriteEntries = selectFavoriteVprCatalog(textCatalog, favorites);
     const recommended = selectRecommendedVprCatalog(textCatalog)
       .filter((entry) => !favorites.has(catalogEntryKey(entry)));
@@ -311,10 +324,10 @@ export function VprHomeView({ onSelectView }: Props) {
     // or not it's the current selection -- inserted right after scoring,
     // before the "selected leads" step below, so a real selection still
     // takes the lead slot over it.
-    const levantoAutoEntry = snap.catalog.find(isLevantoAutoEntry);
+    const autoRouterEntry = snap.catalog.find(isAutoRouterEntry);
     let result = top;
-    if (levantoAutoEntry && !result.includes(levantoAutoEntry)) {
-      result = [levantoAutoEntry, ...result.slice(0, DROPDOWN_MODEL_COUNT - 1)];
+    if (autoRouterEntry && !result.includes(autoRouterEntry)) {
+      result = [autoRouterEntry, ...result.slice(0, DROPDOWN_MODEL_COUNT - 1)];
     }
     // The selected model leads, matching the Models page — hoisted when it is
     // already listed, prepended when it isn't.
@@ -601,6 +614,19 @@ export function VprHomeView({ onSelectView }: Props) {
             )
             : formatSavedUsd(0)}
         />
+        {routerSavings && (
+          <VprStatTile
+            label="Router savings"
+            value={(
+              <span
+                className={styles.savingValue}
+                title={`${AUTO_ROUTER_LABEL} vs retail: paid $${routerSavings.actualUsd.toFixed(2)} for routed usage worth $${routerSavings.baselineUsd.toFixed(2)} at retail reference prices`}
+              >
+                {formatSavedUsd(routerSavings.baselineUsd - routerSavings.actualUsd)}
+              </span>
+            )}
+          />
+        )}
       </VprStatRow>
     </div>
   );

@@ -2,7 +2,28 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 import { createInitialUiState, type DiscoverRow, type VprRouteSelection } from '../../core/state.js';
 import { buyerDefaultRoutePayload, syncBuyerDefaultRoute, type VprRouteTarget } from './proxy-sync.js';
-import { currentAutoRouteEntry } from './levanto-auto.js';
+import { currentAutoRouteEntry, withAutoRouterCatalogEntry } from './auto-router.js';
+import type { RouterPluginInfo } from '../../types/bridge.js';
+
+/**
+ * `currentAutoRouteEntry`/`isAutoRouterSelected` only recognize an Auto
+ * entry once a real router plugin has actually been resolved -- no implicit
+ * fallback identity anymore (runlog 2026-09-0X), so this file seeds one
+ * explicitly instead of relying on a default.
+ */
+const LEVANTO_LIKE_ROUTER: RouterPluginInfo = {
+  package: '@antseed/router-levanto',
+  version: '0.0.1',
+  name: 'levanto',
+  displayName: 'Levanto Router',
+  description: 'test fixture',
+  autoRouteServiceId: 'levanto-auto',
+};
+withAutoRouterCatalogEntry(
+  [],
+  { autoDayPassEnabled: true, selectedRouterPackage: LEVANTO_LIKE_ROUTER.package },
+  [LEVANTO_LIKE_ROUTER],
+);
 
 const model = {
   provider: 'openai',

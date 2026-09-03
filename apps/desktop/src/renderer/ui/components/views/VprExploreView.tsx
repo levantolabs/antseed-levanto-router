@@ -42,7 +42,7 @@ import { BrandIcon } from '../brand/BrandIcon';
 import { VprFilterDropdown, VprMultiFilterDropdown, type VprFilterOption } from '../vpr/VprFilterDropdown';
 import { VprModelRowList } from '../vpr/VprModelRows';
 import { VprPage, VprSearch } from '../vpr/VprKit';
-import { isLevantoAutoEntry } from '../../../modules/routing/levanto-auto';
+import { isAutoRouterEntry } from '../../../modules/routing/auto-router';
 import styles from './VprExploreView.module.scss';
 
 type Props = { onSelectView?: (view: ViewName) => void };
@@ -101,15 +101,15 @@ export function VprExploreView({ onSelectView }: Props) {
   // Starred on the model pages; fresh on every visit (the view remounts).
   const [favorites] = useState(loadFavoriteModels);
 
-  // "Levanto Auto" is a chat-time routing mode, not a browsable model --
+  // "Auto" is a chat-time routing mode, not a browsable model --
   // it has no real sellers, no price, no capabilities to filter/sort by.
-  // withLevantoAutoCatalogEntry (modules/chat/controller.ts) prepends it to
+  // withAutoRouterCatalogEntry (modules/chat/controller.ts) prepends it to
   // the shared vprModelCatalog state specifically so chat pickers offer it;
   // this page (nav label "Models") lists what a buyer can actually inspect
   // and pin, so it's filtered back out here rather than removed from the
   // shared state chat depends on.
   const catalog = useMemo(
-    () => snap.catalog.filter((entry) => !isLevantoAutoEntry(entry)),
+    () => snap.catalog.filter((entry) => !isAutoRouterEntry(entry)),
     [snap.catalog],
   );
 

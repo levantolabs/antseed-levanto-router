@@ -10,6 +10,31 @@ import {
   setVprModelPin,
   vprModelPinFor,
 } from './model-pins.js';
+import { withAutoRouterCatalogEntry } from './auto-router.js';
+import type { RouterPluginInfo } from '../../types/bridge.js';
+
+/**
+ * `isAutoRouterEntry` (which `setVprModelPin`/`vprModelPinFor` guard against)
+ * only recognizes an entry once a real router plugin has actually been
+ * resolved -- no implicit fallback identity anymore (runlog 2026-09-0X), so
+ * these two tests seed one explicitly instead of relying on a default. Just
+ * a fixture value, not sourced from production code -- no real caller needs
+ * this literal anymore.
+ */
+const AUTO_ROUTER_SENTINEL_SERVICE_ID = 'levanto-auto';
+const LEVANTO_LIKE_ROUTER: RouterPluginInfo = {
+  package: '@antseed/router-levanto',
+  version: '0.0.1',
+  name: 'levanto',
+  displayName: 'Levanto Router',
+  description: 'test fixture',
+  autoRouteServiceId: AUTO_ROUTER_SENTINEL_SERVICE_ID,
+};
+withAutoRouterCatalogEntry(
+  [],
+  { autoDayPassEnabled: true, selectedRouterPackage: LEVANTO_LIKE_ROUTER.package },
+  [LEVANTO_LIKE_ROUTER],
+);
 
 const storage = new Map<string, string>();
 Object.defineProperty(globalThis, 'localStorage', {
@@ -68,14 +93,14 @@ test('blank peer ids are not stored', () => {
 });
 
 test('refuses to pin the Auto sentinel to a peer -- it must always be chosen per-request, never stranded on one seller', () => {
-  const pins = setVprModelPin({}, 'levanto', 'levanto-auto', 'peer-1');
+  const pins = setVprModelPin({}, 'levanto', AUTO_ROUTER_SENTINEL_SERVICE_ID, 'peer-1');
   assert.deepEqual(pins, {});
-  assert.equal(vprModelPinFor(pins, 'levanto', 'levanto-auto'), null);
+  assert.equal(vprModelPinFor(pins, 'levanto', AUTO_ROUTER_SENTINEL_SERVICE_ID), null);
 });
 
 test('ignores an already-corrupted Auto sentinel pin from a pre-fix build instead of requiring a manual localStorage edit', () => {
-  const corrupted = { [modelPinKey('levanto', 'levanto-auto')]: 'peer-1' };
-  assert.equal(vprModelPinFor(corrupted, 'levanto', 'levanto-auto'), null);
+  const corrupted = { [modelPinKey('levanto', AUTO_ROUTER_SENTINEL_SERVICE_ID)]: 'peer-1' };
+  assert.equal(vprModelPinFor(corrupted, 'levanto', AUTO_ROUTER_SENTINEL_SERVICE_ID), null);
 });
 
 test('loads pins persisted with legacy canonical model keys', () => {

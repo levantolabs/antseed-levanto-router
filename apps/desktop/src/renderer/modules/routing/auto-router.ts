@@ -1,5 +1,6 @@
 import type { VprModelCatalogEntry, VprRoutingPreferences } from '../../core/state';
 import type { RouterPluginInfo } from '../../types/bridge';
+import { LEVANTO_ROUTER_PACKAGE as DEFAULT_AUTO_ROUTER_PACKAGE } from '../../../shared/router-plugin-defaults.js';
 
 /**
  * "Auto" model-picker entry (model-routing decisions doc SS4.3/SS8.2,
@@ -8,15 +9,16 @@ import type { RouterPluginInfo } from '../../types/bridge';
  * router" dropdown, `VprRoutingPreferences.selectedRouterPackage`) rather
  * than hardcoding router-levanto. `provider`/`serviceId` must match the
  * sentinel a router's own `selectRoute` checks the requested model against
- * (e.g. router-levanto's router.ts: "if (model !== 'levanto-auto') return
- * null") -- sourced from that plugin's own declared `AntseedRouterPlugin.name`/
+ * (e.g. a router plugin's own selectRoute: checks the requested model
+ * against its own auto-sentinel serviceId) -- sourced from that plugin's
+ * own declared `AntseedRouterPlugin.name`/
  * `autoRouteServiceId` (packages/node/src/interfaces/plugin.ts) instead of a
  * second, hand-duplicated copy of the same strings.
  *
- * Kept as a small module-level cache updated by `withLevantoAutoCatalogEntry`
+ * Kept as a small module-level cache updated by `withAutoRouterCatalogEntry`
  * (the one function that already recomputes on every routing-state change,
  * in modules/chat/controller.ts) rather than threading the active plugin
- * through every call site below -- `isLevantoAutoEntry`/`isLevantoAutoSelected`
+ * through every call site below -- `isAutoRouterEntry`/`isAutoRouterSelected`
  * are read from several UI components that only need "is this the Auto
  * entry", not "which plugin is active".
  */
@@ -25,27 +27,26 @@ export type ActiveAutoRouterPlugin = {
   serviceId: string;
   label: string;
   info?: { title: string; body: string };
+  savingsBaselineModel?: string;
 };
 
 /**
- * router-levanto's own identity, used as the fallback default: the app has
- * shipped with it as the only bundled router plugin, and preferences saved
- * before `selectedRouterPackage` existed have `autoDayPassEnabled: true`
- * with no package recorded (migrated to this package explicitly in
- * preferences.ts's `loadVprRoutingPreferences`) -- so resolving an unmatched
- * selection back to this identity preserves exactly what those buyers had
- * already opted into, rather than silently turning Auto off for them.
+ * Pure display fallbacks for when no router plugin is actually resolved --
+ * NOT a plugin identity, so nothing here is ever compared against a catalog
+ * entry's `provider`/`serviceId` (see `isAutoRouterEntry`, which returns
+ * `false` whenever `active` is `null`). Plugin-agnostic on purpose (runlog
+ * 2026-09-0X): a deployment with no router plugin installed at all must
+ * never show a pickable "Auto" option that can't actually route through
+ * anything -- see `resolveActiveAutoRouterPlugin`'s own doc comment for why
+ * the previous design (guessing this app's bundled router-levanto) was
+ * wrong even for the common case.
  */
-const LEVANTO_FALLBACK: ActiveAutoRouterPlugin = {
-  provider: 'levanto',
-  serviceId: 'levanto-auto',
-  label: 'Levanto Router',
-};
-const LEVANTO_FALLBACK_PACKAGE = '@antseed/router-levanto';
+const DEFAULT_AUTO_ROUTER_LABEL = 'Auto Router';
+const DEFAULT_SAVINGS_BASELINE_MODEL = 'claude-opus-5';
 
-let active: ActiveAutoRouterPlugin | null = LEVANTO_FALLBACK;
+let active: ActiveAutoRouterPlugin | null = null;
 
-export let LEVANTO_AUTO_LABEL: string = LEVANTO_FALLBACK.label;
+export let AUTO_ROUTER_LABEL: string = DEFAULT_AUTO_ROUTER_LABEL;
 
 /**
  * Minimum trust score enforced while `autoDayPassEnabled` is on
@@ -59,18 +60,18 @@ export const AUTO_DAY_PASS_MIN_TRUST_SCORE = 70;
 
 /**
  * Resolves the Auto entry's *identity* -- independent of whether
- * `autoDayPassEnabled` is currently on. `isLevantoAutoEntry`/
- * `isLevantoAutoSelected` need to keep recognizing an already-selected Auto
+ * `autoDayPassEnabled` is currently on. `isAutoRouterEntry`/
+ * `isAutoRouterSelected` need to keep recognizing an already-selected Auto
  * conversation/model even after the user flips the toggle off (e.g. so a
  * discover refresh doesn't silently rebind it to a concrete model) -- only
- * `withLevantoAutoCatalogEntry`'s decision to *offer* the entry as pickable
+ * `withAutoRouterCatalogEntry`'s decision to *offer* the entry as pickable
  * is gated on the toggle.
  */
 function resolveActiveAutoRouterPlugin(
   preferences: Pick<VprRoutingPreferences, 'selectedRouterPackage'>,
   availableRouters: RouterPluginInfo[],
 ): ActiveAutoRouterPlugin | null {
-  const selectedPackage = preferences.selectedRouterPackage ?? LEVANTO_FALLBACK_PACKAGE;
+  const selectedPackage = preferences.selectedRouterPackage ?? DEFAULT_AUTO_ROUTER_PACKAGE;
   const match = availableRouters.find(
     (router) => router.package === selectedPackage && router.autoRouteServiceId,
   );
@@ -80,21 +81,26 @@ function resolveActiveAutoRouterPlugin(
       serviceId: match.autoRouteServiceId!,
       label: match.displayName,
       info: match.autoRouteInfo,
+      savingsBaselineModel: match.savingsBaselineModel,
     };
   }
-  // Router list not loaded yet, or the selected package is no longer
-  // installed -- fall back to Levanto's identity only when that's actually
-  // what was selected (explicitly or via the pre-migration default above),
-  // never for some other, now-missing plugin.
-  return selectedPackage === LEVANTO_FALLBACK_PACKAGE ? LEVANTO_FALLBACK : null;
+  // Router list not loaded yet, or the selected package isn't actually
+  // installed -- no Auto identity, period. Guessing this app's own bundled
+  // router-levanto here would be wrong exactly when it matters most: a
+  // deployment with NO router plugin installed at all would get a pickable
+  // "Levanto Router" entry that could never actually route (the buyer
+  // daemon has no such plugin to load). installedRouterPluginsResource
+  // resolves from a local disk scan (no network), so the "not loaded yet"
+  // window is a sub-frame flash of no Auto entry on boot, not a user-visible gap.
+  return null;
 }
 
-export function isLevantoAutoEntry(entry: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'>): boolean {
+export function isAutoRouterEntry(entry: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'>): boolean {
   return active !== null && entry.provider === active.provider && entry.serviceId === active.serviceId;
 }
 
 /**
- * Null-safe wrapper around `isLevantoAutoEntry` for `vprRouteSelection.model`
+ * Null-safe wrapper around `isAutoRouterEntry` for `vprRouteSelection.model`
  * (which is `null` before any model is chosen). No longer what the CQT
  * dial's visibility gates on -- decisions doc SS14 item 29 supersedes item
  * 21's "gate on Auto being selected" with a dedicated Preferences toggle
@@ -103,8 +109,8 @@ export function isLevantoAutoEntry(entry: Pick<VprModelCatalogEntry, 'provider' 
  * standing consent to a real-money day-pass charge. Kept for any other
  * "is Auto the current selection" check that isn't a consent gate.
  */
-export function isLevantoAutoSelected(model: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'> | null): boolean {
-  return model !== null && isLevantoAutoEntry(model);
+export function isAutoRouterSelected(model: Pick<VprModelCatalogEntry, 'provider' | 'serviceId'> | null): boolean {
+  return model !== null && isAutoRouterEntry(model);
 }
 
 /** The active plugin's info-dialog copy, or `null` when no Auto router is active. */
@@ -113,14 +119,28 @@ export function activeAutoRouterInfo(): { title: string; body: string } | null {
 }
 
 /**
- * Builds a full catalog entry for the currently-recognized Auto identity
- * (`active`, defaulting to Levanto's if nothing more specific has resolved)
- * -- a stable, directly-usable fixture for callers/tests that need a
- * concrete entry object, since it's otherwise only ever constructed inline
- * inside `withLevantoAutoCatalogEntry`.
+ * The active plugin's declared savings-comparison baseline model, or a
+ * plugin-agnostic generic default when no plugin is active/declares one --
+ * the savings dashboard (router-savings.ts) always needs *some* default
+ * even while Auto is off, since it summarizes past `routing_decisions`
+ * history. Not tied to any specific plugin's identity (runlog 2026-09-0X):
+ * just a reasonable flagship reference price, same reasoning as
+ * `recommended.ts`'s own flagship-tier slot.
  */
-export function currentAutoRouteEntry(): VprModelCatalogEntry {
-  const source = active ?? LEVANTO_FALLBACK;
+export function activeAutoRouterSavingsBaselineModel(): string {
+  return active?.savingsBaselineModel ?? DEFAULT_SAVINGS_BASELINE_MODEL;
+}
+
+/**
+ * Builds a full catalog entry for the currently-resolved Auto identity, or
+ * `null` when none is currently active (no router plugin resolved) -- a
+ * stable, directly-usable fixture for callers/tests that need a concrete
+ * entry object, since it's otherwise only ever constructed inline inside
+ * `withAutoRouterCatalogEntry`.
+ */
+export function currentAutoRouteEntry(): VprModelCatalogEntry | null {
+  if (!active) return null;
+  const source = active;
   return {
     provider: source.provider,
     serviceId: source.serviceId,
@@ -149,7 +169,7 @@ export function currentAutoRouteEntry(): VprModelCatalogEntry {
  * real daily USDC charge, so it must not be offered as a pickable model until
  * the buyer has explicitly consented via the Preferences toggle (decisions
  * doc SS14 item 29). Also refreshes the shared "active router" cache that
- * `isLevantoAutoEntry`/`isLevantoAutoSelected`/`LEVANTO_AUTO_LABEL` read --
+ * `isAutoRouterEntry`/`isAutoRouterSelected`/`AUTO_ROUTER_LABEL` read --
  * this is the one place routing state is recomputed on every relevant
  * change (modules/chat/controller.ts), so it doubles as that cache's sync
  * point instead of requiring a separate bootstrap call.
@@ -159,18 +179,18 @@ export function currentAutoRouteEntry(): VprModelCatalogEntry {
  * discovery (no seller advertises an auto-route serviceId), so there is
  * nothing to deduplicate against beyond a previous call of this same function.
  */
-export function withLevantoAutoCatalogEntry(
+export function withAutoRouterCatalogEntry(
   catalog: VprModelCatalogEntry[],
   preferences: Pick<VprRoutingPreferences, 'autoDayPassEnabled' | 'selectedRouterPackage'>,
   availableRouters: RouterPluginInfo[],
 ): VprModelCatalogEntry[] {
   active = resolveActiveAutoRouterPlugin(preferences, availableRouters);
-  LEVANTO_AUTO_LABEL = active?.label ?? LEVANTO_FALLBACK.label;
+  AUTO_ROUTER_LABEL = active?.label ?? DEFAULT_AUTO_ROUTER_LABEL;
 
   if (!preferences.autoDayPassEnabled || !active) {
-    return catalog.some(isLevantoAutoEntry) ? catalog.filter((entry) => !isLevantoAutoEntry(entry)) : catalog;
+    return catalog.some(isAutoRouterEntry) ? catalog.filter((entry) => !isAutoRouterEntry(entry)) : catalog;
   }
-  if (catalog.some(isLevantoAutoEntry)) return catalog;
+  if (catalog.some(isAutoRouterEntry)) return catalog;
   const entry = currentAutoRouteEntry();
-  return [entry, ...catalog];
+  return entry ? [entry, ...catalog] : catalog;
 }

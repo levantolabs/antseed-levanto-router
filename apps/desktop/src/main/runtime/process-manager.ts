@@ -6,6 +6,7 @@ import path from 'node:path';
 import { desktopSystemProxyCliDataDir } from '../dev-instance.js';
 import { WORKSPACE_APPS_DIR } from '../paths.js';
 import { ACTIVE_CONFIG_PATH } from './active-config.js';
+import { LEVANTO_ROUTER_PACKAGE } from '../../shared/router-plugin-defaults.js';
 
 const { join, resolve } = path;
 
@@ -81,10 +82,8 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * Applies the buyer's selected model router (Preferences' "Select model
  * router" dropdown, persisted as `buyer.routingPreferences.
  * selectedRouterPackage` -- VprPreferencesView.tsx) to a connect-mode start.
- * That dropdown is the real choice this override used to stand in for before
- * it existed (runlog: "local routing-peer daemon", 2026-08-26).
  *
- * Loading a router package is no longer gated on `autoDayPassEnabled` (real
+ * Loading a router package doesn't depend on `autoDayPassEnabled` (real
  * incident: that flag can be live-synced to an already-running buyer daemon
  * via buyer-proxy's own hot-reload path, but nothing respawns the daemon, so
  * a user who enables Levanto Auto after the daemon already started -- the
@@ -95,7 +94,7 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * loading itself is harmless to do unconditionally -- nothing can actually
  * route through it unless the "Levanto Auto" catalog entry is selectable at
  * all, which is itself gated on the same preference and reacts live
- * (levanto-auto.ts's withLevantoAutoCatalogEntry). What still must not
+ * (auto-router.ts's withAutoRouterCatalogEntry). What still must not
  * happen unconditionally is forcing *every* connect-mode start (including a
  * genuine mainnet buyer with the dropdown explicitly left on "None") onto
  * devnet-shaped defaults (a local routing-peer URL/seller id, devnet peer
@@ -103,14 +102,18 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * (`selectedRouterPackage: null`, distinct from the field never having been
  * set) still passes `opts` through unchanged.
  *
- * Which routing peer and env gets injected for Levanto specifically depends
- * on the buyer's own configured chain (`payments.crypto.chainId`, same
- * config file): `base-local` gets the devnet-shaped defaults (a local
- * `local-peer-daemon.ts` instance, devnet peer addresses, official-bootstrap
- * disabled); anything else (real chains default to `base-mainnet`, same as
- * `createDefaultConfig()`) gets the real, staked Levanto routing peer
- * instead, with none of the devnet isolation flags -- those would cut a real
- * buyer off from the real dht1/dht2.antseed.com swarm entirely.
+ * Which node-level isolation env gets injected for Levanto specifically
+ * depends on the buyer's own configured chain (`payments.crypto.chainId`,
+ * same config file): `base-local` gets the devnet-shaped isolation flags (a
+ * local `local-peer-daemon.ts` instance, devnet peer addresses,
+ * official-bootstrap disabled); anything else (real chains default to
+ * `base-mainnet`, same as `createDefaultConfig()`) gets none of that -- those
+ * flags would cut a real buyer off from the real dht1/dht2.antseed.com swarm
+ * entirely. Which routing-peer *identity* to use for a given chain is
+ * router-levanto's own decision, not this file's -- its own `createRouter`
+ * picks its own devnet-vs-mainnet default from the generic `ANTSEED_CHAIN_ID`
+ * every plugin receives (apps/cli's buyer start command), so this file only
+ * forwards an explicit operator override, never invents one.
  *
  * Applied here, at the single point every connect-mode `start()` call
  * ultimately funnels through (`ProcessManager.start` itself), rather than at
@@ -121,26 +124,16 @@ function normalizeRouterIdentifier(value: string | undefined): string {
  * them left the other silently winning the race with the wrong router. A
  * single choke point means neither caller needs to know this override exists.
  *
- * The dropdown itself now offers any installed router plugin, not just
- * Levanto (`buyer.routingPreferences.selectedRouterPackage`), but the
- * devnet/mainnet routing-peer env below is Levanto-specific operational
- * wiring this override was built to carry -- generalizing *that* would mean
- * knowing a given plugin's own configSchema values, which is out of scope
- * here. So: when a non-Levanto package is selected, this only sets
- * `opts.router` to that package (the CLI loads whatever plugin that names,
- * using its own config); the env injection and chain-dependent defaults
- * below apply only when router-levanto specifically is selected.
+ * The dropdown offers any installed router plugin
+ * (`buyer.routingPreferences.selectedRouterPackage`), but the
+ * devnet isolation env below is Levanto-specific operational wiring this
+ * override carries -- generalizing *that* would mean knowing a
+ * given plugin's own configSchema values, which is out of scope here. So:
+ * when a non-Levanto package is selected, this only sets `opts.router` to
+ * that package (the CLI loads whatever plugin that names, using its own
+ * config); the env injection and chain-dependent isolation flags below apply
+ * only when router-levanto specifically is selected.
  */
-/**
- * router-levanto's own package name -- the historical, and still only,
- * router this override knows how to wire real operational defaults for
- * (routing-peer URL, seller peer id, devnet isolation flags below). A
- * different selected plugin still gets its package name passed through as
- * `opts.router` so the CLI loads it, but none of that Levanto-specific env
- * injection applies to it; see `applyLevantoRouterDemoOverride`.
- */
-const LEVANTO_ROUTER_PACKAGE = '@antseed/router-levanto';
-
 /**
  * Reads `buyer.routingPreferences.selectedRouterPackage` straight off disk,
  * no caching -- the config file is the one source of truth the renderer's
@@ -154,12 +147,9 @@ const LEVANTO_ROUTER_PACKAGE = '@antseed/router-levanto';
  * writes `selectedRouterPackage: null` there, distinct from the field simply
  * never having been set) -- callers must treat that as "load no router at
  * all", not fall back to Levanto the way missing/unreadable config does.
- * Collapsing the two used to be harmless back when this function's result
- * was only consulted after an `autoDayPassEnabled` gate that already
- * excluded both cases; now that loading the plugin no longer depends on
- * that gate (see applyLevantoRouterDemoOverride's own doc comment), an
- * explicit "None" has to stay distinguishable or it would silently load
- * Levanto anyway.
+ * Loading the plugin doesn't depend on an `autoDayPassEnabled` gate (see
+ * applyLevantoRouterDemoOverride's own doc comment), so an explicit "None"
+ * has to stay distinguishable here or it would silently load Levanto anyway.
  */
 function resolveSelectedRouterPackage(): string | null {
   try {
@@ -198,6 +188,58 @@ function resolveConfiguredChainId(): RoutingPeerChainId {
   }
 }
 
+/**
+ * Per-package operational overrides (router name + env injection) for a
+ * connect-mode start, keyed by package name -- a second router plugin
+ * needing its own devnet/mainnet wiring registers one more entry here
+ * instead of another hand-written branch alongside Levanto's. A package
+ * with no entry (any third-party plugin today) just gets its name passed
+ * through as `opts.router` unchanged, below.
+ */
+type RouterPluginOverrideProvider = (chainId: RoutingPeerChainId) => Pick<StartOptions, 'router' | 'env'>;
+
+const ROUTER_PLUGIN_OVERRIDE_PROVIDERS: Record<string, RouterPluginOverrideProvider> = {
+  [LEVANTO_ROUTER_PACKAGE]: (chainId) => {
+    // Neither LEVANTO_ROUTING_PEER_URL nor LEVANTO_SELLER_PEER_ID is forced
+    // here (runlog 2026-09-0X) -- router-levanto now picks its own
+    // devnet-vs-mainnet routing-peer identity itself, from the generic
+    // ANTSEED_CHAIN_ID every plugin receives (apps/cli's buyer start command
+    // derives it from this same config file's payments.crypto.chainId). Only
+    // an explicit operator override is forwarded here; nothing is invented.
+    const env: Record<string, string> = {
+      // Without this, router-levanto's RoutingLedger (routing_decisions,
+      // savings-dashboard data) falls back to in-memory-only and is wiped
+      // on every connect-mode subprocess restart -- this was a real
+      // incident (a live 12-agent mainnet data run vanished on restart).
+      LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
+      ...(process.env['LEVANTO_ROUTING_PEER_URL'] ? { LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] } : {}),
+      ...(process.env['LEVANTO_SELLER_PEER_ID'] ? { LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] } : {}),
+    };
+
+    // The remaining chain-conditional wiring is genuinely node-level, not
+    // plugin-level -- there's no hook for a router plugin to influence the
+    // node's own bootstrap/network isolation, so this stays host-side.
+    if (chainId === 'base-local') {
+      // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
+      // override"), not a production NAT solution -- see resolveDirectPeerAddresses
+      // in apps/cli's buyer start command for what actually consumes this.
+      env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON'] = process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
+        ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}';
+      // Isolates this demo buyer from the real public AntSeed network -- without
+      // it, bootstrapping through the local-only routing peer still transitively
+      // discovers real public sellers, since that peer is itself connected to
+      // dht1/dht2.antseed.com. Local-dev only, same reasoning as the var above.
+      env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] = process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1';
+    }
+    // The full package name works identically to the 'levanto' short name
+    // here -- the CLI's resolvePluginPackage passes through anything it
+    // doesn't recognize as a short name unchanged, and isTrusted matches on
+    // package, not name -- so this reuses the one canonical constant
+    // instead of a second, hand-typed copy of Levanto's identity.
+    return { router: LEVANTO_ROUTER_PACKAGE, env };
+  },
+};
+
 export function applyLevantoRouterDemoOverride(
   opts: StartOptions,
   resolveChainId: () => RoutingPeerChainId = resolveConfiguredChainId,
@@ -207,8 +249,8 @@ export function applyLevantoRouterDemoOverride(
 
   const selectedPackage = resolveRouterPackage();
   // Explicit "None" (VprPreferencesView.tsx writes selectedRouterPackage:
-  // null for it) -- opts pass through unchanged, same as before. No longer
-  // gated on autoDayPassEnabled at all: that toggle only ever controlled
+  // null for it) -- opts pass through unchanged. Plugin loading isn't gated
+  // on autoDayPassEnabled at all: that toggle only ever controls
   // real billing/signing behavior *inside* an already-loaded router plugin
   // (already correctly live-reloadable via buyer-proxy's own
   // _reloadRoutingPreferences), not whether the plugin gets loaded in the
@@ -222,57 +264,16 @@ export function applyLevantoRouterDemoOverride(
   // "No policy-allowed peer currently serves model levanto-auto" with no
   // indication a restart was needed. The "Levanto Auto" catalog entry is
   // itself already gated on this same preference, and reacts live
-  // (levanto-auto.ts's withLevantoAutoCatalogEntry) -- so nothing can
+  // (auto-router.ts's withAutoRouterCatalogEntry) -- so nothing can
   // actually route through this plugin unless the user has opted in,
   // whether or not the plugin happens to be loaded.
   if (selectedPackage === null) return opts;
 
-  if (selectedPackage !== LEVANTO_ROUTER_PACKAGE) {
-    return { ...opts, router: selectedPackage };
-  }
+  const provider = ROUTER_PLUGIN_OVERRIDE_PROVIDERS[selectedPackage];
+  if (!provider) return { ...opts, router: selectedPackage };
 
-  if (resolveChainId() === 'base-local') {
-    return {
-      ...opts,
-      router: 'levanto',
-      env: {
-        ...opts.env,
-        // Without this, router-levanto's RoutingLedger (routing_decisions,
-        // savings-dashboard data) falls back to in-memory-only and is wiped
-        // on every connect-mode subprocess restart -- this was a real
-        // incident (a live 12-agent mainnet data run vanished on restart).
-        LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
-        LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://127.0.0.1:8787',
-        LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? 'c199453fd6b1c6823634ef9b3702eb5aeca71265',
-        // Local-dev NAT-hairpinning escape hatch (runlog: "direct-peer-address
-        // override"), not a production NAT solution -- see resolveDirectPeerAddresses
-        // in apps/cli's buyer start command for what actually consumes this.
-        ANTSEED_DIRECT_PEER_ADDRESSES_JSON: process.env['ANTSEED_DIRECT_PEER_ADDRESSES_JSON']
-          ?? '{"c199453fd6b1c6823634ef9b3702eb5aeca71265":"127.0.0.1:6892","6306c9b78c84ad83365ff1e8c12eaa5f135fe1f2":"127.0.0.1:6894","c9f8839e97d2dfff1ac24e88830f0a58283d5b4c":"127.0.0.1:6896","447cecac64c36f8cf507109c464f1126c042a65b":"127.0.0.1:6898","54ba02b713327d36ea210deaacc20d464b9f3ccb":"127.0.0.1:6900","7a69b2ea13db7bbe63eef45627b13b98582a723a":"127.0.0.1:6902"}',
-        // Isolates this demo buyer from the real public AntSeed network -- without
-        // it, bootstrapping through the local-only routing peer still transitively
-        // discovers real public sellers, since that peer is itself connected to
-        // dht1/dht2.antseed.com. Local-dev only, same reasoning as the two vars above.
-        ANTSEED_NO_OFFICIAL_BOOTSTRAP: process.env['ANTSEED_NO_OFFICIAL_BOOTSTRAP'] ?? '1',
-      },
-    };
-  }
-
-  // Real chain (base-mainnet / base-sepolia): point at the real, staked
-  // Levanto routing peer instead, and skip the devnet isolation flags above
-  // entirely -- ANTSEED_NO_OFFICIAL_BOOTSTRAP would cut this buyer off from
-  // the real dht1/dht2.antseed.com swarm, and the direct-peer JSON names
-  // devnet-only mock sellers that don't exist on a real chain.
-  return {
-    ...opts,
-    router: 'levanto',
-    env: {
-      ...opts.env,
-      LEVANTO_DATA_DIR: process.env['LEVANTO_DATA_DIR'] ?? join(resolveConnectDataDir(), 'router-levanto'),
-      LEVANTO_ROUTING_PEER_URL: process.env['LEVANTO_ROUTING_PEER_URL'] ?? 'http://18.219.72.232:8787',
-      LEVANTO_SELLER_PEER_ID: process.env['LEVANTO_SELLER_PEER_ID'] ?? '4c63288576d1befdbdd5f4734b4c9d4c3d8791be',
-    },
-  };
+  const override = provider(resolveChainId());
+  return { ...opts, ...override, env: { ...opts.env, ...override.env } };
 }
 
 function resolveAlignedNodeFromMarker(): string | null {

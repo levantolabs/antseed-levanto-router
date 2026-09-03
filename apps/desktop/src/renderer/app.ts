@@ -23,7 +23,7 @@ import { initModelPickerSync } from './modules/catalog/picker-sync';
 import { applyVprRouteToConnectedProxy } from './modules/routing/proxy-sync';
 import { createVprRouteSelection, findCatalogEntry } from './modules/catalog/model-catalog';
 import { resolveVprChatOption } from './modules/chat/projection';
-import { isLevantoAutoEntry } from './modules/routing/levanto-auto';
+import { isAutoRouterEntry } from './modules/routing/auto-router';
 import {
   applyPeerListing,
   buyerModelRoutingPreferences,
@@ -286,13 +286,14 @@ function actionSelectVprModel(provider: string, serviceId: string, peerId: strin
   }
   uiState.chatImageRouteSelection = null;
 
-  if (isLevantoAutoEntry(entry)) {
+  if (isAutoRouterEntry(entry)) {
     // No fixed peer: unlike every other model, Auto's whole design is that
     // model AND peer are both chosen per-request by the routing peer
     // (buyer-proxy's selectRoute, gated on no explicit peer already pinning
     // the request) -- resolveVprChatOption's normal peer-scoring path below
-    // doesn't apply here, since no real seller advertises "levanto-auto" for
-    // it to find a route through (decisions doc SS4.3, software-arch doc
+    // doesn't apply here, since no real seller advertises the active
+    // router's auto-sentinel serviceId for it to find a route through
+    // (decisions doc SS4.3, software-arch doc
     // SS2.1/SS4.1). encodeChatServiceSelection with no peerId keeps
     // handleServiceChange's own `peerId` empty, which is what already makes
     // it choose 'auto' route mode and leave the conversation's peer unset.
@@ -699,8 +700,8 @@ registerActions({
     syncBuyerRoutingPreferences();
     // Peer rules gate which sellers and models are visible at all, so a patch
     // touching them has to re-derive the catalog, not just repaint. Same for
-    // autoDayPassEnabled: it gates whether "Levanto Auto" is even
-    // present in the catalog (levanto-auto.ts's withLevantoAutoCatalogEntry),
+    // autoDayPassEnabled: it gates whether the Auto entry is even
+    // present in the catalog (auto-router.ts's withAutoRouterCatalogEntry),
     // so flipping it has to take effect immediately, not wait for the next
     // unrelated recompute. `!== undefined` (not truthy) because turning the
     // toggle off is `patch.autoDayPassEnabled === false`.
