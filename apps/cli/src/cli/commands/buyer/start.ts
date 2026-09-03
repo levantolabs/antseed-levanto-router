@@ -7,15 +7,17 @@ import { homedir } from 'node:os'
 import { createConnection } from 'node:net'
 import { getGlobalOptions } from '../types.js'
 import { loadConfig } from '../../../config/loader.js'
-import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, loadOrCreateIdentity, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
+import { AntseedNode, DEFAULT_CHAIN_ID, DepositRelayClient, DepositsClient, getInstance, loadOrCreateIdentity, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
 import type { NodePaymentsConfig } from '@antseed/node'
-import { OFFICIAL_BOOTSTRAP_NODES, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
+import { OFFICIAL_BOOTSTRAP_NODES, buildNetworkServiceOffers, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
 import { setupShutdownHandler } from '../../shutdown.js'
 import { loadRouterPlugin, loadVerifierPlugin, buildPluginConfig, getPackageVersions } from '../../../plugins/loader.js'
 import { ensurePluginsUpToDate } from '../../../plugins/drift.js'
 import { resolvePluginPackage } from '../../../plugins/registry.js'
 import { BuyerProxy, type DepositWatcherAbsenceReason } from '../../../proxy/buyer-proxy.js'
 import { DepositWatcher } from '../../../proxy/deposit-watcher.js'
+import { createSignDailyIfNeeded } from '../../../proxy/day-pass-signing.js'
+import { readAgreedDayPassPriceUsd, writeAgreedDayPassPriceUsd, usdToUsdc, usdcToUsd } from '../../../proxy/day-pass-consent.js'
 import { createSignRouteAuth } from '../../../proxy/route-auth-signing.js'
 import { curatedVerifierIds, resolveVerifierPolicy, type VerifierPolicy } from '../../../plugins/verifier.js'
 import { resolveEffectiveBuyerConfig, type BuyerRuntimeOverrides } from '../../../config/effective.js'
@@ -254,13 +256,19 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       })
 
       // Loaded early, before the node itself starts, purely so router plugins
-      // (e.g. router-levanto's LEVANTO_BUYER_PEER_ID) can be told this
-      // buyer's own peerId at construction time -- idempotent, the node's
-      // own startup reads the same identity file again later.
+      // (via ANTSEED_BUYER_PEER_ID) can be told this buyer's own peerId at
+      // construction time -- idempotent, the node's own startup reads the
+      // same identity file again later.
       const buyerIdentity = await loadOrCreateIdentity(globalOpts.dataDir)
 
       let router
       let toolHints: Array<{ name: string; envVar: string }> = []
+      let dailyPassServiceId: string | undefined
+      // Set by day-pass-signing.ts's onPriceCappedChange below, read by
+      // BuyerProxy's /_antseed/day-pass-price-increase admin route -- these
+      // run on entirely independent cycles (a signing pass vs. an HTTP
+      // request), so this is the one thing they actually share.
+      let dayPassPriceIncreaseNotice: { sellerPeerId: string; agreedUsd: number; discoveredUsd: number } | null = null
       const routerName = resolveBuyerRouterName({ router: options.router as string | undefined })
 
       if (options.instance) {
@@ -282,12 +290,14 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           const plugin = await loadRouterPlugin(instance.package)
           const runtimeEnv = {
             ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
-            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+            ANTSEED_BUYER_PEER_ID: buyerIdentity.peerId,
+            ANTSEED_CHAIN_ID: config.payments?.crypto?.chainId ?? DEFAULT_CHAIN_ID,
           }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv, instance.config as Record<string, string>)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))
           toolHints = (plugin as any).TOOL_HINTS ?? []
+          dailyPassServiceId = plugin.dailyPassServiceId
         } catch (err) {
           spinner.fail(chalk.red(`Failed to load router: ${(err as Error).message}`))
           process.exit(1)
@@ -301,12 +311,14 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           const plugin = await loadRouterPlugin(routerName)
           const runtimeEnv = {
             ...buildRouterRuntimeEnvFromBuyerConfig(effectiveBuyerConfig),
-            LEVANTO_BUYER_PEER_ID: buyerIdentity.peerId,
+            ANTSEED_BUYER_PEER_ID: buyerIdentity.peerId,
+            ANTSEED_CHAIN_ID: config.payments?.crypto?.chainId ?? DEFAULT_CHAIN_ID,
           }
           const pluginConfig = buildPluginConfig(plugin.configSchema ?? plugin.configKeys ?? [], runtimeEnv)
           router = await plugin.createRouter(pluginConfig)
           spinner.succeed(chalk.green(`Router "${plugin.displayName}" loaded`))
           toolHints = (plugin as any).TOOL_HINTS ?? []
+          dailyPassServiceId = plugin.dailyPassServiceId
         } catch (err) {
           spinner.fail(chalk.red(`Failed to load router: ${(err as Error).message}`))
           process.exit(1)
@@ -374,6 +386,9 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           // seller can extract via an inflated 402 target (per 402 round trip).
           maxPerRequestUsdc: config.payments?.maxPerRequestUsdc ?? '300000',
           maxReserveAmountUsdc: config.payments?.maxReserveAmountUsdc ?? '1000000',
+          ...(config.payments?.defaultAuthDurationSecs !== undefined
+            ? { defaultAuthDurationSecs: config.payments.defaultAuthDurationSecs }
+            : {}),
           disableMetadataV2Services: effectiveBuyerConfig.disableMetadataV2Services,
         }
       }
@@ -457,6 +472,65 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       }
 
       // Optional Router capability (model-routing decisions doc SS13 item
+      // 11) -- a router that needs daily/periodic payment signing (e.g. a
+      // day-pass-priced routing peer) implements configureDailySigning
+      // to receive a real signing closure. Built here, after node.start(),
+      // because it needs node.buyerPaymentManager, which only exists once
+      // payments are configured -- constructing the router itself (above)
+      // happens before the node has started.
+      if (router.configureDailySigning && paymentsConfig?.enabled) {
+        // $0.89/day, postpaid, usage-only billing -- runlog 2026-09-02
+        // supersedes decisions doc SS6.2 (pay-first)/SS6.7 (calendar-day
+        // billing). This is now a CEILING, not an assumed price (decisions
+        // doc SS13 item 6, closed) -- resolveDiscoveredPriceUsdc below reads
+        // the seller's own currently-advertised price for real, and
+        // day-pass-signing.ts signs whichever is lower. Kept as the ceiling
+        // (never raised past this without a code change) so a seller can
+        // never unilaterally make this buyer sign more than it was ever
+        // configured to accept, just by changing its advertised price.
+        const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+          dailyAmountUsdc: 890_000n,
+          // The loaded router plugin's own declared attribution string
+          // (`AntseedRouterPlugin.dailyPassServiceId`) -- generic host code,
+          // no plugin-specific literal here (unlike createSignDailyIfNeeded/
+          // signCumulativeAuth themselves, which were already generic).
+          // Omitted entirely if the plugin doesn't declare one.
+          serviceId: dailyPassServiceId,
+          // A single, targeted per-peer DHT lookup (cheaper and more
+          // deterministic than a full network sweep, per findPeer's own doc
+          // comment) -- this only ever runs once per real signing cycle
+          // (roughly once a day per seller), so a live lookup each time is
+          // fine; no caching needed. Filtered to this exact sellerPeerId,
+          // not just any day-pass offer on the network -- buyer-proxy.ts's
+          // /_antseed/day-pass-price handler is peer-agnostic (any offer,
+          // for display only); this one signs money, so it must be this
+          // specific seller's own advertised price or nothing.
+          resolveDiscoveredPriceUsdc: async (sellerPeerId) => {
+            const peer = await node.findPeer(sellerPeerId)
+            if (!peer) return null
+            const offer = buildNetworkServiceOffers([peer]).find(
+              (o) => o.type === 'day-pass' && o.peerId === sellerPeerId && o.flatUsdPrice !== undefined,
+            )
+            if (!offer || offer.flatUsdPrice === undefined) return null
+            return BigInt(Math.round(offer.flatUsdPrice * 1_000_000))
+          },
+          resolveAgreedPriceUsdc: async (sellerPeerId) => {
+            const agreedUsd = await readAgreedDayPassPriceUsd(globalOpts.config, sellerPeerId)
+            return agreedUsd === null ? null : usdToUsdc(agreedUsd)
+          },
+          recordAgreedPriceUsdc: async (sellerPeerId, amountUsdc) => {
+            await writeAgreedDayPassPriceUsd(globalOpts.config, sellerPeerId, usdcToUsd(amountUsdc))
+          },
+          onPriceCappedChange: (sellerPeerId, notice) => {
+            dayPassPriceIncreaseNotice = notice
+              ? { sellerPeerId, agreedUsd: usdcToUsd(notice.agreedUsdc), discoveredUsd: usdcToUsd(notice.discoveredUsdc) }
+              : null
+          },
+        })
+        router.configureDailySigning(signDailyIfNeeded)
+      }
+
+      // Optional Router capability (model-routing decisions doc SS13 item
       // 8): a router that talks to a bare, unauthenticated routing-peer HTTP
       // endpoint implements configureRouteAuthSigning to receive a real
       // signing closure, proving requests actually come from this buyer's
@@ -468,6 +542,25 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           evmChainId: chainConfig.evmChainId,
           channelsContractAddress: chainConfig.channelsContractAddress,
         }))
+      }
+
+      // Optional Router capability: a router that discovers its own routing
+      // peer's address via P2P/DHT instead of requiring a pre-configured URL
+      // implements configureRoutingPeerHostResolution to receive a real
+      // lookup. Built here, after node.start(), for the same reason as the
+      // two capabilities above -- findPeer needs a running, networked node,
+      // which doesn't exist yet when the router itself is constructed.
+      // Independent of paymentsConfig?.enabled -- this resolves where to
+      // send routing requests, not a payment concern. Generic on purpose
+      // (same node.findPeer call resolveDiscoveredPriceUsdc above already
+      // uses): the router owns what it does with the resolved host (e.g.
+      // its own well-known port), this just answers "where is this peerId."
+      if (router.configureRoutingPeerHostResolution) {
+        router.configureRoutingPeerHostResolution(async (peerId) => {
+          const peer = await node.findPeer(peerId)
+          if (!peer?.publicAddress) return null
+          return peer.publicAddress.split(':')[0] ?? null
+        })
       }
 
       if (paymentsConfig?.enabled) {
@@ -530,6 +623,7 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
         routingPreferences: effectiveBuyerConfig.routingPreferences,
         backgroundRefreshIntervalMs: effectiveBuyerConfig.peerRefreshIntervalMs,
         routerName: dashboardRouterName,
+        getDayPassPriceIncreaseNotice: () => dayPassPriceIncreaseNotice,
         ...(verifierPolicy ? { verifier: verifierPolicy } : {}),
       })
       let ownsProxyListener = false
