@@ -6,6 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { AbiCoder, id, keccak256, Wallet } from 'ethers';
 import { BuyerPaymentManager, type BuyerPaymentConfig } from '../src/payments/buyer-payment-manager.js';
 import { ChannelStore, CHANNEL_ROLE, CHANNEL_STATUS, type StoredChannel } from '../src/payments/channel-store.js';
+import { DepositsClient } from '../src/payments/evm/deposits-client.js';
 import type { PaymentMux } from '../src/p2p/payment-mux.js';
 import type { Identity } from '../src/p2p/identity.js';
 import { bytesToHex } from '../src/utils/hex.js';
@@ -33,6 +34,12 @@ function decodeMetadataTokens(metadata: string): { inputTokens: bigint; outputTo
   return { inputTokens, outputTokens, outputImages };
 }
 
+function decodeChargeType(metadata: string): string {
+  const coder = AbiCoder.defaultAbiCoder();
+  const [, , , , , chargeType] = coder.decode(['uint256', 'uint256', 'uint256', 'uint256', 'uint256', 'string'], metadata);
+  return chargeType as string;
+}
+
 function decodeMetadataServices(metadata: string): Array<{
   serviceId: string;
   cumulativeAmount: bigint;
@@ -43,12 +50,16 @@ function decodeMetadataServices(metadata: string): Array<{
   cumulativeOutputImages: bigint;
 }> {
   const coder = AbiCoder.defaultAbiCoder();
-  const [, , , , , services] = coder.decode([
+  // v4 inserts chargeType (string) between cumulativeOutputImages and
+  // services[] -- see SpendingAuthMetadata's doc comment for why that
+  // position, not before the first four uint256 fields, is the safe one.
+  const [, , , , , , services] = coder.decode([
     'uint256',
     'uint256',
     'uint256',
     'uint256',
     'uint256',
+    'string',
     'tuple(bytes32 serviceId,uint256 cumulativeAmount,uint256 cumulativeInputTokens,uint256 cumulativeCachedInputTokens,uint256 cumulativeOutputTokens,uint256 cumulativeRequestCount,uint256 cumulativeOutputImages)[]',
   ], metadata);
   return [...services].map((service) => ({
@@ -125,9 +136,23 @@ describe('BuyerPaymentManager', () => {
     const wallet = Wallet.createRandom();
     manager.setSigner(wallet);
     mux = createMockPaymentMux();
+    // topUpReserve verifies buyer deposits before signing (a failed read now
+    // aborts the top-up rather than signing blind -- a real incident showed
+    // the old warn-and-continue behavior let a stale ceiling ratchet up
+    // indefinitely during an RPC outage). Tests never run against a real
+    // chain, so without this every topUpReserve call would hit a real
+    // ECONNREFUSED against config.rpcUrl and (correctly, now) abort --
+    // this stubs that one read so tests can assert normal, verified-success
+    // top-up behavior instead of testing an unreachable RPC.
+    vi.spyOn(DepositsClient.prototype, 'getBuyerBalance').mockResolvedValue({
+      available: 1_000_000_000_000n,
+      reserved: 0n,
+      lastActivityAt: 0n,
+    });
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     store.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -162,8 +187,11 @@ describe('BuyerPaymentManager', () => {
     expect(sent.metadata).toBeTypeOf('string');
     expect(sent.metadata).not.toBe('');
     expect((sent.metadata as string).startsWith('0x')).toBe(true);
-    // v3 zero metadata: five head words + empty services array (offset + length) = 7 words.
-    expect((sent.metadata as string).length).toBe(2 + 7 * 64);
+    // v4 zero metadata: 7 head words (5 static uint256 + chargeType offset +
+    // services offset) + chargeType tail ('metered': length + 1 padded data
+    // word = 2 words) + empty services array tail (length only = 1 word)
+    // = 10 words.
+    expect((sent.metadata as string).length).toBe(2 + 10 * 64);
   });
 
   it('does not transmit ReserveAuth when durable persistence fails', async () => {
@@ -1597,6 +1625,27 @@ describe('BuyerPaymentManager', () => {
     expect(manager.getReserveCeiling(sellerPeerId)).toBe(20_000_000n);
   });
 
+  it('topUpReserve aborts (does not sign) when the deposit-verification read fails, instead of signing blind', async () => {
+    // Regression for a real incident: this used to warn-and-continue on a
+    // failed verification read, so a sustained RPC outage let every retry
+    // re-derive the new ceiling from the same stale, unreconciled baseline
+    // and sign another full day's increment on top -- repeating for as long
+    // as the read kept failing (real trace: four top-ups in three minutes on
+    // one channel). A failed read must abort instead.
+    const sellerPeerId = fakePeerId('seller-topup-rpc-down');
+    await manager.authorizeSpending(sellerPeerId, mux, 10_000n, TEST_PRICING);
+    const ceilingBefore = manager.getReserveCeiling(sellerPeerId);
+    mux.sentSpendingAuths.length = 0;
+
+    vi.spyOn(DepositsClient.prototype, 'getBuyerBalance').mockRejectedValue(
+      new Error('connect ECONNREFUSED 127.0.0.1:8545'),
+    );
+
+    await expect(manager.topUpReserve(sellerPeerId, mux)).rejects.toMatchObject({ code: 'chain-rpc-unavailable' });
+    expect(mux.sentSpendingAuths.length).toBe(0);
+    expect(manager.getReserveCeiling(sellerPeerId)).toBe(ceilingBefore);
+  });
+
   it('resendReserveAuth replays the original reserve amount after top-up', async () => {
     store.close();
     store = new ChannelStore(tempDir);
@@ -1952,5 +2001,170 @@ describe('BuyerPaymentManager', () => {
     expect(channel!.tokensDelivered).toBe('1500');
     expect(channel!.previousConsumption).toBe('350');
     expect(channel!.requestCount).toBe(2);
+  });
+
+  describe('signCumulativeAuth (model-routing flat-fee day pass)', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    // Kept well under makeConfig's maxPerRequestUsdc (100_000n = $0.10) --
+    // authorizeSpending silently no-ops (empty channelId) above that, per
+    // the existing 'authorizeSpending rejects if minBudgetPerRequest
+    // exceeds maxPerRequestUsdc' test above.
+    const DAILY_AMOUNT = 10_000n; // $0.01-equivalent for test purposes
+
+    it('throws if configureFlatFeeSigning was never called', async () => {
+      const sellerPeerId = fakePeerId('flat-no-config');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      await expect(manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT)).rejects.toThrow(/configureFlatFeeSigning/);
+    });
+
+    it('throws if there is no active session', async () => {
+      const sellerPeerId = fakePeerId('flat-no-session');
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+      await expect(manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT)).rejects.toThrow(/No active session/);
+    });
+
+    it('signs exactly the requested amount on day one, when it matches one day', async () => {
+      const sellerPeerId = fakePeerId('flat-day-one');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+      const { payload, topUpNeeded } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+      expect(topUpNeeded).toBe(false);
+      const channel = store.getActiveChannelByPeer(sellerPeerId, CHANNEL_ROLE.BUYER);
+      expect(channel!.authMax).toBe(DAILY_AMOUNT.toString());
+      expect(channel!.latestSpendingAuthSig).toBe(payload.spendingAuthSig);
+    });
+
+    it('marks the metadata chargeType as flat-subscription, not metered', async () => {
+      const sellerPeerId = fakePeerId('flat-charge-type');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      expect(decodeChargeType(payload.metadata)).toBe('flat-subscription');
+    });
+
+    it('leaves services empty when no serviceId is configured for attribution', async () => {
+      const sellerPeerId = fakePeerId('flat-no-attribution');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      expect(decodeMetadataServices(payload.metadata)).toEqual([]);
+    });
+
+    it('attributes the running cumulative to serviceId when configured for attribution', async () => {
+      const sellerPeerId = fakePeerId('flat-attribution');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT, serviceId: 'levanto-router-day-pass' });
+
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      const services = decodeMetadataServices(payload.metadata);
+      expect(services).toHaveLength(1);
+      expect(services[0]!.serviceId).toBe(id('levanto-router-day-pass'));
+      expect(services[0]!.cumulativeAmount).toBe(DAILY_AMOUNT);
+      expect(services[0]!.cumulativeInputTokens).toBe(0n);
+      expect(services[0]!.cumulativeRequestCount).toBe(0n);
+    });
+
+    it('never signs more than one day is worth on the very first call, even if asked for far more', async () => {
+      const sellerPeerId = fakePeerId('flat-overask-day-one');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+      // A buggy/malicious plugin asks for far more than one day's worth on day one.
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 7n);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+    });
+
+    it('advances by exactly one more day on the next ordinary call', async () => {
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-day-two');
+        await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+        manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+        await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(DAY_MS);
+        const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 2n);
+
+        expect(payload.cumulativeAmount).toBe((DAILY_AMOUNT * 2n).toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never grants more than one day per call, no matter how long the real gap was', async () => {
+      // Regression for a real live incident: a channel open under four
+      // hours signed six days' worth in a single call, because the old
+      // design let one call catch up an unbounded (config-capped) backlog
+      // in one shot. A day pass must be structurally incapable of
+      // charging more than dailyAmountUsdc per calendar day -- this cap no
+      // longer depends on any caller-supplied config at all.
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-catchup-cap');
+        await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+        manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+        await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(9 * DAY_MS); // a real 9-day gap
+        // Ask for the full 10 days' worth (1 + 9) -- must still clamp to
+        // exactly one more day (2 total), regardless of the real gap length.
+        const { payload } = await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 10n);
+
+        expect(payload.cumulativeAmount).toBe((DAILY_AMOUNT * 2n).toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('never signs below the previous cumulative, even if asked to', async () => {
+      const sellerPeerId = fakePeerId('flat-monotonic');
+      await manager.authorizeSpending(sellerPeerId, mux, 80_000n, TEST_PRICING);
+      manager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+      await manager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+
+      const { payload } = await manager.signCumulativeAuth(sellerPeerId, 1n);
+
+      expect(payload.cumulativeAmount).toBe(DAILY_AMOUNT.toString());
+    });
+
+    it('never signs past the reserve ceiling, even when the day-based bound would allow more', async () => {
+      vi.useFakeTimers();
+      try {
+        const sellerPeerId = fakePeerId('flat-ceiling');
+        // Below what day 1 + one more day's increment (2 x DAILY_AMOUNT =
+        // 20_000n) would otherwise allow -- the ceiling is the actual
+        // binding constraint here, not the (now much stricter) day-based
+        // bound.
+        const smallCeiling = 15_000n;
+        // _getCeiling falls back to config.maxReserveAmountUsdc until a real
+        // on-chain reserve/topUp confirms a channel-specific ceiling -- not
+        // exercised in this unit test, so override it at the config level
+        // to actually constrain this specific manager instance.
+        const ceilingManager = new BuyerPaymentManager(identity, makeConfig(tempDir, { maxReserveAmountUsdc: smallCeiling }), store);
+        ceilingManager.setSigner(identity.wallet);
+        await ceilingManager.authorizeSpending(sellerPeerId, mux, 10_000n, TEST_PRICING);
+        ceilingManager.configureFlatFeeSigning(sellerPeerId, { dailyAmountUsdc: DAILY_AMOUNT });
+
+        await ceilingManager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT);
+        vi.advanceTimersByTime(10 * DAY_MS);
+        // The day-based bound after any elapsed gap now allows at most one
+        // more day (2 x DAILY_AMOUNT = 20_000n) -- the ceiling (15_000n) is
+        // still the tighter, actually-binding constraint.
+        const { payload } = await ceilingManager.signCumulativeAuth(sellerPeerId, DAILY_AMOUNT * 11n);
+
+        expect(payload.cumulativeAmount).toBe(smallCeiling.toString());
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });

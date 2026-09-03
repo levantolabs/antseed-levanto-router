@@ -186,6 +186,43 @@ export interface NodePaymentsConfig {
   minSettleDelta?: string;
   /** Serve channels whose buyer already requested close on-chain, risking uncollectible work. Default: false. */
   serveWhileClosePending?: boolean;
+  /**
+   * Seller-side: rejects any single SpendingAuth whose cumulativeAmount jumps
+   * more than this many base units above the previously accepted cumulative
+   * for that channel. Undefined (default) means no cap -- ordinary metered
+   * per-request billing can legitimately jump by any amount in a burst of
+   * real usage, so this must stay opt-in, not a blanket default. A seller
+   * offering a flat daily/periodic day-pass price should set this to
+   * that price: it closes the seller-side half of a real incident (a client-
+   * side arithmetic bug let a single signature claim six days' worth of a
+   * $0.59/day day-pass in one call) -- fixed client-side already, this
+   * is the independent server-side backstop so the seller never has to trust
+   * the buyer's arithmetic alone, in case that class of bug ever recurs.
+   */
+  maxCumulativeIncreasePerAuth?: string;
+  /**
+   * Seller-side: settle and close a channel the instant its buyer's live
+   * connection drops. Default: true — correct for ordinary per-session
+   * inference, where a dropped connection means the conversation is over.
+   * Wrong for a day-pass-priced channel meant to persist across many
+   * short connect/disconnect cycles between infrequent requests — set false
+   * there, or a signed day pass gets torn down the moment the buyer's
+   * connection goes idle, before the next real request ever arrives.
+   */
+  settleOnDisconnect?: boolean;
+  /**
+   * Seller-side: settle (keep channel open) immediately after accepting a
+   * subsequent SpendingAuth. Default: false/undefined -- ordinary metered
+   * per-request billing signs a fresh cumulative on every response, so this
+   * must stay opt-in or every request would trigger an on-chain tx. Meant
+   * for a day-pass-priced channel (roughly one signature per ~24h window),
+   * where neither of the two existing settlement triggers ever fires:
+   * SellerSessionTracker's idle-settle only activates for channels served
+   * through the metered request path, and settleOnDisconnect is correctly
+   * false for this kind of channel already -- without this, an accepted
+   * cumulative amount can sit authorized-but-never-settled indefinitely.
+   */
+  settleOnAcceptedSpendingAuth?: boolean;
   /** Optional seller-side slack for estimate-only reserve preflight checks. Unset disables estimate-only rejection. */
   reserveEstimateOverdraftUsdc?: string;
   /** Maximum USDC the buyer authorizes per single request (base units). Default: "500000" ($0.50). */
@@ -2207,6 +2244,9 @@ export class AntseedNode extends EventEmitter {
         ...(payments.serveWhileClosePending !== undefined
           ? { serveWhileClosePending: payments.serveWhileClosePending }
           : {}),
+        ...(payments.settleOnDisconnect !== undefined ? { settleOnDisconnect: payments.settleOnDisconnect } : {}),
+        ...(payments.settleOnAcceptedSpendingAuth !== undefined ? { settleOnAcceptedSpendingAuth: payments.settleOnAcceptedSpendingAuth } : {}),
+        ...(payments.maxCumulativeIncreasePerAuth ? { maxCumulativeIncreasePerAuth: payments.maxCumulativeIncreasePerAuth } : {}),
       };
       this._sellerPaymentManager = new SellerPaymentManager(this._identity, sellerConfig, this._channelStore);
       debugLog(`[Node] SellerPaymentManager initialized`);

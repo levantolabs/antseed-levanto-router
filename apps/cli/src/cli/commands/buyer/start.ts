@@ -16,6 +16,7 @@ import { ensurePluginsUpToDate } from '../../../plugins/drift.js'
 import { resolvePluginPackage } from '../../../plugins/registry.js'
 import { BuyerProxy, type DepositWatcherAbsenceReason } from '../../../proxy/buyer-proxy.js'
 import { DepositWatcher } from '../../../proxy/deposit-watcher.js'
+import { createSignDailyIfNeeded } from '../../../proxy/day-pass-signing.js'
 import { createSignRouteAuth } from '../../../proxy/route-auth-signing.js'
 import { curatedVerifierIds, resolveVerifierPolicy, type VerifierPolicy } from '../../../plugins/verifier.js'
 import { resolveEffectiveBuyerConfig, type BuyerRuntimeOverrides } from '../../../config/effective.js'
@@ -374,6 +375,9 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           // seller can extract via an inflated 402 target (per 402 round trip).
           maxPerRequestUsdc: config.payments?.maxPerRequestUsdc ?? '300000',
           maxReserveAmountUsdc: config.payments?.maxReserveAmountUsdc ?? '1000000',
+          ...(config.payments?.defaultAuthDurationSecs !== undefined
+            ? { defaultAuthDurationSecs: config.payments.defaultAuthDurationSecs }
+            : {}),
           disableMetadataV2Services: effectiveBuyerConfig.disableMetadataV2Services,
         }
       }
@@ -454,6 +458,33 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       } catch (err) {
         nodeSpinner.fail(chalk.red(`Failed to connect: ${(err as Error).message}`))
         process.exit(1)
+      }
+
+      // Optional Router capability (model-routing decisions doc SS13 item
+      // 11) -- a router that needs daily/periodic payment signing (e.g. a
+      // day-pass-priced routing peer) implements configureDailySigning
+      // to receive a real signing closure. Built here, after node.start(),
+      // because it needs node.buyerPaymentManager, which only exists once
+      // payments are configured -- constructing the router itself (above)
+      // happens before the node has started.
+      if (router.configureDailySigning && paymentsConfig?.enabled) {
+        // $0.89/day, postpaid, usage-only billing -- runlog 2026-09-02
+        // supersedes decisions doc SS6.2 (pay-first)/SS6.7 (calendar-day
+        // billing). Hardcoded: no wire mechanism exists yet for a buyer to
+        // learn the correct price from the routing peer itself (decisions
+        // doc SS13 item 6, out of scope for this pass -- no decided
+        // direction).
+        const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+          dailyAmountUsdc: 890_000n,
+          // Matches the serviceId the routing peer itself advertises
+          // (levanto-routing-server's DayPassPriceAdProvider) -- attributes
+          // this flat fee in SpendingAuthMetadata.services[] (v4) instead of
+          // leaving it unattributed. Hardcoded to Levanto here since this is
+          // Levanto-specific wiring (unlike createSignDailyIfNeeded/
+          // signCumulativeAuth themselves, which stay generic).
+          serviceId: 'levanto-router-day-pass',
+        })
+        router.configureDailySigning(signDailyIfNeeded)
       }
 
       // Optional Router capability (model-routing decisions doc SS13 item
