@@ -9,7 +9,7 @@ import { getGlobalOptions } from '../types.js'
 import { loadConfig } from '../../../config/loader.js'
 import { AntseedNode, DepositRelayClient, DepositsClient, getInstance, loadOrCreateIdentity, peerRelaysSweeps, resolveChainConfig } from '@antseed/node'
 import type { NodePaymentsConfig } from '@antseed/node'
-import { OFFICIAL_BOOTSTRAP_NODES, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
+import { OFFICIAL_BOOTSTRAP_NODES, buildNetworkServiceOffers, parseBootstrapList, toBootstrapConfig } from '@antseed/node/discovery'
 import { setupShutdownHandler } from '../../shutdown.js'
 import { loadRouterPlugin, loadVerifierPlugin, buildPluginConfig, getPackageVersions } from '../../../plugins/loader.js'
 import { ensurePluginsUpToDate } from '../../../plugins/drift.js'
@@ -470,10 +470,13 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
       if (router.configureDailySigning && paymentsConfig?.enabled) {
         // $0.89/day, postpaid, usage-only billing -- runlog 2026-09-02
         // supersedes decisions doc SS6.2 (pay-first)/SS6.7 (calendar-day
-        // billing). Hardcoded: no wire mechanism exists yet for a buyer to
-        // learn the correct price from the routing peer itself (decisions
-        // doc SS13 item 6, out of scope for this pass -- no decided
-        // direction).
+        // billing). This is now a CEILING, not an assumed price (decisions
+        // doc SS13 item 6, closed) -- resolveDiscoveredPriceUsdc below reads
+        // the seller's own currently-advertised price for real, and
+        // day-pass-signing.ts signs whichever is lower. Kept as the ceiling
+        // (never raised past this without a code change) so a seller can
+        // never unilaterally make this buyer sign more than it was ever
+        // configured to accept, just by changing its advertised price.
         const signDailyIfNeeded = createSignDailyIfNeeded(node, {
           dailyAmountUsdc: 890_000n,
           // Matches the serviceId the routing peer itself advertises
@@ -483,6 +486,24 @@ export function registerBuyerStartCommand(buyerCmd: Command): void {
           // Levanto-specific wiring (unlike createSignDailyIfNeeded/
           // signCumulativeAuth themselves, which stay generic).
           serviceId: 'levanto-router-day-pass',
+          // A single, targeted per-peer DHT lookup (cheaper and more
+          // deterministic than a full network sweep, per findPeer's own doc
+          // comment) -- this only ever runs once per real signing cycle
+          // (roughly once a day per seller), so a live lookup each time is
+          // fine; no caching needed. Filtered to this exact sellerPeerId,
+          // not just any day-pass offer on the network -- buyer-proxy.ts's
+          // /_antseed/day-pass-price handler is peer-agnostic (any offer,
+          // for display only); this one signs money, so it must be this
+          // specific seller's own advertised price or nothing.
+          resolveDiscoveredPriceUsdc: async (sellerPeerId) => {
+            const peer = await node.findPeer(sellerPeerId)
+            if (!peer) return null
+            const offer = buildNetworkServiceOffers([peer]).find(
+              (o) => o.type === 'day-pass' && o.peerId === sellerPeerId && o.flatUsdPrice !== undefined,
+            )
+            if (!offer || offer.flatUsdPrice === undefined) return null
+            return BigInt(Math.round(offer.flatUsdPrice * 1_000_000))
+          },
         })
         router.configureDailySigning(signDailyIfNeeded)
       }

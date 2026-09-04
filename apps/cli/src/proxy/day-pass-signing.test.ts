@@ -172,6 +172,91 @@ test('bootstrap: opens a channel sized to exactly one day, signs day 1, and tops
   })
 })
 
+test('resolveDiscoveredPriceUsdc: signs the discovered price when it is at or below the configured ceiling', async () => {
+  await withBuyer(DAILY_AMOUNT, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(0n)
+    const node: DailySigningNode = {
+      buyerPaymentManager: buyer,
+      channelsClient: scripted.client,
+      getOrConnectPaymentMux: async () => mux,
+    }
+    scripted.bumpTo(DAILY_AMOUNT * 10n)
+
+    const discovered = DAILY_AMOUNT - 1_000n // below the ceiling
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+      dailyAmountUsdc: DAILY_AMOUNT,
+      resolveDiscoveredPriceUsdc: async () => discovered,
+    })
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    assert.equal(BigInt(mux.sent[1]!.cumulativeAmount), discovered, 'signs the lower, discovered price, not the ceiling')
+  })
+})
+
+test('resolveDiscoveredPriceUsdc: caps at the configured ceiling when the seller advertises more', async () => {
+  await withBuyer(DAILY_AMOUNT, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(0n)
+    const node: DailySigningNode = {
+      buyerPaymentManager: buyer,
+      channelsClient: scripted.client,
+      getOrConnectPaymentMux: async () => mux,
+    }
+    scripted.bumpTo(DAILY_AMOUNT * 10n)
+
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+      dailyAmountUsdc: DAILY_AMOUNT,
+      resolveDiscoveredPriceUsdc: async () => DAILY_AMOUNT * 5n, // seller wants far more
+    })
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    assert.equal(BigInt(mux.sent[1]!.cumulativeAmount), DAILY_AMOUNT, 'never signs past the buyer\'s own ceiling, regardless of what the seller advertises')
+  })
+})
+
+test('resolveDiscoveredPriceUsdc: falls back to the ceiling when discovery finds nothing', async () => {
+  await withBuyer(DAILY_AMOUNT, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(0n)
+    const node: DailySigningNode = {
+      buyerPaymentManager: buyer,
+      channelsClient: scripted.client,
+      getOrConnectPaymentMux: async () => mux,
+    }
+    scripted.bumpTo(DAILY_AMOUNT * 10n)
+
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+      dailyAmountUsdc: DAILY_AMOUNT,
+      resolveDiscoveredPriceUsdc: async () => null, // peer not currently announcing
+    })
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    assert.equal(BigInt(mux.sent[1]!.cumulativeAmount), DAILY_AMOUNT, 'falls back to the ceiling when nothing was discovered')
+  })
+})
+
+test('resolveDiscoveredPriceUsdc: falls back to the ceiling when discovery throws', async () => {
+  await withBuyer(DAILY_AMOUNT, async ({ buyer }) => {
+    const mux = createRecordingMux()
+    const scripted = createScriptedChannelsClient(0n)
+    const node: DailySigningNode = {
+      buyerPaymentManager: buyer,
+      channelsClient: scripted.client,
+      getOrConnectPaymentMux: async () => mux,
+    }
+    scripted.bumpTo(DAILY_AMOUNT * 10n)
+
+    const signDailyIfNeeded = createSignDailyIfNeeded(node, {
+      dailyAmountUsdc: DAILY_AMOUNT,
+      resolveDiscoveredPriceUsdc: async () => { throw new Error('network hiccup') },
+    })
+    await signDailyIfNeeded(SELLER_PEER_ID)
+
+    assert.equal(BigInt(mux.sent[1]!.cumulativeAmount), DAILY_AMOUNT, 'a discovery failure must never block signing -- falls back to the ceiling')
+  })
+})
+
 test('ordinary day: signs exactly one more day\'s increment, no top-up when there is comfortable headroom', async (t) => {
   t.mock.timers.enable({ apis: ['Date'] })
   await withBuyer(DAILY_AMOUNT * 5n, async ({ buyer }) => {

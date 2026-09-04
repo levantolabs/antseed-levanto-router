@@ -48,7 +48,17 @@ async function flushGap(): Promise<void> {
 }
 
 export interface DayPassSigningOptions {
-  /** e.g. 890_000n for $0.89/day (6-decimal USDC) -- runlog 2026-09-02, supersedes decisions doc SS1. */
+  /**
+   * The buyer's own ceiling on what it will ever sign for one day, e.g.
+   * 890_000n for $0.89/day (6-decimal USDC) -- runlog 2026-09-02, supersedes
+   * decisions doc SS1. Despite the name, this is a MAXIMUM, not necessarily
+   * the amount actually signed: when `resolveDiscoveredPriceUsdc` is
+   * supplied and finds a live price, the smaller of the two is used (see
+   * that field's own doc comment for why a discovered price is never
+   * trusted past this ceiling). With no resolver (or one that finds
+   * nothing), this ceiling is the amount signed, exactly as before this
+   * field existed.
+   */
   dailyAmountUsdc: bigint
   /**
    * Attributes the signed day pass to this serviceId in
@@ -58,6 +68,26 @@ export interface DayPassSigningOptions {
    * existed.
    */
   serviceId?: string
+  /**
+   * Discovers the seller's currently-advertised day-pass price for real
+   * (decisions doc SS13 item 6, closed) -- called once per signing cycle,
+   * live, not cached, since this only runs roughly once a day per seller.
+   * `null` means "nothing discovered this cycle" (peer not currently
+   * announcing, a transient network hiccup, etc.), not an error -- the
+   * caller must always be able to fall back to `dailyAmountUsdc` alone, or
+   * bootstrap (day one, no prior signature at all) could never proceed.
+   *
+   * The discovered price is a hint, never a source of truth to sign blindly:
+   * it comes from the same seller being paid, so trusting it unconditionally
+   * would let a seller unilaterally raise what gets auto-signed just by
+   * changing its advertised catalog entry. The actual amount signed is
+   * always `min(discovered, dailyAmountUsdc)` -- `dailyAmountUsdc` remains
+   * the buyer's own hard ceiling regardless of what's discovered, mirroring
+   * how signPerRequestAuth caps a seller's claimed cost against the buyer's
+   * own estimate (buyer-payment-manager.ts's `_costTolerance`) rather than
+   * trusting the seller's number outright.
+   */
+  resolveDiscoveredPriceUsdc?: (sellerPeerId: string) => Promise<bigint | null>
 }
 
 /**
@@ -161,6 +191,44 @@ async function topUpAndReconcile(
 }
 
 /**
+ * Resolves the amount to actually sign for one day: the smaller of the
+ * buyer's own ceiling and whatever the seller currently advertises, per
+ * `DayPassSigningOptions.resolveDiscoveredPriceUsdc`'s own doc comment.
+ * Discovery failures (thrown errors, not just a `null` result) are treated
+ * the same as "nothing discovered" -- a network hiccup here must never
+ * block day-pass signing entirely, since bootstrap needs some amount to
+ * reserve/sign regardless.
+ */
+async function resolveDailyAmountUsdc(
+  options: DayPassSigningOptions,
+  sellerPeerId: string,
+): Promise<bigint> {
+  const ceiling = options.dailyAmountUsdc
+  if (!options.resolveDiscoveredPriceUsdc) return ceiling
+
+  let discovered: bigint | null
+  try {
+    discovered = await options.resolveDiscoveredPriceUsdc(sellerPeerId)
+  } catch (err) {
+    log(`day-pass price discovery failed for ${sellerPeerId.slice(0, 12)}...: ${err instanceof Error ? err.message : err} -- falling back to the configured ceiling (${ceiling})`)
+    return ceiling
+  }
+
+  if (discovered === null) {
+    log(`no day-pass price discovered for ${sellerPeerId.slice(0, 12)}... this cycle -- falling back to the configured ceiling (${ceiling})`)
+    return ceiling
+  }
+  if (discovered > ceiling) {
+    log(`seller ${sellerPeerId.slice(0, 12)}... advertises a day-pass price (${discovered}) above the configured ceiling (${ceiling}) -- capping at the ceiling`)
+    return ceiling
+  }
+  if (discovered < ceiling) {
+    log(`seller ${sellerPeerId.slice(0, 12)}... advertises a day-pass price (${discovered}) below the configured ceiling (${ceiling}) -- signing the lower, discovered price`)
+  }
+  return discovered
+}
+
+/**
  * Builds a `signDailyIfNeeded(sellerPeerId)` closure for a real running
  * buyer process. Generic across any router that needs day-pass-style
  * daily signing, not specific to any one router package -- `node` is a real
@@ -170,12 +238,16 @@ export function createSignDailyIfNeeded(
   node: DailySigningNode,
   options: DayPassSigningOptions,
 ): (sellerPeerId: string) => Promise<void> {
-  const flatFeeConfig: FlatFeeSigningConfig = {
-    dailyAmountUsdc: options.dailyAmountUsdc,
-    serviceId: options.serviceId,
-  }
-
   return async function signDailyIfNeeded(sellerPeerId: string): Promise<void> {
+    // Resolved once per cycle, not per call site below -- every amount used
+    // in this one signing pass (bootstrap reserve, the day's signature, any
+    // top-up) must agree, or a mid-cycle price change could size the
+    // reserve for one amount and sign a different one.
+    const dailyAmountUsdc = await resolveDailyAmountUsdc(options, sellerPeerId)
+    const flatFeeConfig: FlatFeeSigningConfig = {
+      dailyAmountUsdc,
+      serviceId: options.serviceId,
+    }
     const buyer = node.buyerPaymentManager
     if (!buyer) {
       log('daily signing skipped: payments are not configured on this node')
@@ -201,15 +273,15 @@ export function createSignDailyIfNeeded(
       // maxed at FIRST_SIGN_CAP -- settling 100% of a one-day deposit
       // clears the 85% top-up gate after a single day instead of two.
       log(`opening day-pass channel with routing peer ${sellerPeerId.slice(0, 12)}...`)
-      await buyer.authorizeSpending(sellerPeerId, paymentMux, 0n, options.dailyAmountUsdc)
+      await buyer.authorizeSpending(sellerPeerId, paymentMux, 0n, dailyAmountUsdc)
       await flushGap()
       buyer.configureFlatFeeSigning(sellerPeerId, flatFeeConfig)
-      const { payload } = await buyer.signCumulativeAuth(sellerPeerId, options.dailyAmountUsdc)
+      const { payload } = await buyer.signCumulativeAuth(sellerPeerId, dailyAmountUsdc)
       paymentMux.sendSpendingAuth(payload)
       await flushGap()
       // Prepare tomorrow's ceiling now (SS6.5's Day-1 row) -- nothing more
       // is owed today, so this is a top-up only, not a second signature.
-      await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
+      await topUpAndReconcile(node, sellerPeerId, dailyAmountUsdc)
       return
     }
 
@@ -236,7 +308,7 @@ export function createSignDailyIfNeeded(
     // so the preemptive top-up below only ever needs to cover one more day,
     // never a multi-day backlog.
     const daysSinceLastSign = Math.floor((Date.now() - existingSession.updatedAt) / MS_PER_DAY)
-    const trueTarget = currentCumulative + options.dailyAmountUsdc
+    const trueTarget = currentCumulative + dailyAmountUsdc
 
     let ceiling = buyer.getReserveCeiling(sellerPeerId)
     // The ceiling and the reserve's on-chain deadline are independent -- the
@@ -256,7 +328,7 @@ export function createSignDailyIfNeeded(
         reserveDeadlineExpiring = false
       } else {
         log(`ceiling too low to cover one more day for ${sellerPeerId.slice(0, 12)}... (need ${trueTarget}, have ${ceiling}, ${daysSinceLastSign} day(s) since last sign) -- topping up before signing`)
-        await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
+        await topUpAndReconcile(node, sellerPeerId, dailyAmountUsdc)
       }
       ceiling = buyer.getReserveCeiling(sellerPeerId)
       preemptiveTopUps += 1
@@ -273,7 +345,7 @@ export function createSignDailyIfNeeded(
     if (topUpNeeded) {
       // Prepare for next time -- not a re-sign; today's cumulative is
       // already on file above.
-      await topUpAndReconcile(node, sellerPeerId, options.dailyAmountUsdc)
+      await topUpAndReconcile(node, sellerPeerId, dailyAmountUsdc)
     }
   }
 }
