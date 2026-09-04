@@ -295,9 +295,12 @@ export function VprHomeView({ onSelectView }: Props) {
     // Real models only for the favorites/recommended/free-lead scoring below
     // -- none of that logic means anything for the synthetic Auto entry
     // (no price, no free-seller flag, not "recommended" by any real
-    // measure). It still always appears in the final list: selectedEntry
-    // (computed from the full, unfiltered catalog) gets hoisted to the front
-    // below whenever it's the current selection, Auto included.
+    // measure). Auto is reinserted explicitly below instead, so it's always
+    // an available option -- not just when it happens to already be the
+    // selection (real bug: with a real model like Opus selected, Auto never
+    // entered `top` at all via scoring, and the old "hoist selected to
+    // front" step only ever surfaces whatever IS selected, so Auto simply
+    // never appeared in the list).
     const textCatalog = snap.catalog.filter((entry) => entry.kind === 'text' && !isLevantoAutoEntry(entry));
     const favoriteEntries = selectFavoriteVprCatalog(textCatalog, favorites);
     const recommended = selectRecommendedVprCatalog(textCatalog)
@@ -317,13 +320,22 @@ export function VprHomeView({ onSelectView }: Props) {
       if (top.length >= DROPDOWN_MODEL_COUNT) break;
       if (!top.includes(entry)) top.push(entry);
     }
+    // Auto (when the router is enabled) is always a listed option, whether
+    // or not it's the current selection -- inserted right after scoring,
+    // before the "selected leads" step below, so a real selection still
+    // takes the lead slot over it.
+    const levantoAutoEntry = snap.catalog.find(isLevantoAutoEntry);
+    let result = top;
+    if (levantoAutoEntry && !result.includes(levantoAutoEntry)) {
+      result = [levantoAutoEntry, ...result.slice(0, DROPDOWN_MODEL_COUNT - 1)];
+    }
     // The selected model leads, matching the Models page — hoisted when it is
     // already listed, prepended when it isn't.
-    if (selectedEntry?.kind === 'text' && top[0] !== selectedEntry) {
-      const rest = top.filter((entry) => entry !== selectedEntry);
+    if (selectedEntry?.kind === 'text' && result[0] !== selectedEntry) {
+      const rest = result.filter((entry) => entry !== selectedEntry);
       return [selectedEntry, ...rest.slice(0, DROPDOWN_MODEL_COUNT - 1)];
     }
-    return top;
+    return result;
   }, [everFunded, favorites, selectedEntry, snap.catalog]);
 
   // Every listed model that remembers a pin names its seller, not just the
